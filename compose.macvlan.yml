@@ -1,0 +1,11 @@
+services:
+  depot-web:
+    networks:
+      control: {}
+      appliance:
+        ipv4_address: ${MACVLAN_IP}
+
+networks:
+  appliance:
+    name: ${MACVLAN_NETWORK}
+    external: true

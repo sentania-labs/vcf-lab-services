@@ -1,0 +1,16 @@
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates cron curl jq tzdata util-linux \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY sync/sync.sh /usr/local/bin/sync.sh
+COPY sync/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY sync/targets/ /usr/local/lib/vcf-services/targets/
+RUN chmod 0755 /usr/local/bin/sync.sh /usr/local/bin/entrypoint.sh \
+    /usr/local/lib/vcf-services/targets/*.sh
+
+WORKDIR /opt/vcfdt
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

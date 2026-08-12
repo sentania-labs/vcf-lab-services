@@ -1,0 +1,41 @@
+{
+	auto_https off
+	admin off
+}
+
+:443 {
+	tls /certs/server.crt /certs/server.key
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle /umds-patch-store/* {
+		root * /depot
+		header Accept-Ranges "bytes"
+		file_server browse
+	}
+
+	handle /admin {
+		basic_auth {
+			{$AUTH_USERNAME} {$AUTH_PASSWORD_HASH}
+		}
+		redir /admin/ 308
+	}
+
+	handle_path /admin/* {
+		basic_auth {
+			{$AUTH_USERNAME} {$AUTH_PASSWORD_HASH}
+		}
+		reverse_proxy admin-ui:8080
+	}
+
+	handle {
+		basic_auth {
+			{$AUTH_USERNAME} {$AUTH_PASSWORD_HASH}
+		}
+		root * /depot
+		header Accept-Ranges "bytes"
+		file_server browse
+	}
+}

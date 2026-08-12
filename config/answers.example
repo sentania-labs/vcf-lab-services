@@ -1,0 +1,31 @@
+# Copy this file outside the repository, fill in the required values, and run:
+# ./install.sh --answers-file /path/to/answers.env
+VCFDT_ARCHIVE=/path/to/vcf-download-tool-version.tar.gz
+PRODUCT_FQDN=vcf-services.example.com
+TZ=UTC
+STORAGE_MODE=local
+DEPOT_LOCAL_PATH=/srv/vcf-services/depot
+NFS_SERVER=nfs.example.com
+NFS_EXPORT=/exports/vcf-services-depot
+NFS_OPTIONS=nfsvers=4,rw,hard,timeo=600,retrans=2
+TLS_MODE=self-signed
+TLS_CERT_PATH=
+TLS_KEY_PATH=
+AUTH_USERNAME=vcf
+AUTH_PASSWORD=replace-with-a-strong-password
+NETWORK_MODE=host
+HTTPS_PORT=443
+MACVLAN_NETWORK=
+MACVLAN_IP=
+VCF_VERSION=9.1.0
+SKU=VCF
+SYNC_TARGETS=esx install upgrade patches
+CRON_SCHEDULE=0 3 * * 0
+CEIP=DISABLE
+ESX_MODE=download
+LOG_RETENTION=20
+VKR_MATCH=
+VKR_OS=
+DEPOT_ENDPOINT=dl.broadcom.com
+TOKEN_URL=https://eapi.broadcom.com/vcf/generateToken
+ACTIVATION_CODE=

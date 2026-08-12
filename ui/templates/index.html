@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VCF Services</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2027; --line:#2b3540; --fg:#d8e0e8; --muted:#8a97a5;
+          --accent:#4a9eff; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex;
+           align-items:baseline; gap:12px; }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--muted); font-size:13px; }
+  main { max-width:1100px; margin:0 auto; padding:20px 24px; display:grid; gap:18px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
+  .panel h2 { margin:0 0 12px; font-size:14px; text-transform:uppercase;
+              letter-spacing:.05em; color:var(--muted); }
+  .row { display:flex; flex-wrap:wrap; gap:14px; align-items:center; }
+  label.tgt { display:inline-flex; align-items:center; gap:6px; background:#222c36;
+              border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px;
+           padding:9px 18px; font-weight:600; cursor:pointer; }
+  button:disabled { background:#39434e; color:var(--muted); cursor:not-allowed; }
+  button.secondary { background:#2b3540; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+  .stat { background:#222c36; border-radius:6px; padding:10px 12px; min-width:0; }
+  .stat .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .stat .v { font-size:15px; margin-top:2px; overflow-wrap:anywhere; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pill.ok { background:rgba(63,185,80,.15); color:var(--ok); }
+  .pill.run { background:rgba(74,158,255,.15); color:var(--accent); }
+  .pill.err { background:rgba(248,81,73,.15); color:var(--err); }
+  .pill.idle { background:#2b3540; color:var(--muted); }
+  .notice { border:1px solid var(--warn); color:#f2cc60; background:rgba(210,153,34,.1);
+            border-radius:6px; padding:12px; margin-bottom:14px; }
+  pre#log { background:#0b0f14; border:1px solid var(--line); border-radius:6px;
+            padding:12px; height:280px; overflow:auto; margin:0; white-space:pre-wrap;
+            font-size:12.5px; color:#b9c4cf; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--panel); }
+  td.ver { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; }
+  .tablewrap { max-height:420px; overflow:auto; }
+  .upd { color:var(--warn); font-weight:600; }
+  .has { color:var(--ok); }
+  .muted { color:var(--muted); }
+  #flash { min-height:18px; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>VCF Services</h1>
+  <span class="sub">Depot administration</span>
+</header>
+<main>
+  <section class="panel">
+    <div id="arming" class="notice" hidden></div>
+    <h2>Sync now</h2>
+    <div class="row" style="margin-bottom:12px">
+      {% for target in targets %}
+      <label class="tgt"><input type="checkbox" class="tgt-cb" value="{{target}}"> {{target}}</label>
+      {% endfor %}
+    </div>
+    <div class="row">
+      <button id="syncBtn">Sync selected</button>
+      <button id="refreshRemote" class="secondary">Check available versions</button>
+      <span id="flash" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Status</h2>
+    <div class="grid">
+      <div class="stat"><div class="k">State</div><div class="v" id="st-state">...</div></div>
+      <div class="stat"><div class="k">Current target</div><div class="v" id="st-current">...</div></div>
+      <div class="stat"><div class="k">Started</div><div class="v" id="st-started">...</div></div>
+      <div class="stat"><div class="k">Schedule</div><div class="v" id="st-cron">...</div></div>
+      <div class="stat"><div class="k">Next run</div><div class="v" id="st-next">...</div></div>
+      <div class="stat"><div class="k">VCF version filter</div><div class="v" id="st-ver">...</div></div>
+      <div class="stat"><div class="k">VCFDT version</div><div class="v" id="st-tool">...</div></div>
+    </div>
+    <h2 style="margin-top:16px">Per-target last sync</h2>
+    <div class="grid" id="lastruns"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Live log</h2>
+    <pre id="log">(no run log yet)</pre>
+  </section>
+
+  <section class="panel">
+    <h2>Versions <span class="muted" id="rem-meta"></span></h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Component</th><th>Available</th><th>Type</th><th>Date</th><th>Size</th><th>In depot?</th></tr></thead>
+        <tbody id="vers"><tr><td colspan="6" class="muted">Check available versions when the sync engine is armed.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const byId = id => document.getElementById(id);
+const escapeHtml = text => { const node = document.createElement('div'); node.textContent = text ?? ''; return node.innerHTML; };
+const fmt = value => value ? new Date(value).toLocaleString() : 'not available';
+
+async function poll() {
+  try {
+    const status = await (await fetch('api/status')).json();
+    const running = status.running;
+    const armed = status.armed;
+    byId('st-state').innerHTML = running
+      ? '<span class="pill run">running</span>'
+      : armed ? '<span class="pill ok">armed, idle</span>' : '<span class="pill err">not armed</span>';
+    byId('st-current').textContent = status.currentTarget || 'none';
+    byId('st-started').textContent = fmt(status.startedAt);
+    byId('st-cron').textContent = status.cron || 'not configured';
+    byId('st-next').textContent = fmt(status.nextRun);
+    byId('st-ver').textContent = status.vcfVersion || 'not configured';
+    byId('st-tool').textContent = status.vcfdtVersion || 'unknown';
+    byId('arming').hidden = armed;
+    byId('arming').textContent = armed ? '' : `Not armed: activation code missing. ${status.armingInstructions}`;
+    const lastRun = status.lastRun || {};
+    byId('lastruns').innerHTML = status.targets.map(target => {
+      const result = lastRun[target];
+      const pill = !result ? '<span class="pill idle">never</span>'
+        : result.status === 'OK' ? '<span class="pill ok">ok</span>'
+        : `<span class="pill err">${escapeHtml(result.status)}</span>`;
+      return `<div class="stat"><div class="k">${escapeHtml(target)}</div><div class="v">${pill}<br>
+              <span class="muted" style="font-size:12px">${result ? fmt(result.finishedAt) : ''}</span></div></div>`;
+    }).join('');
+    byId('syncBtn').disabled = running || !armed;
+    byId('refreshRemote').disabled = running || !armed;
+    byId('syncBtn').textContent = running ? 'Sync running' : 'Sync selected';
+    const log = await (await fetch('api/log')).json();
+    if (log.log) {
+      const element = byId('log');
+      const atBottom = element.scrollTop + element.clientHeight >= element.scrollHeight - 30;
+      element.textContent = log.log;
+      if (atBottom) element.scrollTop = element.scrollHeight;
+    }
+  } catch (_error) {
+    byId('flash').textContent = 'Status temporarily unavailable';
+  }
+}
+
+async function loadRemote(refresh) {
+  byId('rem-meta').textContent = 'loading';
+  try {
+    const response = await fetch('api/versions/remote' + (refresh ? '?refresh=1' : ''));
+    const result = await response.json();
+    if (result.error) { byId('rem-meta').textContent = result.error; return; }
+    const rows = (result.components || []).sort((left, right) => left.component.localeCompare(right.component));
+    byId('vers').innerHTML = rows.length ? rows.map(component => `
+      <tr><td>${escapeHtml(component.name || component.component)}</td>
+          <td class="ver">${escapeHtml(component.version)}</td>
+          <td>${escapeHtml(component.type)}</td><td>${escapeHtml(component.date)}</td><td>${escapeHtml(component.size)}</td>
+          <td>${component.present ? '<span class="has">present</span>' : '<span class="upd">available</span>'}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="muted">No bundles returned</td></tr>';
+    const missing = rows.filter(component => !component.present).length;
+    byId('rem-meta').textContent = `${rows.length} bundles, ${missing} not in depot, fetched ${fmt(new Date(result.fetchedAt * 1000))}`;
+  } catch (_error) {
+    byId('rem-meta').textContent = 'Lookup failed';
+  }
+}
+
+byId('syncBtn').onclick = async () => {
+  const targets = [...document.querySelectorAll('.tgt-cb:checked')].map(box => box.value);
+  if (!targets.length) { byId('flash').textContent = 'Select at least one target'; return; }
+  byId('flash').textContent = 'Starting';
+  const response = await fetch('api/sync', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({targets})});
+  const result = await response.json();
+  byId('flash').textContent = response.ok ? `Started: ${targets.join(', ')}` : (result.error || 'Failed');
+  poll();
+};
+byId('refreshRemote').onclick = () => loadRemote(true);
+
+poll();
+setInterval(poll, 5000);
+</script>
+</body>
+</html>

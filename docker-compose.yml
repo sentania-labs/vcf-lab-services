@@ -1,0 +1,124 @@
+name: vcf-services
+
+services:
+  depot-web:
+    container_name: vcf-services-depot-web
+    image: caddy:2.10.0-alpine
+    restart: unless-stopped
+    init: true
+    env_file:
+      - config/settings.env
+      - secrets/caddy.env
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - depot_store:/depot:ro
+      - ./secrets/tls:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - control
+    depends_on:
+      admin-ui:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  depot-sync:
+    container_name: vcf-services-sync
+    image: vcf-services-sync:local
+    restart: unless-stopped
+    env_file:
+      - config/settings.env
+    environment:
+      STATE_DIR: /state
+      DEPOT_DIR: /depot
+      AUTH_FILE: /run/secrets/activation-code.txt
+    volumes:
+      - depot_store:/depot:rw
+      - vcfdt_state:/root/.local/share/vmware/vdt
+      - sync_state:/state:rw
+      - ./config/settings.env:/etc/vcf-services/settings.env:ro
+      - ./secrets:/run/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /state/state.json && kill -0 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  admin-ui:
+    container_name: vcf-services-ui
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: vcf-services-ui:local
+    restart: unless-stopped
+    depends_on:
+      dockerproxy:
+        condition: service_healthy
+      depot-sync:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://dockerproxy:2375
+      SYNC_CONTAINER: vcf-services-sync
+      DEPOT_DIR: /depot
+      STATE_DIR: /state
+      SETTINGS_FILE: /config/settings.env
+    volumes:
+      - depot_store:/depot:ro
+      - sync_state:/state:ro
+      - ./config/settings.env:/config/settings.env:rw
+    networks:
+      - control
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  dockerproxy:
+    container_name: vcf-services-dockerproxy
+    image: tecnativa/docker-socket-proxy:0.2.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      EXEC: 1
+      POST: 1
+      PING: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - control
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+networks:
+  control:
+    driver: bridge
+
+volumes:
+  depot_store:
+    name: ${DEPOT_VOLUME_NAME:-vcf-services-depot-store}
+    driver: local
+    driver_opts:
+      type: ${DEPOT_VOLUME_TYPE:-none}
+      o: ${DEPOT_VOLUME_OPTIONS:-bind}
+      device: ${DEPOT_VOLUME_DEVICE:-/var/lib/vcf-services/depot}
+  vcfdt_state:
+    name: vcf-services-vcfdt-state
+    external: true
+  sync_state:
+    name: vcf-services-sync-state
+  caddy_data:
+    name: vcf-services-caddy-data
+  caddy_config:
+    name: vcf-services-caddy-config
