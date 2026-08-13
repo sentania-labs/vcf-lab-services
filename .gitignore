@@ -3,6 +3,7 @@
 answers.env
 *.answers.env
 config/settings.env
+config/settings.env.*
 secrets/
 certs/
 data/

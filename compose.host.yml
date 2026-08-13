@@ -1,4 +1,0 @@
-services:
-  depot-web:
-    ports:
-      - "${HTTPS_PORT:-443}:443"

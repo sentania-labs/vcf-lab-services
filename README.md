@@ -32,8 +32,9 @@ cd /path/to/your/fresh-clone
 
 Every prompt shows its default. The installer validates the host and vendor
 archive, builds the local sync image, preserves the Software Depot ID in a
-dedicated Docker volume, configures storage and TLS, starts the four services,
-and performs live HTTPS checks. Use `./install.sh --answers-file answers.env`
+dedicated Docker volume, configures storage and TLS, generates the Redis job
+bus password, starts the four services (depot web, sync, admin console,
+Redis), and performs live HTTPS checks plus a Redis exposure check. Use `./install.sh --answers-file answers.env`
 for an unattended run. See [config/answers.example](config/answers.example) for
 the supported keys. Keep completed answer files outside the repository with
 mode `0600` because they contain the installation password.
@@ -73,9 +74,17 @@ and only the newest configured number of run logs are retained. The depot is
 cumulative and this product does not prune VCFDT-managed content.
 
 The admin console displays current state, live logs, schedule and next run,
-per-target results, and available versions. It triggers sync using container
-inspect and exec through a restricted Docker socket proxy. The GUI never mounts
-the raw Docker socket.
+per-target results, and available versions. It publishes sync requests to a
+password-protected Redis job bus that only the internal Compose network can
+reach; the sync service consumes those requests and runs `sync.sh` locally.
+No container mounts the Docker socket and the console has no Docker client.
+The bus contract is documented in [docs/redis-contract.md](docs/redis-contract.md).
+
+Settings hot-reload without recreating containers. The sync scheduler re-reads
+`config/settings.env` every cycle, so schedule changes take effect within a
+minute, and each run re-reads all sync settings. The only rebuild exception is
+a VCFDT self-upgrade, which is performed by rerunning `install.sh`, never by
+the GUI. HTTPS is served on a published host port, 443 by default.
 
 ## TLS trust
 

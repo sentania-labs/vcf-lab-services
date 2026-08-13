@@ -7,8 +7,9 @@ services:
     restart: unless-stopped
     init: true
     env_file:
-      - config/settings.env
       - secrets/caddy.env
+    ports:
+      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - depot_store:/depot:ro
@@ -31,18 +32,25 @@ services:
     container_name: vcf-services-sync
     image: vcf-services-sync:local
     restart: unless-stopped
-    env_file:
-      - config/settings.env
     environment:
+      SETTINGS_FILE: /etc/vcf-services/settings.env
       STATE_DIR: /state
       DEPOT_DIR: /depot
       AUTH_FILE: /run/secrets/activation-code.txt
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD_FILE: /run/secrets/redis/password
     volumes:
       - depot_store:/depot:rw
       - vcfdt_state:/root/.local/share/vmware/vdt
       - sync_state:/state:rw
-      - ./config/settings.env:/etc/vcf-services/settings.env:ro
+      - ./config:/etc/vcf-services:ro
       - ./secrets:/run/secrets:ro
+    networks:
+      - control
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "test -s /state/state.json && kill -0 1"]
       interval: 10s
@@ -58,20 +66,22 @@ services:
     image: vcf-services-ui:local
     restart: unless-stopped
     depends_on:
-      dockerproxy:
+      redis:
         condition: service_healthy
       depot-sync:
         condition: service_healthy
     environment:
-      DOCKER_HOST: tcp://dockerproxy:2375
-      SYNC_CONTAINER: vcf-services-sync
       DEPOT_DIR: /depot
       STATE_DIR: /state
       SETTINGS_FILE: /config/settings.env
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD_FILE: /run/redis/password
     volumes:
       - depot_store:/depot:ro
       - sync_state:/state:ro
-      - ./config/settings.env:/config/settings.env:rw
+      - ./config:/config
+      - ./secrets/redis:/run/redis:ro
     networks:
       - control
     healthcheck:
@@ -81,21 +91,17 @@ services:
       retries: 6
       start_period: 10s
 
-  dockerproxy:
-    container_name: vcf-services-dockerproxy
-    image: tecnativa/docker-socket-proxy:0.2.0
+  redis:
+    container_name: vcf-services-redis
+    image: redis:7.4-alpine
     restart: unless-stopped
-    environment:
-      CONTAINERS: 1
-      EXEC: 1
-      POST: 1
-      PING: 1
+    command: ["redis-server", "/etc/redis/redis.conf"]
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./secrets/redis:/etc/redis:ro
     networks:
       - control
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /etc/redis/password)\" redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 6

@@ -50,7 +50,7 @@ done
 declare -A answers=()
 allowed_answer() {
 	case "$1" in
-		VCFDT_ARCHIVE|PRODUCT_FQDN|TZ|STORAGE_MODE|DEPOT_LOCAL_PATH|NFS_SERVER|NFS_EXPORT|NFS_OPTIONS|TLS_MODE|TLS_CERT_PATH|TLS_KEY_PATH|AUTH_USERNAME|AUTH_PASSWORD|NETWORK_MODE|HTTPS_PORT|MACVLAN_NETWORK|MACVLAN_IP|VCF_VERSION|SKU|SYNC_TARGETS|CRON_SCHEDULE|CEIP|ESX_MODE|LOG_RETENTION|VKR_MATCH|VKR_OS|DEPOT_ENDPOINT|TOKEN_URL|ACTIVATION_CODE) return 0 ;;
+		VCFDT_ARCHIVE|PRODUCT_FQDN|TZ|STORAGE_MODE|DEPOT_LOCAL_PATH|NFS_SERVER|NFS_EXPORT|NFS_OPTIONS|TLS_MODE|TLS_CERT_PATH|TLS_KEY_PATH|AUTH_USERNAME|AUTH_PASSWORD|HTTPS_PORT|VCF_VERSION|SKU|SYNC_TARGETS|CRON_SCHEDULE|CEIP|ESX_MODE|LOG_RETENTION|VKR_MATCH|VKR_OS|DEPOT_ENDPOINT|TOKEN_URL|ACTIVATION_CODE) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -195,25 +195,9 @@ if [ -z "$answers_file" ]; then
 	[ "$auth_password" = "$password_confirm" ] || { echo "ERROR: passwords do not match" >&2; exit 2; }
 fi
 
-ask NETWORK_MODE "Network mode (host or macvlan)" "host"
-network_mode="${REPLY_VALUE,,}"
-[[ "$network_mode" == host || "$network_mode" == macvlan ]] || { echo "ERROR: network mode must be host or macvlan" >&2; exit 2; }
-https_port=443
-macvlan_network=""
-macvlan_ip=""
-if [ "$network_mode" = host ]; then
-	ask HTTPS_PORT "Published HTTPS port" "443"
-	https_port="$REPLY_VALUE"
-	[[ "$https_port" =~ ^[0-9]+$ ]] && [ "$https_port" -ge 1 ] && [ "$https_port" -le 65535 ] || { echo "ERROR: invalid HTTPS port" >&2; exit 2; }
-else
-	echo "Macvlan is advanced. The Docker network must already exist and the address must be reserved."
-	ask MACVLAN_NETWORK "Existing Docker macvlan network" "vcf-services-macvlan"
-	macvlan_network="$REPLY_VALUE"
-	ask MACVLAN_IP "Reserved static IP" "192.0.2.10"
-	macvlan_ip="$REPLY_VALUE"
-	[[ "$macvlan_network" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "ERROR: invalid Docker network name" >&2; exit 2; }
-	[[ "$macvlan_ip" =~ ^[0-9A-Fa-f:.]+$ ]] || { echo "ERROR: invalid static IP" >&2; exit 2; }
-fi
+ask HTTPS_PORT "Published HTTPS port" "443"
+https_port="$REPLY_VALUE"
+[[ "$https_port" =~ ^[0-9]+$ ]] && [ "$https_port" -ge 1 ] && [ "$https_port" -le 65535 ] || { echo "ERROR: invalid HTTPS port" >&2; exit 2; }
 
 ask VCF_VERSION "VCF version filter" "9.1.0"
 vcf_version="$REPLY_VALUE"
@@ -267,9 +251,6 @@ docker compose version >/dev/null 2>&1 || { echo "ERROR: Docker Compose v2 is re
 if [ "$storage_mode" = nfs ]; then
 	command -v mount.nfs >/dev/null 2>&1 || { echo "ERROR: install nfs-common before using NFS storage" >&2; exit 1; }
 fi
-if [ "$network_mode" = macvlan ]; then
-	docker network inspect "$macvlan_network" >/dev/null 2>&1 || { echo "ERROR: Docker macvlan network does not exist: $macvlan_network" >&2; exit 1; }
-fi
 outbound_status="$(curl -sSIL --connect-timeout 10 --max-time 20 -o /dev/null -w '%{http_code}' "https://$depot_endpoint" || true)"
 if [ "$outbound_status" = 000 ]; then
 	echo "ERROR: outbound HTTPS check failed for $depot_endpoint" >&2
@@ -293,7 +274,7 @@ else
 		--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$nfs_export" \
 		"$preflight_volume" >/dev/null
 	if ! available_kb="$(docker run --rm -v "$preflight_volume:/depot:ro" alpine:3.20 \
-		sh -c "df -Pk /depot | awk 'NR==2 {print \\$4}'")"; then
+		sh -c "df -Pk /depot | awk 'NR==2 {print \$4}'")"; then
 		docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
 		echo "ERROR: NFS export could not be mounted" >&2
 		exit 1
@@ -358,24 +339,14 @@ write_setting DEPOT_LOCAL_PATH "$depot_local_path"
 write_setting NFS_SERVER "$nfs_server"
 write_setting NFS_EXPORT "$nfs_export"
 write_setting NFS_OPTIONS "$nfs_options"
-write_setting NETWORK_MODE "$network_mode"
 write_setting HTTPS_PORT "$https_port"
-write_setting MACVLAN_NETWORK "$macvlan_network"
-write_setting MACVLAN_IP "$macvlan_ip"
 write_setting VCFDT_VERSION "$vcfdt_version"
 chmod 0640 "$settings_tmp"
 mv "$settings_tmp" "$project_dir/config/settings.env"
 
 env_tmp="$(mktemp "$project_dir/.env.XXXXXX")"
 {
-	if [ "$network_mode" = host ]; then
-		printf 'COMPOSE_FILE=docker-compose.yml:compose.host.yml\n'
-	else
-		printf 'COMPOSE_FILE=docker-compose.yml:compose.macvlan.yml\n'
-	fi
 	printf 'HTTPS_PORT=%s\n' "$https_port"
-	printf 'MACVLAN_NETWORK=%s\n' "$macvlan_network"
-	printf 'MACVLAN_IP=%s\n' "$macvlan_ip"
 	printf 'DEPOT_VOLUME_NAME=%s\n' "$depot_volume_name"
 	if [ "$storage_mode" = local ]; then
 		printf 'DEPOT_VOLUME_TYPE=none\n'
@@ -453,7 +424,22 @@ elif [ ! -s "$project_dir/secrets/activation-code.txt" ]; then
 	echo "Sync will start cleanly dormant because no activation code is present."
 fi
 
-password_hash="$(docker run --rm caddy:2.10.0-alpine caddy hash-password --plaintext "$auth_password")"
+echo "Preparing the Redis job bus credential"
+mkdir -p "$project_dir/secrets/redis"
+chmod 0700 "$project_dir/secrets/redis"
+if [ ! -s "$project_dir/secrets/redis/password" ]; then
+	openssl rand -hex 32 > "$project_dir/secrets/redis/password"
+fi
+chmod 0600 "$project_dir/secrets/redis/password"
+{
+	printf 'requirepass %s\n' "$(cat "$project_dir/secrets/redis/password")"
+	printf 'protected-mode yes\n'
+	printf 'save ""\n'
+	printf 'appendonly no\n'
+} > "$project_dir/secrets/redis/redis.conf"
+chmod 0600 "$project_dir/secrets/redis/redis.conf"
+
+password_hash="$(printf '%s' "$auth_password" | docker run -i --rm caddy:2.10.0-alpine caddy hash-password)"
 caddy_tmp="$(mktemp "$project_dir/secrets/caddy.env.XXXXXX")"
 printf 'AUTH_USERNAME=%s\n' "$auth_username" > "$caddy_tmp"
 printf "AUTH_PASSWORD_HASH='%s'\n" "$password_hash" >> "$caddy_tmp"
@@ -464,7 +450,7 @@ cd "$project_dir"
 docker compose config >/dev/null
 docker compose up -d --build
 
-containers=(vcf-services-depot-web vcf-services-sync vcf-services-ui vcf-services-dockerproxy)
+containers=(vcf-services-depot-web vcf-services-sync vcf-services-ui vcf-services-redis)
 deadline=$((SECONDS + 120))
 while [ "$SECONDS" -lt "$deadline" ]; do
 	all_healthy=true
@@ -482,13 +468,17 @@ if [ "${all_healthy:-false}" != true ]; then
 	exit 1
 fi
 
-if [ "$network_mode" = host ]; then
-	verify_address=127.0.0.1
-	verify_port="$https_port"
-else
-	verify_address="$macvlan_ip"
-	verify_port=443
+if [ -n "$(docker port vcf-services-redis 2>/dev/null)" ]; then
+	echo "ERROR: the Redis job bus must not publish a host port" >&2
+	exit 1
 fi
+if docker exec vcf-services-redis redis-cli ping 2>/dev/null | grep -q PONG; then
+	echo "ERROR: the Redis job bus accepted an unauthenticated ping" >&2
+	exit 1
+fi
+
+verify_address=127.0.0.1
+verify_port="$https_port"
 resolve_arg="$product_fqdn:$verify_port:$verify_address"
 base_url="https://$product_fqdn:$verify_port"
 curl -kfsS --resolve "$resolve_arg" "$base_url/healthz" | grep -qx ok

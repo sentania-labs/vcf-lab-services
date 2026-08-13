@@ -1,4 +1,4 @@
 flask==3.0.3
-docker==7.1.0
+redis==5.0.8
 croniter==2.0.5
 gunicorn==22.0.0

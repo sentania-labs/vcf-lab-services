@@ -2,7 +2,9 @@
 """VCF Services admin console.
 
 The sync container remains the only depot writer. This app reads config and
-state files, then triggers selected runs through a restricted Docker API proxy.
+state files and exchanges jobs with the sync service over the password
+protected Redis bus documented in docs/redis-contract.md. It never talks to
+the Docker daemon.
 """
 
 import json
@@ -12,16 +14,20 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import docker
+import redis as redis_lib
 from croniter import croniter
 from flask import Flask, jsonify, render_template, request
 
-SYNC_CONTAINER = os.environ.get("SYNC_CONTAINER", "vcf-services-sync")
 DEPOT = Path(os.environ.get("DEPOT_DIR", "/depot"))
 STATE = Path(os.environ.get("STATE_DIR", "/state"))
 SETTINGS = Path(os.environ.get("SETTINGS_FILE", "/config/settings.env"))
-VCFDT = "/opt/vcfdt/bin/vcf-download-tool"
-AUTH_FILE = "/run/secrets/activation-code.txt"
+REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_PASSWORD_FILE = os.environ.get("REDIS_PASSWORD_FILE", "/run/redis/password")
+REQUEST_QUEUE = "vcf-services:sync:requests"
+STATUS_KEY = "vcf-services:sync:status"
+LOG_KEY = "vcf-services:sync:log"
+VERSIONS_KEY = "vcf-services:sync:versions"
 VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr"]
 BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
 ARMING_INSTRUCTIONS = (
@@ -30,12 +36,34 @@ ARMING_INSTRUCTIONS = (
 )
 
 app = Flask(__name__)
-_remote_cache = {"ts": 0.0, "rows": None}
 _local_cache = {"ts": 0.0, "builds": None}
 
 
-def _client():
-    return docker.from_env()
+def _redis():
+    password = None
+    try:
+        password = Path(REDIS_PASSWORD_FILE).read_text().strip() or None
+    except OSError:
+        pass
+    return redis_lib.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        password=password,
+        socket_timeout=5,
+        socket_connect_timeout=5,
+        decode_responses=True,
+    )
+
+
+def _bus_get(key):
+    try:
+        return _redis().get(key)
+    except (redis_lib.RedisError, OSError):
+        return None
+
+
+def _publish_request(payload):
+    _redis().lpush(REQUEST_QUEUE, json.dumps(payload))
 
 
 def _settings():
@@ -53,6 +81,12 @@ def _settings():
 
 
 def _state():
+    raw = _bus_get(STATUS_KEY)
+    if raw:
+        try:
+            return json.loads(raw)
+        except ValueError:
+            pass
     try:
         return json.loads((STATE / "state.json").read_text())
     except (OSError, ValueError):
@@ -104,30 +138,11 @@ def _parse_binaries(text):
     return rows
 
 
-def _fetch_remote():
-    state = _state()
-    if not state.get("armed", False):
-        raise RuntimeError(f"not armed: activation code missing. {ARMING_INSTRUCTIONS}")
-    settings = _settings()
-    version = settings.get("VCF_VERSION", "9.1.0")
-    container = _client().containers.get(SYNC_CONTAINER)
-    result = container.exec_run(
-        [
-            VCFDT,
-            "binaries",
-            "list",
-            f"--vcf-version={version}",
-            "--type=UPGRADE",
-            f"--depot-download-activation-code-file={AUTH_FILE}",
-            "--ceip=DISABLE",
-        ],
-        workdir="/opt/vcfdt",
-    )
-    output = result.output
-    text = output.decode(errors="replace") if isinstance(output, bytes) else str(output)
-    if result.exit_code:
-        raise RuntimeError(f"VCFDT exited with status {result.exit_code}")
-    return _parse_binaries(text)
+def _epoch(iso_value):
+    try:
+        return datetime.fromisoformat(str(iso_value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
 @app.get("/healthz")
@@ -172,11 +187,15 @@ def status():
 
 @app.get("/api/log")
 def log():
-    try:
-        lines = (STATE / "latest.log").read_text(errors="replace").splitlines()[-500:]
-    except OSError:
-        lines = []
-    return jsonify({"log": "\n".join(lines)})
+    text = _bus_get(LOG_KEY)
+    if text is None:
+        try:
+            text = "\n".join(
+                (STATE / "latest.log").read_text(errors="replace").splitlines()[-500:]
+            )
+        except OSError:
+            text = ""
+    return jsonify({"log": text})
 
 
 @app.get("/api/versions/local")
@@ -186,19 +205,41 @@ def versions_local():
 
 @app.get("/api/versions/remote")
 def versions_remote():
-    now = time.time()
-    if (
-        request.args.get("refresh") == "1"
-        or _remote_cache["rows"] is None
-        or now - _remote_cache["ts"] > 900
-    ):
+    doc = None
+    raw = _bus_get(VERSIONS_KEY)
+    if raw:
         try:
-            _remote_cache.update(ts=now, rows=_fetch_remote())
-        except (docker.errors.DockerException, RuntimeError) as exc:
-            return jsonify({"error": str(exc), "components": []}), 502
+            doc = json.loads(raw)
+        except ValueError:
+            doc = None
+    refresh = request.args.get("refresh") == "1" or doc is None
+    if refresh:
+        try:
+            _publish_request(
+                {
+                    "kind": "versions",
+                    "requestedAt": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except (redis_lib.RedisError, OSError) as exc:
+            if doc is None:
+                return jsonify({"error": f"job bus unavailable: {exc}", "components": []}), 502
+    if doc is None:
+        return jsonify({"components": [], "pending": True}), 202
+    if doc.get("error"):
+        return jsonify({"error": doc["error"], "components": []}), 502
     local = _scan_local_builds()
-    rows = [{**row, "present": row.get("build") in local} for row in _remote_cache["rows"]]
-    return jsonify({"components": rows, "fetchedAt": _remote_cache["ts"]})
+    rows = [
+        {**row, "present": row.get("build") in local}
+        for row in _parse_binaries(doc.get("output", ""))
+    ]
+    return jsonify(
+        {
+            "components": rows,
+            "fetchedAt": _epoch(doc.get("fetchedAt")),
+            "refreshRequested": refresh,
+        }
+    )
 
 
 @app.post("/api/sync")
@@ -213,11 +254,16 @@ def sync():
     if state.get("running"):
         return jsonify({"error": "a sync is already running"}), 409
     try:
-        container = _client().containers.get(SYNC_CONTAINER)
-        container.exec_run(["/usr/local/bin/sync.sh", *targets], detach=True)
-    except docker.errors.DockerException as exc:
-        return jsonify({"error": f"could not start sync: {exc}"}), 502
-    return jsonify({"triggered": True, "targets": targets}), 202
+        _publish_request(
+            {
+                "kind": "sync",
+                "targets": targets,
+                "requestedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except (redis_lib.RedisError, OSError) as exc:
+        return jsonify({"error": f"could not publish sync request: {exc}"}), 502
+    return jsonify({"published": True, "targets": targets}), 202
 
 
 if __name__ == "__main__":

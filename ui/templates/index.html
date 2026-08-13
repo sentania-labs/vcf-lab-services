@@ -152,6 +152,7 @@ async function loadRemote(refresh) {
     const response = await fetch('api/versions/remote' + (refresh ? '?refresh=1' : ''));
     const result = await response.json();
     if (result.error) { byId('rem-meta').textContent = result.error; return; }
+    if (result.pending) { byId('rem-meta').textContent = 'Refresh requested, check again shortly'; return; }
     const rows = (result.components || []).sort((left, right) => left.component.localeCompare(right.component));
     byId('vers').innerHTML = rows.length ? rows.map(component => `
       <tr><td>${escapeHtml(component.name || component.component)}</td>

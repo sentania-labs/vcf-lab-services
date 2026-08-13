@@ -22,13 +22,36 @@ fi
 : "${LOG_RETENTION:=20}"
 : "${VKR_MATCH:=}"
 : "${VKR_OS:=}"
+: "${REDIS_HOST:=}"
+: "${REDIS_PORT:=6379}"
+: "${REDIS_PASSWORD_FILE:=/run/secrets/redis/password}"
 
+status_key="vcf-services:sync:status"
+log_key="vcf-services:sync:log"
 state_file="$STATE_DIR/state.json"
 tool="$TOOL_ROOT/bin/vcf-download-tool"
 mkdir -p "$STATE_DIR"
 
 now() { date -u +%FT%TZ; }
 log() { echo "[sync $(now)] $*"; }
+
+redis_cmd() {
+	[ -n "$REDIS_HOST" ] || return 1
+	command -v redis-cli >/dev/null 2>&1 || return 1
+	local auth=""
+	if [ -s "$REDIS_PASSWORD_FILE" ]; then auth="$(cat "$REDIS_PASSWORD_FILE")"; fi
+	REDISCLI_AUTH="$auth" redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" 2>/dev/null
+}
+
+publish_status() {
+	[ -s "$state_file" ] || return 0
+	redis_cmd -x SET "$status_key" < "$state_file" >/dev/null || true
+}
+
+publish_log_tail() {
+	[ -s "${run_log:-}" ] || return 0
+	tail -n 500 "$run_log" | redis_cmd -x SET "$log_key" >/dev/null || true
+}
 
 write_state() {
 	local filter="$1"
@@ -38,6 +61,7 @@ write_state() {
 	[ -s "$state_file" ] || printf '{}\n' > "$state_file"
 	if jq "$@" "$filter" "$state_file" > "$tmp" 2>/dev/null; then
 		mv "$tmp" "$state_file"
+		publish_status
 	else
 		rm -f "$tmp"
 	fi
@@ -70,6 +94,25 @@ run_log="$STATE_DIR/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
 exec > >(tee -a "$run_log") 2>&1
 ln -sfn "$(basename "$run_log")" "$STATE_DIR/latest.log"
 
+log_publisher_pid=""
+if [ -n "$REDIS_HOST" ]; then
+	(
+		while :; do
+			publish_log_tail
+			sleep 2
+		done
+	) &
+	log_publisher_pid=$!
+fi
+stop_log_publisher() {
+	if [ -n "$log_publisher_pid" ]; then
+		kill "$log_publisher_pid" 2>/dev/null || true
+		log_publisher_pid=""
+	fi
+	publish_log_tail
+}
+trap stop_log_publisher EXIT
+
 prune_logs() {
 	if [[ "$LOG_RETENTION" =~ ^[1-9][0-9]*$ ]]; then
 		mapfile -t old_logs < <(find "$STATE_DIR" -maxdepth 1 -type f -name 'run-*.log' -printf '%T@ %p\n' \
@@ -100,6 +143,7 @@ write_state '. + {running:true, armed:true, currentTarget:null, startedAt:$t, ta
 
 finish_state() {
 	write_state '. + {running:false, currentTarget:null, finishedAt:$t}' --arg t "$(now)"
+	stop_log_publisher
 }
 trap finish_state EXIT
 trap 'exit 130' INT
