@@ -439,7 +439,7 @@ chmod 0600 "$project_dir/secrets/redis/password"
 } > "$project_dir/secrets/redis/redis.conf"
 chmod 0600 "$project_dir/secrets/redis/redis.conf"
 
-password_hash="$(printf '%s' "$auth_password" | docker run -i --rm caddy:2.10.0-alpine caddy hash-password)"
+password_hash="$(printf '%s\n' "$auth_password" | docker run -i --rm caddy:2.10.0-alpine caddy hash-password)"
 caddy_tmp="$(mktemp "$project_dir/secrets/caddy.env.XXXXXX")"
 printf 'AUTH_USERNAME=%s\n' "$auth_username" > "$caddy_tmp"
 printf "AUTH_PASSWORD_HASH='%s'\n" "$password_hash" >> "$caddy_tmp"
@@ -449,6 +449,9 @@ mv "$caddy_tmp" "$project_dir/secrets/caddy.env"
 cd "$project_dir"
 docker compose config >/dev/null
 docker compose up -d --build
+# A rerun that only adds the activation code changes no container config, so
+# Compose keeps the old sync container. Restart it so it re-reads arming state.
+docker compose restart depot-sync
 
 containers=(vcf-services-depot-web vcf-services-sync vcf-services-ui vcf-services-redis)
 deadline=$((SECONDS + 120))
