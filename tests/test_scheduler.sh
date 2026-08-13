@@ -94,6 +94,7 @@ timeout 20 bash "$project_dir/sync/entrypoint.sh" > "$work_dir/scheduler.log" 2>
 scheduler_pid=$!
 
 sleep 4
+grep -q 'vcf-services:sync:status' "$FAKE_SET_LOG"
 grep -q '^dispatch:patches$' "$dispatch_log"
 ! grep -q bogus "$dispatch_log"
 grep -q 'vcf-services:sync:versions' "$FAKE_SET_LOG"

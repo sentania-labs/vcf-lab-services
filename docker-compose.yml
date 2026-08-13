@@ -95,7 +95,7 @@ services:
     container_name: vcf-services-redis
     image: redis:7.4-alpine
     restart: unless-stopped
-    command: ["redis-server", "/etc/redis/redis.conf"]
+    command: ["sh", "-c", "exec redis-server /etc/redis/redis.conf"]
     volumes:
       - ./secrets/redis:/etc/redis:ro
     networks:

@@ -30,6 +30,8 @@ grep -q 'HTTPS_PORT:-443' docker-compose.yml || fail "depot-web must default to 
 # Redis job bus: present, internal only, password protected, non-persistent.
 grep -q 'container_name: vcf-services-redis' docker-compose.yml || fail "redis service missing"
 grep -q '/etc/redis/redis.conf' docker-compose.yml || fail "redis must load the generated config"
+grep -q 'command: \["sh", "-c", "exec redis-server /etc/redis/redis.conf"\]' docker-compose.yml \
+	|| fail "redis must start via sh so the image entrypoint keeps root and can read the 0600 config"
 grep -q 'requirepass' install.sh || fail "install.sh must generate a requirepass config"
 ! grep -q 'requirepass' docker-compose.yml || fail "no password material belongs in docker-compose.yml"
 grep -q "openssl rand" install.sh || fail "install.sh must generate the Redis password"

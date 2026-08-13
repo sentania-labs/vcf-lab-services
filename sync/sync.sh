@@ -96,8 +96,10 @@ ln -sfn "$(basename "$run_log")" "$STATE_DIR/latest.log"
 
 log_publisher_pid=""
 if [ -n "$REDIS_HOST" ]; then
+	main_pid=$$
 	(
-		while :; do
+		exec 9>&- >/dev/null 2>&1
+		while kill -0 "$main_pid" 2>/dev/null; do
 			publish_log_tail
 			sleep 2
 		done

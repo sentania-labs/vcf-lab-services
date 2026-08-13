@@ -116,6 +116,21 @@ class UiApiTests(unittest.TestCase):
         self.assertEqual(queue, "vcf-services:sync:requests")
         self.assertEqual(json.loads(payload)["kind"], "versions")
 
+    def test_versions_surfaces_vendor_failure_exit_code(self):
+        doc = {
+            "output": "token endpoint rejected the activation code",
+            "fetchedAt": "2026-08-13T00:00:00Z",
+            "exitCode": 3,
+        }
+        bus = self.fake_bus({"vcf-services:sync:versions": json.dumps(doc)})
+        with mock.patch.object(self.module, "_redis", return_value=bus):
+            response = self.client.get("/api/versions/remote")
+        self.assertEqual(response.status_code, 502)
+        body = response.get_json()
+        self.assertIn("exit code 3", body["error"])
+        self.assertIn("rejected the activation code", body["error"])
+        self.assertEqual(body["components"], [])
+
     def test_versions_parses_bus_document(self):
         doc = {
             "output": (

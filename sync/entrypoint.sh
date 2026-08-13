@@ -12,6 +12,7 @@ REDIS_PORT="${REDIS_PORT:-6379}"
 REDIS_PASSWORD_FILE="${REDIS_PASSWORD_FILE:-/run/secrets/redis/password}"
 
 REQUEST_QUEUE="vcf-services:sync:requests"
+STATUS_KEY="vcf-services:sync:status"
 VERSIONS_KEY="vcf-services:sync:versions"
 
 load_settings() {
@@ -172,6 +173,9 @@ main() {
 		attempt=$((attempt + 1))
 		sleep 2
 	done
+	if [ -s "$STATE_DIR/state.json" ]; then
+		redis_cmd -x SET "$STATUS_KEY" < "$STATE_DIR/state.json" >/dev/null || true
+	fi
 	local last_dispatched_minute="" now_minute payload
 	while true; do
 		load_settings

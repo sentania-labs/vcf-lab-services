@@ -228,6 +228,17 @@ def versions_remote():
         return jsonify({"components": [], "pending": True}), 202
     if doc.get("error"):
         return jsonify({"error": doc["error"], "components": []}), 502
+    if doc.get("exitCode"):
+        detail = (doc.get("output") or "").strip()[-500:]
+        return (
+            jsonify(
+                {
+                    "error": f"version query failed with exit code {doc['exitCode']}: {detail}",
+                    "components": [],
+                }
+            ),
+            502,
+        )
     local = _scan_local_builds()
     rows = [
         {**row, "present": row.get("build") in local}
