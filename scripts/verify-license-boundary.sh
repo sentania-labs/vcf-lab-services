@@ -15,9 +15,11 @@ if [ -n "$tracked_vendor_artifacts" ]; then
 fi
 
 expected_ignore="$(mktemp /tmp/vcf-services-sync-base-ignore.XXXXXX)"
+image_export="$(mktemp /tmp/vcf-services-sync-base-export.XXXXXX)"
+image_listing="$(mktemp /tmp/vcf-services-sync-base-listing.XXXXXX)"
 container_id=""
 cleanup() {
-	rm -f "$expected_ignore"
+	rm -f "$expected_ignore" "$image_export" "$image_listing"
 	if [ -n "$container_id" ]; then
 		docker rm "$container_id" >/dev/null 2>&1 || true
 	fi
@@ -37,8 +39,15 @@ if ! cmp -s "$expected_ignore" "$project_dir/Dockerfile.sync-base.dockerignore";
 fi
 
 container_id="$(docker create "$image")"
-if docker export "$container_id" | tar -tf - \
-	| grep -E '(^|/)vcf-download-tool$|vcf-download-tool-.*\.(tar\.gz|tgz|zip)$'; then
+if ! docker export "$container_id" -o "$image_export"; then
+	echo "ERROR: docker export failed for $image; boundary not verified" >&2
+	exit 1
+fi
+if ! tar -tf "$image_export" > "$image_listing"; then
+	echo "ERROR: could not list the exported filesystem of $image; boundary not verified" >&2
+	exit 1
+fi
+if grep -E '(^|/)vcf-download-tool$|vcf-download-tool-.*\.(tar\.gz|tgz|zip)$' "$image_listing"; then
 	echo "ERROR: the sync base image contains VCF Download Tool content" >&2
 	exit 1
 fi
