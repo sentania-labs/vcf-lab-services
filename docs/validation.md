@@ -5,6 +5,7 @@ Slice 1 is testable without the licensed VCF Download Tool by running:
 ```bash
 ./tests/test_sync.sh
 ./tests/test_scheduler.sh
+./tests/test_install_checks.sh
 ./tests/test_compose.sh
 docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:local \
   python tests/test_ui.py
@@ -14,8 +15,12 @@ The repository stub covers installer archive validation, persistent machine-ID
 storage, dormant operation, per-target sequencing after a failure, state JSON,
 log retention, version parsing, HTTPS authentication, the open UMDS route, and
 byte-exact Range responses. The scheduler test covers cron matching, dynamic
-schedule reload, duplicate-dispatch prevention, and Redis request dispatch
-through a stub `redis-cli`. The compose test statically enforces the captain
+schedule reload, duplicate-dispatch prevention, Redis request dispatch
+through a stub `redis-cli`, recovery from a malformed `state.json`, and
+versions-refresh serialization behind the sync lock. The install checks test
+covers cron field bounds (minute, hour, day-of-month, month, day-of-week) and
+provided-TLS validation including hostname coverage, key match, and expiry.
+The UI test covers next-run calculation in the configured timezone. The compose test statically enforces the captain
 decisions: no Docker socket mount, no Docker client dependency, no macvlan, a
 non-published password-protected Redis service, published-HTTPS-port-only
 networking, and directory-based config mounts compatible with atomic settings

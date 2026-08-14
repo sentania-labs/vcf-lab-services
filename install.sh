@@ -2,6 +2,8 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/install-checks.sh
+. "$project_dir/scripts/install-checks.sh"
 answers_file=""
 minimum_free_gb=500
 validate_only=""
@@ -218,7 +220,7 @@ ask CRON_SCHEDULE "Cron schedule" "0 3 * * 0"
 cron_schedule="$REPLY_VALUE"
 cron_pattern='^[0-9*/,-]+([[:space:]][0-9*/,-]+){4}$'
 [[ "$cron_schedule" =~ $cron_pattern ]] || { echo "ERROR: cron schedule must be five numeric cron fields" >&2; exit 2; }
-[ "$(awk '{print NF}' <<< "$cron_schedule")" -eq 5 ] || { echo "ERROR: cron schedule must contain five fields" >&2; exit 2; }
+validate_cron_schedule "$cron_schedule" || exit 2
 ask CEIP "CEIP (ENABLE or DISABLE)" "DISABLE"
 ceip="${REPLY_VALUE^^}"
 [[ "$ceip" == ENABLE || "$ceip" == DISABLE ]] || { echo "ERROR: CEIP must be explicitly ENABLE or DISABLE" >&2; exit 2; }
@@ -368,7 +370,9 @@ if [ "$tls_mode" = self-signed ]; then
 		cert_pub="$(openssl x509 -in "$project_dir/secrets/tls/server.crt" -pubkey -noout 2>/dev/null | openssl sha256 || true)"
 		key_pub="$(openssl pkey -in "$project_dir/secrets/tls/server.key" -pubout 2>/dev/null | openssl sha256 || true)"
 		if openssl x509 -in "$project_dir/secrets/tls/server.crt" -noout \
-			-checkhost "$product_fqdn" -checkend 0 >/dev/null 2>&1 \
+			-checkend 0 >/dev/null 2>&1 \
+			&& openssl x509 -in "$project_dir/secrets/tls/server.crt" -noout \
+				-checkhost "$product_fqdn" 2>/dev/null | grep -q "does match" \
 			&& [ -n "$cert_pub" ] && [ "$cert_pub" = "$key_pub" ]; then
 			regenerate_cert=false
 		fi
@@ -381,13 +385,7 @@ if [ "$tls_mode" = self-signed ]; then
 	fi
 	echo "Self-signed TLS selected. Import secrets/tls/server.crt into each VCF consumer trust store."
 else
-	openssl x509 -in "$tls_cert_path" -noout -checkhost "$product_fqdn" >/dev/null 2>&1 || {
-		echo "ERROR: supplied certificate does not cover $product_fqdn" >&2
-		exit 1
-	}
-	cert_pub="$(openssl x509 -in "$tls_cert_path" -pubkey -noout | openssl sha256)"
-	key_pub="$(openssl pkey -in "$tls_key_path" -pubout 2>/dev/null | openssl sha256)"
-	[ "$cert_pub" = "$key_pub" ] || { echo "ERROR: supplied certificate and key do not match" >&2; exit 1; }
+	validate_provided_tls "$tls_cert_path" "$tls_key_path" "$product_fqdn" || exit 1
 	cp "$tls_cert_path" "$project_dir/secrets/tls/server.crt"
 	cp "$tls_key_path" "$project_dir/secrets/tls/server.key"
 	echo "Provided TLS selected. Import its issuing CA chain into each VCF consumer trust store."

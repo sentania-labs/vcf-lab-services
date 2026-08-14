@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -130,6 +131,28 @@ class UiApiTests(unittest.TestCase):
         self.assertIn("exit code 3", body["error"])
         self.assertIn("rejected the activation code", body["error"])
         self.assertEqual(body["components"], [])
+
+    def test_next_run_matches_configured_timezone(self):
+        self.settings.write_text(
+            'CRON_SCHEDULE="0 3 * * *"\n'
+            'TZ="Pacific/Kiritimati"\n'
+        )
+        self.write_state()
+        body = self.client.get("/api/status").get_json()
+        next_run = datetime.fromisoformat(body["nextRun"])
+        self.assertEqual(next_run.utcoffset(), timedelta(hours=14))
+        self.assertEqual((next_run.hour, next_run.minute), (3, 0))
+
+    def test_next_run_falls_back_to_utc_for_bad_timezone(self):
+        self.settings.write_text(
+            'CRON_SCHEDULE="0 3 * * *"\n'
+            'TZ="Not/AZone"\n'
+        )
+        self.write_state()
+        body = self.client.get("/api/status").get_json()
+        next_run = datetime.fromisoformat(body["nextRun"])
+        self.assertEqual(next_run.utcoffset(), timedelta(0))
+        self.assertEqual((next_run.hour, next_run.minute), (3, 0))
 
     def test_versions_parses_bus_document(self):
         doc = {

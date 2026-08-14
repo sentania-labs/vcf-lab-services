@@ -94,12 +94,25 @@ refresh_versions() {
 			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
 		return 0
 	fi
+	mkdir -p "$STATE_DIR"
+	exec 8>"$STATE_DIR/sync.lock"
+	if ! flock -n 8; then
+		echo "[scheduler] versions refresh skipped: a sync or refresh already holds the depot lock"
+		if [ "$(redis_cmd EXISTS "$VERSIONS_KEY")" != "1" ]; then
+			jq -n --arg t "$(date -u +%FT%TZ)" \
+				'{error:"refresh skipped: a sync or refresh is already running, retry when it finishes", fetchedAt:$t}' \
+				| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
+		fi
+		exec 8>&-
+		return 0
+	fi
 	local output rc=0
 	output="$("$tool" binaries list "--vcf-version=${VCF_VERSION:-9.1.0}" --type=UPGRADE \
 		"--depot-download-activation-code-file=$AUTH_FILE" "--ceip=${CEIP:-DISABLE}" 2>&1)" || rc=$?
 	jq -n --arg out "$output" --arg t "$(date -u +%FT%TZ)" --argjson rc "$rc" \
 		'{output:$out, fetchedAt:$t, exitCode:$rc}' \
 		| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
+	exec 8>&-
 }
 
 handle_request() {
@@ -131,10 +144,11 @@ init_state() {
 	local armed=false tmp_state
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
 	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
-	if [ -s "$STATE_DIR/state.json" ]; then
-		jq --argjson armed "$armed" '. + {running:false, armed:$armed, currentTarget:null}' \
-			"$STATE_DIR/state.json" > "$tmp_state"
-	else
+	if ! jq --argjson armed "$armed" '. + {running:false, armed:$armed, currentTarget:null}' \
+		"$STATE_DIR/state.json" > "$tmp_state" 2>/dev/null; then
+		if [ -s "$STATE_DIR/state.json" ]; then
+			echo "[scheduler] state.json is not valid JSON, regenerating defaults"
+		fi
 		jq -n --argjson armed "$armed" \
 			'{running:false, armed:$armed, currentTarget:null, lastRun:{}}' > "$tmp_state"
 	fi

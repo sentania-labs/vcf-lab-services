@@ -23,6 +23,19 @@ cron_matches "5-10 * * * *" 7 0 1 1 1
 ! cron_matches "0 3 * *" 0 3 1 1 1
 echo "cron matcher tests passed"
 
+STATE_DIR="$work_dir/state-init"
+AUTH_FILE="$work_dir/no-auth"
+mkdir -p "$STATE_DIR"
+printf '%s' '{"running":true,"lastRun":{"esx":{"status":"OK"}}}' > "$STATE_DIR/state.json"
+init_state >/dev/null
+jq -e '.running == false and .armed == false and .lastRun.esx.status == "OK"' \
+	"$STATE_DIR/state.json" >/dev/null
+printf '%s' '{"running":true,' > "$STATE_DIR/state.json"
+init_state >/dev/null
+jq -e '.running == false and .armed == false and .lastRun == {}' \
+	"$STATE_DIR/state.json" >/dev/null
+echo "malformed state recovery tests passed"
+
 stub_bin="$work_dir/bin"
 mkdir -p "$stub_bin"
 export FAKE_QUEUE_FILE="$work_dir/queue"
@@ -72,12 +85,36 @@ chmod 0755 "$stub_bin/fake-sync.sh"
 mkdir -p "$work_dir/config" "$work_dir/state" "$work_dir/tool/bin"
 settings="$work_dir/config/settings.env"
 printf 'CRON_SCHEDULE="0 0 31 2 *"\n' > "$settings"
-cat > "$work_dir/tool/bin/vcf-download-tool" <<'EOF'
+cat > "$work_dir/tool/bin/vcf-download-tool" <<EOF
 #!/bin/bash
+echo invoked >> "$work_dir/tool-calls.log"
 echo "stub versions output"
 EOF
 chmod 0755 "$work_dir/tool/bin/vcf-download-tool"
 printf 'stub-code\n' > "$work_dir/activation-code.txt"
+
+refresh_set_log="$work_dir/refresh-set.log"
+touch "$refresh_set_log"
+(
+	export FAKE_SET_LOG="$refresh_set_log"
+	export PATH="$stub_bin:$PATH"
+	export SETTINGS_FILE="$settings"
+	export STATE_DIR="$work_dir/state"
+	export AUTH_FILE="$work_dir/activation-code.txt"
+	export TOOL_ROOT="$work_dir/tool"
+	export REDIS_HOST=stub
+	# shellcheck source=/dev/null
+	source "$project_dir/sync/entrypoint.sh"
+	exec 7>"$STATE_DIR/sync.lock"
+	flock 7
+	refresh_versions
+	flock -u 7
+	exec 7>&-
+	refresh_versions
+)
+[ "$(grep -c '^invoked$' "$work_dir/tool-calls.log")" -eq 1 ]
+[ "$(grep -c 'vcf-services:sync:versions' "$refresh_set_log")" -eq 2 ]
+echo "versions refresh lock tests passed"
 
 printf '%s\n' '{"kind":"sync","targets":["patches","bogus"]}' > "$FAKE_QUEUE_FILE"
 printf '%s\n' '{"kind":"versions"}' >> "$FAKE_QUEUE_FILE"

@@ -13,6 +13,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import redis as redis_lib
 from croniter import croniter
@@ -160,9 +161,13 @@ def status():
     state = _state()
     settings = _settings()
     cron = settings.get("CRON_SCHEDULE", "0 3 * * 0")
+    try:
+        tzinfo = ZoneInfo(settings.get("TZ") or "UTC")
+    except (KeyError, ValueError):
+        tzinfo = timezone.utc
     next_run = None
     try:
-        next_run = croniter(cron, datetime.now(timezone.utc)).get_next(datetime).isoformat()
+        next_run = croniter(cron, datetime.now(tzinfo)).get_next(datetime).isoformat()
     except (KeyError, ValueError):
         pass
     armed = bool(state.get("armed", False))
