@@ -1,0 +1,4 @@
+*
+!Dockerfile.sync-base
+!sync/
+!sync/**
