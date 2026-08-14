@@ -34,6 +34,11 @@ printf '%s' '{"running":true,' > "$STATE_DIR/state.json"
 init_state >/dev/null
 jq -e '.running == false and .armed == false and .lastRun == {}' \
 	"$STATE_DIR/state.json" >/dev/null
+: > "$STATE_DIR/state.json"
+init_state >/dev/null
+[ -s "$STATE_DIR/state.json" ]
+jq -e '.running == false and .armed == false and .lastRun == {}' \
+	"$STATE_DIR/state.json" >/dev/null
 echo "malformed state recovery tests passed"
 
 stub_bin="$work_dir/bin"

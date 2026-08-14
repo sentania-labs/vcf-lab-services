@@ -145,7 +145,7 @@ init_state() {
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
 	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
 	if ! jq --argjson armed "$armed" '. + {running:false, armed:$armed, currentTarget:null}' \
-		"$STATE_DIR/state.json" > "$tmp_state" 2>/dev/null; then
+		"$STATE_DIR/state.json" > "$tmp_state" 2>/dev/null || [ ! -s "$tmp_state" ]; then
 		if [ -s "$STATE_DIR/state.json" ]; then
 			echo "[scheduler] state.json is not valid JSON, regenerating defaults"
 		fi
