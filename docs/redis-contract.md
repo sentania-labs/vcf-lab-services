@@ -66,5 +66,7 @@ when the key is absent, because the bus is not persistent.
 {"output": "<raw VCFDT binaries list output>", "fetchedAt": "2026-08-13T00:00:00Z", "exitCode": 0}
 ```
 
-When the sync engine is dormant the scheduler stores
-`{"error": "not armed: activation code missing", "fetchedAt": "..."}` instead.
+On failure the scheduler stores `{"error": "...", "fetchedAt": "..."}` instead:
+`not armed: activation code missing` when the sync engine is dormant, or
+`refresh skipped: a sync or refresh is already running, retry when it finishes`
+when the depot lock is held and no earlier versions value exists.
