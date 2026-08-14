@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions: {}
+
+jobs:
+  checks:
+    name: Release gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish product images
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate release tag
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: Sign in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and verify publishable images
+        env:
+          SOURCE_URL: https://github.com/${{ github.repository }}
+        run: |
+          image_root="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="$GITHUB_REF_NAME"
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.ui \
+            --tag "$image_root/ui:$version" \
+            --tag "$image_root/ui:latest" .
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.sync-base \
+            --tag "$image_root/sync-base:$version" \
+            --tag "$image_root/sync-base:latest" .
+          ./scripts/verify-license-boundary.sh "$image_root/sync-base:$version"
+          test "$(docker image inspect "$image_root/ui:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
+          test "$(docker image inspect "$image_root/sync-base:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
+
+      - name: Push product images
+        run: |
+          image_root="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="$GITHUB_REF_NAME"
+          docker push "$image_root/ui:$version"
+          docker push "$image_root/ui:latest"
+          docker push "$image_root/sync-base:$version"
+          docker push "$image_root/sync-base:latest"
+
+  release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate release tag
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: Package installer entry point
+        run: |
+          image_root="ghcr.io/${GITHUB_REPOSITORY,,}"
+          ./scripts/package-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/release" "$image_root"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$GITHUB_REF_NAME"
+          gh release create "$version" \
+            "$RUNNER_TEMP/release/install.sh#Installer entry point" \
+            "$RUNNER_TEMP/release/vcf-lab-services-$version.tar.gz#Installation bundle" \
+            "$RUNNER_TEMP/release/vcf-lab-services-$version.tar.gz.sha256#Installation bundle checksum" \
+            --verify-tag \
+            --generate-notes \
+            --title "$version"

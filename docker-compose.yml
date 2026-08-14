@@ -60,10 +60,7 @@ services:
 
   admin-ui:
     container_name: vcf-services-ui
-    build:
-      context: .
-      dockerfile: Dockerfile.ui
-    image: vcf-services-ui:local
+    image: ${VCF_SERVICES_UI_IMAGE:-vcf-services-ui:local}
     restart: unless-stopped
     depends_on:
       redis:

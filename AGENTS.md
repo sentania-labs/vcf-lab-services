@@ -5,9 +5,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - The licensed VCF Download Tool must never be committed or redistributed. Use
   `tests/make-stub-vcfdt.sh` for local and CI validation.
 - Run `tests/test_sync.sh`, `tests/test_scheduler.sh`,
-  `tests/test_install_checks.sh`, `tests/test_compose.sh`, the UI unit test
-  documented in `docs/validation.md`, and the installer's live Range check
-  before release.
+  `tests/test_install_checks.sh`, `tests/test_compose.sh`,
+  `tests/test_release.sh`, the UI unit test documented in
+  `docs/validation.md`, and the installer's live Range check before release.
+- Release tags are the product version authority. Follow `docs/releasing.md`
+  and keep the published sync base free of licensed VCFDT content.
 - Preserve the storage contracts in `docker-compose.yml`: the depot is `/depot`
   in both consumers, and `vcf-services-vcfdt-state` is an external volume so a
   recreate cannot discard the registered Software Depot ID.

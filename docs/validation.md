@@ -7,6 +7,10 @@ Slice 1 is testable without the licensed VCF Download Tool by running:
 ./tests/test_scheduler.sh
 ./tests/test_install_checks.sh
 ./tests/test_compose.sh
+./tests/test_release.sh
+docker build -t vcf-services-sync-base:local -f Dockerfile.sync-base .
+./scripts/verify-license-boundary.sh vcf-services-sync-base:local
+docker build -t vcf-services-ui:local -f Dockerfile.ui .
 docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:local \
   python tests/test_ui.py
 ```
@@ -28,6 +32,13 @@ replacement. Live Redis authentication and non-exposure are also hard gates in
 `install.sh`. The stub is test-only and is not copied into a
 product image unless an operator explicitly supplies its generated archive to
 the installer.
+
+The release test dry-runs the versioned installation bundle, verifies its
+checksum and required entry points, and proves that the bundle consumes the
+published UI and sync base images. The license-boundary check locks the sync
+base to an allowlisted build context and inspects the built filesystem for
+vendor binary or archive names. CI runs the same checks before any image can be
+published.
 
 The following items require captain UAT and are not claimed as verified:
 

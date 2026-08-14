@@ -7,6 +7,8 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 answers_file=""
 minimum_free_gb=500
 validate_only=""
+release_version=""
+image_repository=""
 
 usage() {
 	cat <<'EOF'
@@ -121,6 +123,30 @@ if [ -n "$validate_only" ]; then
 	echo "VCFDT archive validation passed"
 	exit 0
 fi
+
+release_metadata="$project_dir/.release.env"
+[ -f "$release_metadata" ] || {
+	echo "ERROR: release metadata is missing. Download and extract the versioned release bundle, then run its install.sh." >&2
+	exit 1
+}
+while IFS='=' read -r key value || [ -n "$key$value" ]; do
+	case "$key" in
+		VCF_SERVICES_VERSION) release_version="$value" ;;
+		VCF_SERVICES_IMAGE_REPOSITORY) image_repository="$value" ;;
+		"") ;;
+		*) echo "ERROR: unsupported release metadata key: $key" >&2; exit 1 ;;
+	esac
+done < "$release_metadata"
+[[ "$release_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+	echo "ERROR: release metadata has an invalid version" >&2
+	exit 1
+}
+[[ "$image_repository" =~ ^ghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+$ ]] || {
+	echo "ERROR: release metadata has an invalid image repository" >&2
+	exit 1
+}
+sync_base_image="$image_repository/sync-base:$release_version"
+ui_image="$image_repository/ui:$release_version"
 
 echo "VCF Services installer"
 echo "The health endpoint and UMDS patch-store subtree are intentionally unauthenticated."
@@ -350,6 +376,8 @@ env_tmp="$(mktemp "$project_dir/.env.XXXXXX")"
 {
 	printf 'HTTPS_PORT=%s\n' "$https_port"
 	printf 'DEPOT_VOLUME_NAME=%s\n' "$depot_volume_name"
+	printf 'VCF_SERVICES_VERSION=%s\n' "$release_version"
+	printf 'VCF_SERVICES_UI_IMAGE=%s\n' "$ui_image"
 	if [ "$storage_mode" = local ]; then
 		printf 'DEPOT_VOLUME_TYPE=none\n'
 		printf 'DEPOT_VOLUME_OPTIONS=bind\n'
@@ -393,9 +421,11 @@ fi
 chmod 0644 "$project_dir/secrets/tls/server.crt"
 chmod 0600 "$project_dir/secrets/tls/server.key"
 
-echo "Building the sync base and local licensed layer"
-docker build -f "$project_dir/Dockerfile.sync-base" -t vcf-services-sync-base:local "$project_dir"
-docker build -f "$project_dir/Dockerfile.sync" -t vcf-services-sync:local "$project_dir"
+echo "Pulling release images and building the local licensed sync layer"
+docker pull "$ui_image"
+docker pull "$sync_base_image"
+docker build --build-arg "SYNC_BASE_IMAGE=$sync_base_image" \
+	-f "$project_dir/Dockerfile.sync" -t vcf-services-sync:local "$project_dir"
 
 tool_version_output="$(docker run --rm --entrypoint /opt/vcfdt/bin/vcf-download-tool vcf-services-sync:local --version 2>/dev/null | head -n 1 || true)"
 if [ -n "$tool_version_output" ]; then
@@ -446,7 +476,7 @@ mv "$caddy_tmp" "$project_dir/secrets/caddy.env"
 
 cd "$project_dir"
 docker compose config >/dev/null
-docker compose up -d --build
+docker compose up -d
 # A rerun that only adds the activation code changes no container config, so
 # Compose keeps the old sync container. Restart it so it re-reads arming state.
 docker compose restart depot-sync

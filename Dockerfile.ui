@@ -1,7 +1,19 @@
 FROM python:3.12-slim
 
+ARG VCF_SERVICES_VERSION=dev
+ARG VCF_SERVICES_REVISION=unknown
+ARG VCF_SERVICES_SOURCE=unknown
+
+LABEL org.opencontainers.image.title="VCF Services Admin UI" \
+      org.opencontainers.image.description="Administrative console for VCF Services" \
+      org.opencontainers.image.version="$VCF_SERVICES_VERSION" \
+      org.opencontainers.image.revision="$VCF_SERVICES_REVISION" \
+      org.opencontainers.image.source="$VCF_SERVICES_SOURCE" \
+      org.opencontainers.image.licenses="MIT"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    VCF_SERVICES_VERSION="$VCF_SERVICES_VERSION"
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
