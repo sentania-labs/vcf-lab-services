@@ -15,7 +15,8 @@ portal during installation.
 - Linux on x86_64
 - Docker Engine and Docker Compose v2
 - OpenSSL, curl, tar, and at least 500 GB free for the depot by default
-- Outbound HTTPS access to the configured download endpoint
+- Outbound HTTPS access to the configured download endpoint, and to `ghcr.io`
+  so the installer can pull the product images without registry credentials
 - A VCF Download Tool `.tar.gz` or `.zip` containing
   `bin/vcf-download-tool`
 - `nfs-common` or the equivalent NFS client package when using NFS storage
