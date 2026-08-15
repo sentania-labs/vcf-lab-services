@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Shell, tests, Compose, and images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check shell scripts
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+
+      - name: Run shell and architecture tests
+        run: |
+          ./tests/test_sync.sh
+          ./tests/test_scheduler.sh
+          ./tests/test_install_checks.sh
+          ./tests/test_compose.sh
+          ./tests/test_release.sh
+
+      - name: Validate Compose rendering
+        run: |
+          mkdir -p secrets
+          touch secrets/caddy.env
+          docker compose config --quiet
+
+      - name: Build license-safe product images
+        env:
+          SOURCE_URL: https://github.com/${{ github.repository }}
+        run: |
+          version="sha-${GITHUB_SHA::12}"
+          # Stage the stub vendor tool first so the license-safe images are
+          # built and verified with vendor-shaped content in the build context.
+          ./tests/make-stub-vcfdt.sh "$RUNNER_TEMP/vcf-download-tool-0.0.0-stub.tar.gz"
+          rm -rf build/vcfdt
+          mkdir -p build/vcfdt
+          tar -xzf "$RUNNER_TEMP/vcf-download-tool-0.0.0-stub.tar.gz" \
+            -C build/vcfdt --strip-components=1
+          test -f build/vcfdt/bin/vcf-download-tool
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.ui \
+            --tag vcf-services-ui:ci .
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.sync-base \
+            --tag vcf-services-sync-base:ci .
+          test "$(docker image inspect vcf-services-ui:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
+          test "$(docker image inspect vcf-services-sync-base:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
+          ./scripts/verify-license-boundary.sh vcf-services-sync-base:ci
+
+      - name: Build and exercise the local licensed sync layer
+        run: |
+          docker build \
+            --build-arg SYNC_BASE_IMAGE=vcf-services-sync-base:ci \
+            --file Dockerfile.sync \
+            --tag vcf-services-sync:ci .
+          docker run --rm --entrypoint /opt/vcfdt/bin/vcf-download-tool \
+            vcf-services-sync:ci --version | grep -q '^vcf-download-tool '
+
+      - name: Run UI unit tests in the built image
+        run: docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:ci python tests/test_ui.py

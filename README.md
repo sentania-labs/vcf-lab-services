@@ -15,7 +15,8 @@ portal during installation.
 - Linux on x86_64
 - Docker Engine and Docker Compose v2
 - OpenSSL, curl, tar, and at least 500 GB free for the depot by default
-- Outbound HTTPS access to the configured download endpoint
+- Outbound HTTPS access to the configured download endpoint, and to `ghcr.io`
+  so the installer can pull the product images without registry credentials
 - A VCF Download Tool `.tar.gz` or `.zip` containing
   `bin/vcf-download-tool`
 - `nfs-common` or the equivalent NFS client package when using NFS storage
@@ -25,16 +26,28 @@ roughly 461 GB, so VKr is not selected by default.
 
 ## Quickstart
 
+Download the installation bundle and its checksum from the desired entry on
+the repository's GitHub Releases page. Then verify, extract, and run it:
+
 ```bash
-cd /path/to/your/fresh-clone
+sha256sum -c vcf-lab-services-v1.0.0.tar.gz.sha256
+tar -xzf vcf-lab-services-v1.0.0.tar.gz
+cd vcf-lab-services-v1.0.0
 ./install.sh
 ```
 
+Installing from a source checkout is still supported for development and for
+the pre-release proof: run `./install.sh` in the checkout, optionally with
+`--version` and `--image-repository`. See
+[docs/releasing.md](docs/releasing.md).
+
 Every prompt shows its default. The installer validates the host and vendor
-archive, builds the local sync image, preserves the Software Depot ID in a
-dedicated Docker volume, configures storage and TLS, generates the Redis job
-bus password, starts the four services (depot web, sync, admin console,
-Redis), and performs live HTTPS checks plus a Redis exposure check. Use `./install.sh --answers-file answers.env`
+archive, pulls the release's admin UI and license-safe sync base images, layers
+your VCF Download Tool archive into a local sync image, preserves the Software
+Depot ID in a dedicated Docker volume, configures storage and TLS, generates
+the Redis job bus password, starts the four services (depot web, sync, admin
+console, Redis), and performs live HTTPS checks plus a Redis exposure check.
+Use `./install.sh --answers-file answers.env`
 for an unattended run. See [config/answers.example](config/answers.example) for
 the supported keys. Keep completed answer files outside the repository with
 mode `0600` because they contain the installation password.
@@ -114,6 +127,9 @@ mirrored there and in the generated `.env` file.
 ## Scope
 
 This slice does not include the backup service, guided Supervisor or VKr
-content injection, VCFDT self-upgrade, GHCR publishing, or stack upgrade. Those
-features are planned without changing the depot persistence and config
-contracts established here.
+content injection, VCFDT self-upgrade, or stack upgrade. Those features are
+planned without changing the depot persistence and config contracts
+established here.
+
+Release packaging, image names, and version authority are documented in
+[docs/releasing.md](docs/releasing.md).
