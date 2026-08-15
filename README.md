@@ -35,6 +35,11 @@ cd vcf-lab-services-v1.0.0
 ./install.sh
 ```
 
+Installing from a source checkout is still supported for development and for
+the pre-release proof: run `./install.sh` in the checkout, optionally with
+`--version` and `--image-repository`. See
+[docs/releasing.md](docs/releasing.md).
+
 Every prompt shows its default. The installer validates the host and vendor
 archive, pulls the release's admin UI and license-safe sync base images, layers
 your VCF Download Tool archive into a local sync image, preserves the Software

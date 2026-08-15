@@ -9,14 +9,23 @@ minimum_free_gb=500
 validate_only=""
 release_version=""
 image_repository=""
+release_version_override=""
+image_repository_override=""
+release_source=bundle
 
 usage() {
 	cat <<'EOF'
 Usage: ./install.sh [--answers-file PATH] [--min-free-gb NUMBER]
+                    [--version TAG] [--image-repository REPOSITORY]
        ./install.sh --validate-archive PATH
 
 The free-space floor defaults to 500 GB. Use --min-free-gb only when a smaller
 lab or test store is intentional.
+
+A packaged release bundle carries its own version and image repository, and is
+the normal operator path. In a source checkout the image repository defaults to
+the GHCR namespace of the checkout's origin remote and the image tag defaults to
+"latest"; use --version and --image-repository to point at specific images.
 EOF
 }
 
@@ -35,6 +44,16 @@ while [ "$#" -gt 0 ]; do
 		--validate-archive)
 			[ "$#" -ge 2 ] || { echo "ERROR: --validate-archive requires a path" >&2; exit 2; }
 			validate_only="$2"
+			shift 2
+			;;
+		--version)
+			[ "$#" -ge 2 ] || { echo "ERROR: --version requires an image tag" >&2; exit 2; }
+			release_version_override="$2"
+			shift 2
+			;;
+		--image-repository)
+			[ "$#" -ge 2 ] || { echo "ERROR: --image-repository requires a repository path" >&2; exit 2; }
+			image_repository_override="$2"
 			shift 2
 			;;
 		-h|--help)
@@ -124,26 +143,63 @@ if [ -n "$validate_only" ]; then
 	exit 0
 fi
 
-release_metadata="$project_dir/.release.env"
-[ -f "$release_metadata" ] || {
-	echo "ERROR: release metadata is missing. Download and extract the versioned release bundle, then run its install.sh." >&2
-	exit 1
-}
-while IFS='=' read -r key value || [ -n "$key$value" ]; do
-	case "$key" in
-		VCF_SERVICES_VERSION) release_version="$value" ;;
-		VCF_SERVICES_IMAGE_REPOSITORY) image_repository="$value" ;;
-		"") ;;
-		*) echo "ERROR: unsupported release metadata key: $key" >&2; exit 1 ;;
+derive_image_repository() {
+	local url slug
+	command -v git >/dev/null 2>&1 || return 1
+	url="$(git -C "$project_dir" config --get remote.origin.url 2>/dev/null)" || return 1
+	[ -n "$url" ] || return 1
+	url="${url%/}"
+	url="${url%.git}"
+	case "$url" in
+		*://*) slug="${url#*://}"; slug="${slug#*@}"; slug="${slug#*/}" ;;
+		*:*) slug="${url#*@}"; slug="${slug#*:}" ;;
+		*) slug="$url" ;;
 	esac
-done < "$release_metadata"
-[[ "$release_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-	echo "ERROR: release metadata has an invalid version" >&2
-	exit 1
+	[[ "$slug" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || return 1
+	printf 'ghcr.io/%s' "${slug,,}"
 }
-[[ "$image_repository" =~ ^ghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+$ ]] || {
-	echo "ERROR: release metadata has an invalid image repository" >&2
-	exit 1
+
+release_metadata="$project_dir/.release.env"
+if [ -f "$release_metadata" ]; then
+	while IFS='=' read -r key value || [ -n "$key$value" ]; do
+		case "$key" in
+			VCF_SERVICES_VERSION) release_version="$value" ;;
+			VCF_SERVICES_IMAGE_REPOSITORY) image_repository="$value" ;;
+			"") ;;
+			*) echo "ERROR: unsupported release metadata key: $key" >&2; exit 1 ;;
+		esac
+	done < "$release_metadata"
+	[[ "$release_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+		echo "ERROR: release metadata has an invalid version" >&2
+		exit 1
+	}
+	[[ "$image_repository" =~ ^ghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+$ ]] || {
+		echo "ERROR: release metadata has an invalid image repository" >&2
+		exit 1
+	}
+else
+	release_source=source
+	release_version=latest
+	if [ -z "$image_repository_override" ]; then
+		image_repository="$(derive_image_repository)" || {
+			echo "ERROR: this is a source checkout with no usable origin remote, so the image repository cannot be derived." >&2
+			echo "       Run the packaged release bundle's install.sh, or pass --image-repository REPOSITORY." >&2
+			exit 1
+		}
+	fi
+	echo "No release metadata found; installing from this source checkout."
+	echo "Operators should normally run the install.sh from a packaged release bundle instead."
+fi
+
+[ -n "$release_version_override" ] && release_version="$release_version_override"
+[ -n "$image_repository_override" ] && image_repository="$image_repository_override"
+[[ "$release_version" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || {
+	echo "ERROR: image tag is not a valid Docker tag: $release_version" >&2
+	exit 2
+}
+[[ "$image_repository" =~ ^[a-z0-9][a-z0-9.:-]*(/[a-z0-9._-]+)+$ ]] || {
+	echo "ERROR: image repository is not a valid lowercase repository path: $image_repository" >&2
+	exit 2
 }
 sync_base_image="$image_repository/sync-base:$release_version"
 ui_image="$image_repository/ui:$release_version"
@@ -421,9 +477,24 @@ fi
 chmod 0644 "$project_dir/secrets/tls/server.crt"
 chmod 0600 "$project_dir/secrets/tls/server.key"
 
-echo "Pulling release images and building the local licensed sync layer"
-docker pull "$ui_image"
-docker pull "$sync_base_image"
+pull_product_image() {
+	local image="$1"
+	if [ "$release_source" = source ] && docker image inspect "$image" >/dev/null 2>&1; then
+		echo "Using the locally present image $image"
+		return 0
+	fi
+	docker pull "$image" && return 0
+	echo "ERROR: could not pull $image" >&2
+	echo "       If the image exists, its GHCR package may still be private. Set the package" >&2
+	echo "       visibility to public under the repository's Packages page, or run" >&2
+	echo "       'docker login ghcr.io' on this host with an account that can read it." >&2
+	echo "       Otherwise confirm this host can reach ghcr.io and that the tag exists." >&2
+	exit 1
+}
+
+echo "Pulling product images and building the local licensed sync layer"
+pull_product_image "$ui_image"
+pull_product_image "$sync_base_image"
 docker build --build-arg "SYNC_BASE_IMAGE=$sync_base_image" \
 	-f "$project_dir/Dockerfile.sync" -t vcf-services-sync:local "$project_dir"
 
