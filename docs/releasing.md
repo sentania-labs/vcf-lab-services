@@ -61,6 +61,10 @@ to `latest`. Two flags override that:
 - `--image-repository REPOSITORY`, for example `ghcr.io/example/vcf-lab-services`
 - `--version TAG`, any published image tag
 
+Both flags are source-checkout only. When a packaged bundle's `.release.env` is
+present the installer rejects them, so a bundle always installs exactly the
+images its release published.
+
 In this mode the installer uses an image that is already present locally
 instead of pulling it, which is what makes the pre-release live proof possible.
 

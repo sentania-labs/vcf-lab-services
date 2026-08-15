@@ -37,8 +37,11 @@ The release test dry-runs the versioned installation bundle, verifies its
 checksum and required entry points, and proves that the bundle consumes the
 published UI and sync base images. The license-boundary check locks the sync
 base to an allowlisted build context and inspects the built filesystem for
-vendor binary or archive names. CI runs the same checks before any image can be
-published.
+vendor binary or archive names. CI stages a stub vendor tool into the build
+context first, so the license-safe images are built and inspected while
+vendor-shaped content is present, then builds the local licensed sync layer
+against that verified base and runs the tool out of it. CI runs the same checks
+before any image can be published.
 
 The following items require captain UAT and are not claimed as verified:
 

@@ -87,6 +87,13 @@ expect_failure 2 'not a valid Docker tag' \
 expect_failure 2 'not a valid lowercase repository path' \
 	"$source_dir/install.sh" --image-repository 'GHCR.IO/Example/Repo'
 
+# A bundle pins its own images, so the source-checkout overrides are rejected
+# rather than silently mixing one release with another release's images.
+expect_failure 2 'apply only to a source checkout' \
+	"$bundle_dir/install.sh" --version v9.9.9
+expect_failure 2 'apply only to a source checkout' \
+	"$bundle_dir/install.sh" --image-repository ghcr.io/example/other
+
 # Bundle metadata stays strict.
 printf 'VCF_SERVICES_UNEXPECTED=1\n' > "$bundle_dir/.release.env"
 expect_failure 1 'unsupported release metadata key' "$bundle_dir/install.sh"

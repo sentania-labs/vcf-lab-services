@@ -161,6 +161,12 @@ derive_image_repository() {
 
 release_metadata="$project_dir/.release.env"
 if [ -f "$release_metadata" ]; then
+	if [ -n "$release_version_override" ] || [ -n "$image_repository_override" ]; then
+		echo "ERROR: --version and --image-repository apply only to a source checkout." >&2
+		echo "       This release bundle pins its own version and images. To install a" >&2
+		echo "       different release, download that release's bundle." >&2
+		exit 2
+	fi
 	while IFS='=' read -r key value || [ -n "$key$value" ]; do
 		case "$key" in
 			VCF_SERVICES_VERSION) release_version="$value" ;;
@@ -179,28 +185,28 @@ if [ -f "$release_metadata" ]; then
 	}
 else
 	release_source=source
-	release_version=latest
-	if [ -z "$image_repository_override" ]; then
+	release_version="${release_version_override:-latest}"
+	if [ -n "$image_repository_override" ]; then
+		image_repository="$image_repository_override"
+	else
 		image_repository="$(derive_image_repository)" || {
 			echo "ERROR: this is a source checkout with no usable origin remote, so the image repository cannot be derived." >&2
 			echo "       Run the packaged release bundle's install.sh, or pass --image-repository REPOSITORY." >&2
 			exit 1
 		}
 	fi
+	[[ "$release_version" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || {
+		echo "ERROR: image tag is not a valid Docker tag: $release_version" >&2
+		exit 2
+	}
+	[[ "$image_repository" =~ ^[a-z0-9][a-z0-9.:-]*(/[a-z0-9._-]+)+$ ]] || {
+		echo "ERROR: image repository is not a valid lowercase repository path: $image_repository" >&2
+		exit 2
+	}
 	echo "No release metadata found; installing from this source checkout."
 	echo "Operators should normally run the install.sh from a packaged release bundle instead."
 fi
 
-[ -n "$release_version_override" ] && release_version="$release_version_override"
-[ -n "$image_repository_override" ] && image_repository="$image_repository_override"
-[[ "$release_version" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || {
-	echo "ERROR: image tag is not a valid Docker tag: $release_version" >&2
-	exit 2
-}
-[[ "$image_repository" =~ ^[a-z0-9][a-z0-9.:-]*(/[a-z0-9._-]+)+$ ]] || {
-	echo "ERROR: image repository is not a valid lowercase repository path: $image_repository" >&2
-	exit 2
-}
 sync_base_image="$image_repository/sync-base:$release_version"
 ui_image="$image_repository/ui:$release_version"
 
