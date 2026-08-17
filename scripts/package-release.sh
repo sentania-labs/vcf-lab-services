@@ -25,6 +25,7 @@ files=(
 	LICENSE
 	README.md
 	docker-compose.yml
+	compose.sh
 	install.sh
 	Dockerfile.sync
 	Dockerfile.sync.dockerignore

@@ -6,7 +6,7 @@ cd "$project_dir"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-product_files=(docker-compose.yml install.sh caddy/Caddyfile config/answers.example
+product_files=(docker-compose.yml compose.sh install.sh caddy/Caddyfile config/answers.example
 	config/settings.env.example Dockerfile.sync Dockerfile.sync-base Dockerfile.ui
 	sync/entrypoint.sh sync/sync.sh sync/targets/vkr.sh scripts/verify-byte-exact.sh
 	ui/app.py ui/requirements.txt ui/templates/index.html)
@@ -48,6 +48,68 @@ grep -q 'depot_store:/depot:rw' docker-compose.yml || fail "sync depot mount mus
 grep -q 'name: vcf-services-vcfdt-state' docker-compose.yml || fail "vcfdt state volume renamed"
 grep -A1 'name: vcf-services-vcfdt-state' docker-compose.yml | grep -q 'external: true' \
 	|| fail "vcfdt state volume must stay external"
+
+# Manual startup reports install-created prerequisites before Compose can fail.
+work_dir="$(mktemp -d /tmp/vcf-services-compose-test.XXXXXX)"
+trap 'rm -rf "$work_dir"' EXIT
+mkdir -p "$work_dir/bin"
+cat > "$work_dir/bin/docker" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$DOCKER_CALLS"
+case "$1 $2" in
+	"volume inspect") [ "${MOCK_VOLUME_EXISTS:-}" = true ] ;;
+	"image inspect") [ "${MOCK_IMAGE_EXISTS:-}" = true ] ;;
+	"compose up") exit 0 ;;
+	"compose ps") exit 0 ;;
+	*) exit 2 ;;
+esac
+EOF
+chmod +x "$work_dir/bin/docker"
+export DOCKER_CALLS="$work_dir/docker.calls"
+
+set +e
+preflight_output="$(PATH="$work_dir/bin:$PATH" ./compose.sh up -d 2>&1)"
+preflight_status=$?
+set -e
+[ "$preflight_status" -eq 1 ] || fail "compose preflight did not reject missing prerequisites"
+grep -q 'external volume vcf-services-vcfdt-state' <<< "$preflight_output" \
+	|| fail "compose preflight did not identify the missing external volume"
+grep -q 'local image vcf-services-sync:local' <<< "$preflight_output" \
+	|| fail "compose preflight did not identify the missing local image"
+grep -q 'Run ./install.sh instead' <<< "$preflight_output" \
+	|| fail "compose preflight did not direct the operator to install.sh"
+! grep -q '^compose up' "$DOCKER_CALLS" || fail "Compose ran after a failed preflight"
+
+: > "$DOCKER_CALLS"
+set +e
+volume_only_output="$(MOCK_VOLUME_EXISTS=true PATH="$work_dir/bin:$PATH" ./compose.sh up -d 2>&1)"
+volume_only_status=$?
+set -e
+[ "$volume_only_status" -eq 1 ] || fail "compose preflight accepted a missing local image"
+grep -q 'local image vcf-services-sync:local' <<< "$volume_only_output" \
+	|| fail "compose preflight missed the absent local image"
+! grep -q 'external volume' <<< "$volume_only_output" \
+	|| fail "compose preflight reported a volume that exists"
+
+: > "$DOCKER_CALLS"
+set +e
+image_only_output="$(MOCK_IMAGE_EXISTS=true PATH="$work_dir/bin:$PATH" ./compose.sh up -d 2>&1)"
+image_only_status=$?
+set -e
+[ "$image_only_status" -eq 1 ] || fail "compose preflight accepted a missing external volume"
+grep -q 'external volume vcf-services-vcfdt-state' <<< "$image_only_output" \
+	|| fail "compose preflight missed the absent external volume"
+! grep -q 'local image' <<< "$image_only_output" \
+	|| fail "compose preflight reported an image that exists"
+
+: > "$DOCKER_CALLS"
+MOCK_VOLUME_EXISTS=true MOCK_IMAGE_EXISTS=true PATH="$work_dir/bin:$PATH" ./compose.sh up -d
+grep -qx 'compose up -d' "$DOCKER_CALLS" || fail "validated up command was not passed to Compose"
+
+: > "$DOCKER_CALLS"
+PATH="$work_dir/bin:$PATH" ./compose.sh ps
+grep -qx 'compose ps' "$DOCKER_CALLS" || fail "day-to-day Compose command was not passed through"
 
 # Bus key names stay consistent across producers, consumers, and the contract.
 for name in 'vcf-services:sync:requests' 'vcf-services:sync:status' 'vcf-services:sync:log' 'vcf-services:sync:versions'; do
