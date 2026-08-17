@@ -8,9 +8,11 @@ Slice 1 is testable without the licensed VCF Download Tool by running:
 ./tests/test_install_checks.sh
 ./tests/test_compose.sh
 ./tests/test_release.sh
+./tests/test_sftp.sh
 docker build -t vcf-services-sync-base:local -f Dockerfile.sync-base .
 ./scripts/verify-license-boundary.sh vcf-services-sync-base:local
 docker build -t vcf-services-ui:local -f Dockerfile.ui .
+docker build -t vcf-services-sftp:local -f Dockerfile.sftp .
 docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:local \
   python tests/test_ui.py
 ```
@@ -23,19 +25,26 @@ schedule reload, duplicate-dispatch prevention, Redis request dispatch
 through a stub `redis-cli`, recovery from a malformed `state.json`, and
 versions-refresh serialization behind the sync lock. The install checks test
 covers cron field bounds (minute, hour, day-of-month, month, day-of-week) and
-provided-TLS validation including hostname coverage, key match, and expiry.
+provided-TLS validation including hostname coverage, key match, and expiry. It
+also covers SFTP port and UID:GID validation plus bound-port detection.
 The UI test covers next-run calculation in the configured timezone. The compose test statically enforces the captain
 decisions: no Docker socket mount, no Docker client dependency, no macvlan, a
-non-published password-protected Redis service, published-HTTPS-port-only
-networking, and directory-based config mounts compatible with atomic settings
-replacement. It also drives `compose.sh` against a stubbed `docker` to prove
-the startup preflight names each missing install-created prerequisite, points
-the operator at `install.sh`, blames a stopped daemon separately, still
-preflights when Compose global options precede the `up` command, and passes
-day-to-day commands and all original arguments straight through. Live Redis
-authentication and non-exposure are also hard gates in `install.sh`. The stub
-is test-only and is not copied into a product image unless an operator
-explicitly supplies its generated archive to the installer.
+non-published password-protected Redis service, only the configured HTTPS and
+alternate SFTP ports published, and directory-based config mounts compatible
+with atomic settings replacement. It also drives `compose.sh` against a stubbed
+`docker` to prove the startup preflight names each missing install-created
+prerequisite, points the operator at `install.sh`, blames a stopped daemon
+separately, still preflights when Compose global options precede the `up`
+command, and passes day-to-day commands and all original arguments straight
+through. Live Redis authentication and non-exposure are also hard gates in
+`install.sh`. The stub is test-only and is not copied into a product image
+unless an operator explicitly supplies its generated archive to the installer.
+
+The SFTP runtime test builds and starts the real backup image, uploads through
+password-authenticated SFTP to an absolute `/mnt/backup/vcenter` path, rejects
+an incorrect password, verifies all three host-key types and logged
+fingerprints, and proves those keys remain unchanged across container
+recreation.
 
 The release test dry-runs the versioned installation bundle, verifies its
 checksum and required entry points, and proves that the bundle consumes the
@@ -53,6 +62,8 @@ The following items require captain UAT and are not claimed as verified:
 - The vendor binary's real machine-ID and version output shapes
 - A live NFS export, including capacity reporting and hard-mount behavior
 - Consumer trust import in VCF Installer and SDDC Manager
+- NSX acceptance of the published nonstandard SFTP port
+- SDDC Manager acceptance of the published nonstandard SFTP port
 
 The delivered reference named a VKr mirror file that was absent from its
 archive, while the slice scope defers the guided VKr flow. This slice keeps VKr

@@ -33,6 +33,7 @@ jobs:
           ./tests/test_install_checks.sh
           ./tests/test_compose.sh
           ./tests/test_release.sh
+          ./tests/test_sftp.sh
 
       - name: Validate Compose rendering
         run: |
@@ -65,8 +66,15 @@ jobs:
             --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
             --file Dockerfile.sync-base \
             --tag vcf-services-sync-base:ci .
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.sftp \
+            --tag vcf-services-sftp:ci .
           test "$(docker image inspect vcf-services-ui:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
           test "$(docker image inspect vcf-services-sync-base:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
+          test "$(docker image inspect vcf-services-sftp:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
           ./scripts/verify-license-boundary.sh vcf-services-sync-base:ci
 
       - name: Build and exercise the local licensed sync layer

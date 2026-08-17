@@ -77,3 +77,40 @@ validate_provided_tls() {
 	}
 	return 0
 }
+
+validate_uid_gid() {
+	local value="$1" uid gid
+	[[ "$value" =~ ^[0-9]+:[0-9]+$ ]] || {
+		echo "ERROR: UID:GID must contain two numeric values separated by a colon" >&2
+		return 1
+	}
+	uid="${value%%:*}"
+	gid="${value#*:}"
+	[ "$uid" -ge 1 ] && [ "$uid" -le 2147483647 ] \
+		&& [ "$gid" -ge 1 ] && [ "$gid" -le 2147483647 ] || {
+		echo "ERROR: UID:GID values must be non-root and no greater than 2147483647" >&2
+		return 1
+	}
+}
+
+validate_tcp_port() {
+	local port="$1"
+	[[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || {
+		echo "ERROR: TCP port must be a whole number from 1 through 65535" >&2
+		return 1
+	}
+}
+
+host_tcp_port_is_bound() {
+	local port="$1"
+	ss -H -ltn | awk -v suffix=":$port" '
+		$4 == suffix || (length($4) >= length(suffix) && substr($4, length($4) - length(suffix) + 1) == suffix) { found=1 }
+		END { exit !found }
+	'
+}
+
+container_publishes_tcp_port() {
+	local container="$1" port="$2"
+	docker inspect -f '{{range $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{println .HostPort}}{{end}}{{end}}' \
+		"$container" 2>/dev/null | grep -qx "$port"
+}

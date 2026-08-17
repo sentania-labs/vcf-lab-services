@@ -9,11 +9,12 @@ the current GitHub repository's GHCR namespace:
 
 - `ui:vMAJOR.MINOR.PATCH`
 - `sync-base:vMAJOR.MINOR.PATCH`
+- `sftp:vMAJOR.MINOR.PATCH`
 
 The `latest` convenience tags follow the highest semantic version that exists
 in the repository, so a back-port tag such as `v1.0.1` pushed after `v1.1.0`
 publishes only its exact version tags and leaves `latest` on `v1.1.0`. The exact
-release tag is embedded in both images as the
+release tag is embedded in every image as the
 `org.opencontainers.image.version` label and the `VCF_SERVICES_VERSION`
 environment value. Future installer upgrade and GUI release-check work must
 compare against that exact tag value rather than maintaining a separate
@@ -42,10 +43,10 @@ Git so a test copy can never be committed.
 
 ## Package visibility
 
-Both container packages are intentionally public. This product is public and
+All container packages are intentionally public. This product is public and
 its installer pulls without any registry credentials, so a private package
 breaks every operator install. GHCR can create a package as private on its
-first publish, so the release workflow sets both packages public through the
+first publish, so the release workflow sets every package public through the
 GitHub API, hard-fails if either is not public, and proves a credential-free
 pull before the GitHub release is created. The installer never carries registry
 credentials. If the workflow's token cannot change package visibility, add a
@@ -87,6 +88,7 @@ candidate=v0.0.0-rc
 repo=ghcr.io/$(git config --get remote.origin.url | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#' | tr 'A-Z' 'a-z')
 docker build --build-arg "VCF_SERVICES_VERSION=$candidate" -f Dockerfile.ui -t "$repo/ui:$candidate" .
 docker build --build-arg "VCF_SERVICES_VERSION=$candidate" -f Dockerfile.sync-base -t "$repo/sync-base:$candidate" .
+docker build --build-arg "VCF_SERVICES_VERSION=$candidate" -f Dockerfile.sftp -t "$repo/sftp:$candidate" .
 ./install.sh --version "$candidate"
 ```
 

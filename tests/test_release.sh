@@ -45,11 +45,13 @@ grep -qx "VCF_SERVICES_IMAGE_REPOSITORY=$repository" "$work_dir/vcf-lab-services
 
 grep -q 'pull_product_image "$ui_image"' "$project_dir/install.sh"
 grep -q 'pull_product_image "$sync_base_image"' "$project_dir/install.sh"
+grep -q 'pull_product_image "$sftp_image"' "$project_dir/install.sh"
 grep -q 'docker pull "$image"' "$project_dir/install.sh"
 grep -q 'could not pull \$image' "$project_dir/install.sh"
 ! grep -q 'Dockerfile.sync-base' "$project_dir/install.sh"
 grep -q 'SYNC_BASE_IMAGE=$sync_base_image' "$project_dir/install.sh"
 grep -q 'VCF_SERVICES_UI_IMAGE' "$project_dir/docker-compose.yml"
+grep -q 'VCF_SERVICES_SFTP_IMAGE' "$project_dir/docker-compose.yml"
 grep -qx '!build/vcfdt/\*\*' "$project_dir/Dockerfile.sync.dockerignore"
 
 bundle_dir="$work_dir/vcf-lab-services-$version"

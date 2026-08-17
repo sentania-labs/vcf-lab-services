@@ -25,6 +25,14 @@
            padding:9px 18px; font-weight:600; cursor:pointer; }
   button:disabled { background:#39434e; color:var(--muted); cursor:not-allowed; }
   button.secondary { background:#2b3540; }
+  input,select { width:100%; background:#111820; color:var(--fg); border:1px solid var(--line);
+                 border-radius:6px; padding:8px 10px; }
+  input[type="checkbox"] { width:auto; }
+  .formgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+  .field { min-width:0; }
+  .field label { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; }
+  .field.full { grid-column:1 / -1; }
+  .help { color:var(--muted); font-size:12px; margin:8px 0 0; }
   .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
   .stat { background:#222c36; border-radius:6px; padding:10px 12px; min-width:0; }
   .stat .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
@@ -53,7 +61,7 @@
 <body>
 <header>
   <h1>VCF Services</h1>
-  <span class="sub">Depot administration</span>
+  <span class="sub">Depot and backup administration</span>
 </header>
 <main>
   <section class="panel">
@@ -87,6 +95,26 @@
   </section>
 
   <section class="panel">
+    <h2>SFTP backup settings</h2>
+    <div class="formgrid">
+      <div class="field"><label>Service</label><label class="tgt"><input id="bk-enabled" type="checkbox"> Enabled</label></div>
+      <div class="field"><label for="bk-port">Published port</label><input id="bk-port" type="number" min="1" max="65535"></div>
+      <div class="field"><label for="bk-user">Allowed user</label><input id="bk-user" value="vcfbackup" readonly></div>
+      <div class="field"><label for="bk-uidgid">UID:GID</label><input id="bk-uidgid" placeholder="1003:1003"></div>
+      <div class="field full"><label for="bk-password">Password</label><input id="bk-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep the current secret"></div>
+      <div class="field"><label for="bk-storage">Shared depot and backup storage mode</label>
+        <select id="bk-storage"><option value="local">Local</option><option value="nfs">NFS</option></select></div>
+      <div class="field" id="bk-local-wrap"><label for="bk-local">Local depot root</label><input id="bk-local" placeholder="/srv/vcf-services/depot"></div>
+      <div class="field bk-nfs"><label for="bk-nfs-server">NFS server</label><input id="bk-nfs-server"></div>
+      <div class="field bk-nfs"><label for="bk-nfs-export">NFS export</label><input id="bk-nfs-export"></div>
+      <div class="field bk-nfs"><label for="bk-nfs-options">NFS options</label><input id="bk-nfs-options"></div>
+      <div class="field full"><div class="stat"><div class="k">Backup path</div><div class="v" id="bk-path">...</div></div></div>
+    </div>
+    <p class="help">Enable, password, and UID:GID changes reload within five seconds. Port and shared storage changes are staged safely and require an installer rerun because they change host mounts or published ports.</p>
+    <div class="row" style="margin-top:12px"><button id="bk-save">Save backup settings</button><span id="bk-flash" class="muted"></span></div>
+  </section>
+
+  <section class="panel">
     <h2>Live log</h2>
     <pre id="log">(no run log yet)</pre>
   </section>
@@ -105,6 +133,35 @@
 const byId = id => document.getElementById(id);
 const escapeHtml = text => { const node = document.createElement('div'); node.textContent = text ?? ''; return node.innerHTML; };
 const fmt = value => value ? new Date(value).toLocaleString() : 'not available';
+
+function toggleBackupStorage() {
+  const nfs = byId('bk-storage').value === 'nfs';
+  byId('bk-local-wrap').hidden = nfs;
+  document.querySelectorAll('.bk-nfs').forEach(field => field.hidden = !nfs);
+}
+
+async function loadBackupSettings() {
+  try {
+    const response = await fetch('api/settings/backup');
+    const settings = await response.json();
+    if (!response.ok) throw new Error(settings.error || 'Settings unavailable');
+    byId('bk-enabled').checked = settings.enabled;
+    byId('bk-port').value = settings.port;
+    byId('bk-user').value = settings.user;
+    byId('bk-uidgid').value = settings.uidGid;
+    byId('bk-storage').value = settings.storageMode;
+    byId('bk-local').value = settings.localPath;
+    byId('bk-nfs-server').value = settings.nfsServer;
+    byId('bk-nfs-export').value = settings.nfsExport;
+    byId('bk-nfs-options').value = settings.nfsOptions;
+    byId('bk-path').textContent = settings.backupPath || 'created during installation';
+    byId('bk-password').placeholder = settings.passwordConfigured
+      ? 'Configured, leave blank to keep it' : 'Required before enabling backup';
+    toggleBackupStorage();
+  } catch (error) {
+    byId('bk-flash').textContent = error.message;
+  }
+}
 
 async function poll() {
   try {
@@ -178,8 +235,40 @@ byId('syncBtn').onclick = async () => {
   poll();
 };
 byId('refreshRemote').onclick = () => loadRemote(true);
+byId('bk-storage').onchange = toggleBackupStorage;
+byId('bk-save').onclick = async () => {
+  byId('bk-save').disabled = true;
+  byId('bk-flash').textContent = 'Saving';
+  const payload = {
+    enabled: byId('bk-enabled').checked,
+    port: byId('bk-port').value,
+    uidGid: byId('bk-uidgid').value,
+    password: byId('bk-password').value || null,
+    storageMode: byId('bk-storage').value,
+    localPath: byId('bk-local').value,
+    nfsServer: byId('bk-nfs-server').value,
+    nfsExport: byId('bk-nfs-export').value,
+    nfsOptions: byId('bk-nfs-options').value
+  };
+  try {
+    const response = await fetch('api/settings/backup', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Save failed');
+    byId('bk-password').value = '';
+    byId('bk-flash').textContent = result.installerRerunRequired
+      ? 'Saved. Rerun install.sh to apply the port or storage change.'
+      : 'Saved. The SFTP service will reload within five seconds.';
+    await loadBackupSettings();
+  } catch (error) {
+    byId('bk-flash').textContent = error.message;
+  } finally {
+    byId('bk-save').disabled = false;
+  }
+};
 
 poll();
+loadBackupSettings();
 setInterval(poll, 5000);
 </script>
 </body>

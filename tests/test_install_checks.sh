@@ -70,4 +70,27 @@ expired_error="$(validate_provided_tls "$work_dir/expired.crt" "$work_dir/good.k
 grep -qi "expired" <<< "$expired_error" || fail "expired certificate error message missing"
 echo "tls validation tests passed"
 
+validate_uid_gid "1003:1003" || fail "valid SFTP UID:GID rejected"
+validate_uid_gid "0:1003" 2>/dev/null && fail "root SFTP UID accepted"
+validate_uid_gid "1003" 2>/dev/null && fail "UID without GID accepted"
+validate_uid_gid "name:1003" 2>/dev/null && fail "non-numeric UID accepted"
+validate_tcp_port "2222" || fail "valid SFTP port rejected"
+validate_tcp_port "0" 2>/dev/null && fail "TCP port zero accepted"
+validate_tcp_port "65536" 2>/dev/null && fail "TCP port above 65535 accepted"
+
+ss() {
+	printf 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:*\n'
+}
+host_tcp_port_is_bound 2222 || fail "bound host port was not detected"
+host_tcp_port_is_bound 2223 && fail "free host port was reported as bound"
+unset -f ss
+
+docker() {
+	printf '2222\n'
+}
+container_publishes_tcp_port test-container 2222 || fail "container host port was not detected"
+container_publishes_tcp_port test-container 2223 && fail "wrong container host port was accepted"
+unset -f docker
+echo "SFTP installer validation tests passed"
+
 echo "install checks tests passed"

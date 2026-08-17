@@ -7,9 +7,11 @@ protected Redis bus documented in docs/redis-contract.md. It never talks to
 the Docker daemon.
 """
 
+import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +24,8 @@ from flask import Flask, jsonify, render_template, request
 DEPOT = Path(os.environ.get("DEPOT_DIR", "/depot"))
 STATE = Path(os.environ.get("STATE_DIR", "/state"))
 SETTINGS = Path(os.environ.get("SETTINGS_FILE", "/config/settings.env"))
+SFTP_SECRET_DIR = Path(os.environ.get("SFTP_SECRET_DIR", "/run/sftp-secrets"))
+SFTP_PASSWORD_FILE = SFTP_SECRET_DIR / "password"
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_PASSWORD_FILE = os.environ.get("REDIS_PASSWORD_FILE", "/run/redis/password")
@@ -79,6 +83,99 @@ def _settings():
     except OSError:
         pass
     return values
+
+
+def _write_settings(updates):
+    lines = []
+    replaced = set()
+    try:
+        existing = SETTINGS.read_text().splitlines()
+    except OSError:
+        existing = []
+    for line in existing:
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", line)
+        key = match.group(1) if match else None
+        if key in updates:
+            lines.append(_format_setting(key, updates[key]))
+            replaced.add(key)
+        else:
+            lines.append(line)
+    for key, value in updates.items():
+        if key not in replaced:
+            lines.append(_format_setting(key, value))
+
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(prefix="settings.env.", dir=SETTINGS.parent)
+    try:
+        os.fchmod(handle, 0o640)
+        with os.fdopen(handle, "w") as stream:
+            stream.write("\n".join(lines) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, SETTINGS)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _format_setting(key, value):
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("$", "\\$").replace("`", "\\`")
+    return f'{key}="{escaped}"'
+
+
+def _write_sftp_password(password):
+    SFTP_SECRET_DIR.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(prefix="password.", dir=SFTP_SECRET_DIR)
+    try:
+        os.fchmod(handle, 0o600)
+        with os.fdopen(handle, "w") as stream:
+            stream.write(password + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, SFTP_PASSWORD_FILE)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _bool_setting(value, fallback=True):
+    normalized = str(value or "").lower()
+    if normalized in {"true", "yes", "1"}:
+        return True
+    if normalized in {"false", "no", "0"}:
+        return False
+    return fallback
+
+
+def _backup_settings_doc(settings=None):
+    settings = settings or _settings()
+    storage_mode = settings.get("STORAGE_MODE", "local")
+    return {
+        "enabled": _bool_setting(settings.get("BACKUP_ENABLED"), True),
+        "port": int(settings.get("SFTP_PORT", "2222")),
+        "user": "vcfbackup",
+        "uidGid": settings.get("SFTP_UID_GID", "1003:1003"),
+        "storageMode": storage_mode,
+        "localPath": settings.get("DEPOT_LOCAL_PATH", ""),
+        "nfsServer": settings.get("NFS_SERVER", ""),
+        "nfsExport": settings.get("NFS_EXPORT", ""),
+        "nfsOptions": settings.get(
+            "NFS_OPTIONS", "nfsvers=4,rw,hard,timeo=600,retrans=2"
+        ),
+        "backupPath": settings.get(
+            "BACKUP_LOCAL_PATH" if storage_mode == "local" else "BACKUP_NFS_EXPORT",
+            "",
+        ),
+        "passwordConfigured": SFTP_PASSWORD_FILE.is_file()
+        and SFTP_PASSWORD_FILE.stat().st_size > 0,
+    }
 
 
 def _state():
@@ -201,6 +298,114 @@ def log():
         except OSError:
             text = ""
     return jsonify({"log": text})
+
+
+@app.get("/api/settings/backup")
+def backup_settings():
+    return jsonify(_backup_settings_doc())
+
+
+@app.post("/api/settings/backup")
+def update_backup_settings():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "a JSON settings document is required"}), 400
+
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return jsonify({"error": "enabled must be true or false"}), 400
+
+    port = body.get("port")
+    if isinstance(port, bool) or not str(port).isdigit() or not 1 <= int(port) <= 65535:
+        return jsonify({"error": "port must be a whole number from 1 through 65535"}), 400
+    port = int(port)
+
+    uid_gid = str(body.get("uidGid", ""))
+    match = re.fullmatch(r"([0-9]+):([0-9]+)", uid_gid)
+    if not match or any(not 1 <= int(value) <= 2147483647 for value in match.groups()):
+        return jsonify({"error": "UID:GID must contain two non-root numeric values"}), 400
+
+    storage_mode = str(body.get("storageMode", "")).lower()
+    if storage_mode not in {"local", "nfs"}:
+        return jsonify({"error": "storage mode must be local or nfs"}), 400
+
+    local_path = str(body.get("localPath", ""))
+    nfs_server = str(body.get("nfsServer", ""))
+    nfs_export = str(body.get("nfsExport", ""))
+    nfs_options = str(body.get("nfsOptions", ""))
+    if storage_mode == "local":
+        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", local_path):
+            return jsonify({"error": "local path must be a plain absolute path"}), 400
+        nfs_server = ""
+        nfs_export = ""
+        backup_path = local_path.rstrip("/") + "/backup"
+    else:
+        local_path = ""
+        if not re.fullmatch(r"[A-Za-z0-9.:-]+", nfs_server):
+            return jsonify({"error": "NFS server is invalid"}), 400
+        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", nfs_export):
+            return jsonify({"error": "NFS export must be a plain absolute path"}), 400
+        if not re.fullmatch(r"[A-Za-z0-9_=,.-]+", nfs_options):
+            return jsonify({"error": "NFS options contain unsupported characters"}), 400
+        backup_path = nfs_export.rstrip("/") + "/backup"
+
+    password = body.get("password")
+    if password is not None:
+        if not isinstance(password, str) or "\n" in password or "\r" in password:
+            return jsonify({"error": "password must be one line"}), 400
+        if len(password) > 1024:
+            return jsonify({"error": "password is too long"}), 400
+        if not password:
+            password = None
+    if enabled and not password and not (
+        SFTP_PASSWORD_FILE.is_file() and SFTP_PASSWORD_FILE.stat().st_size > 0
+    ):
+        return jsonify({"error": "a password is required before backup can be enabled"}), 400
+
+    depot_material = "|".join(
+        [storage_mode, local_path, nfs_server, nfs_export, nfs_options]
+    )
+    backup_material = "|".join(
+        [storage_mode, backup_path if storage_mode == "local" else "", nfs_server,
+         backup_path if storage_mode == "nfs" else "", nfs_options]
+    )
+    updates = {
+        "BACKUP_ENABLED": str(enabled).lower(),
+        "SFTP_PORT": str(port),
+        "SFTP_UID_GID": uid_gid,
+        "STORAGE_MODE": storage_mode,
+        "DEPOT_LOCAL_PATH": local_path,
+        "NFS_SERVER": nfs_server,
+        "NFS_EXPORT": nfs_export,
+        "NFS_OPTIONS": nfs_options,
+        "DEPOT_VOLUME_NAME": "vcf-services-depot-store-"
+        + hashlib.sha256((depot_material + "\n").encode()).hexdigest()[:12],
+        "BACKUP_VOLUME_NAME": "vcf-services-backup-store-"
+        + hashlib.sha256((backup_material + "\n").encode()).hexdigest()[:12],
+        "BACKUP_LOCAL_PATH": backup_path if storage_mode == "local" else "",
+        "BACKUP_NFS_EXPORT": backup_path if storage_mode == "nfs" else "",
+    }
+    before = _backup_settings_doc()
+    try:
+        if password:
+            _write_sftp_password(password)
+        _write_settings(updates)
+    except OSError as exc:
+        return jsonify({"error": f"could not save backup settings: {exc}"}), 500
+
+    after = _backup_settings_doc()
+    restart_required = any(
+        before[key] != after[key]
+        for key in ("port", "storageMode", "localPath", "nfsServer", "nfsExport", "nfsOptions")
+    )
+    return jsonify(
+        {
+            **after,
+            "saved": True,
+            "liveReloadSeconds": 5,
+            "installerRerunRequired": restart_required,
+        }
+    )
 
 
 @app.get("/api/versions/local")

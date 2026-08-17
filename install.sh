@@ -73,7 +73,7 @@ done
 declare -A answers=()
 allowed_answer() {
 	case "$1" in
-		VCFDT_ARCHIVE|PRODUCT_FQDN|TZ|STORAGE_MODE|DEPOT_LOCAL_PATH|NFS_SERVER|NFS_EXPORT|NFS_OPTIONS|TLS_MODE|TLS_CERT_PATH|TLS_KEY_PATH|AUTH_USERNAME|AUTH_PASSWORD|HTTPS_PORT|VCF_VERSION|SKU|SYNC_TARGETS|CRON_SCHEDULE|CEIP|ESX_MODE|LOG_RETENTION|VKR_MATCH|VKR_OS|DEPOT_ENDPOINT|TOKEN_URL|ACTIVATION_CODE) return 0 ;;
+		VCFDT_ARCHIVE|PRODUCT_FQDN|TZ|STORAGE_MODE|DEPOT_LOCAL_PATH|NFS_SERVER|NFS_EXPORT|NFS_OPTIONS|TLS_MODE|TLS_CERT_PATH|TLS_KEY_PATH|AUTH_USERNAME|AUTH_PASSWORD|HTTPS_PORT|BACKUP_ENABLED|SFTP_PORT|SFTP_PASSWORD|SFTP_UID_GID|VCF_VERSION|SKU|SYNC_TARGETS|CRON_SCHEDULE|CEIP|ESX_MODE|LOG_RETENTION|VKR_MATCH|VKR_OS|DEPOT_ENDPOINT|TOKEN_URL|ACTIVATION_CODE) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -108,6 +108,12 @@ ask() {
 		read -r -p "$label [$default_value]: " REPLY_VALUE
 	fi
 	REPLY_VALUE="${REPLY_VALUE:-$default_value}"
+}
+
+saved_setting() {
+	local key="$1" fallback="$2" value
+	value="$(sed -nE "s/^${key}=\"?([^\"]*)\"?$/\\1/p" "$project_dir/config/settings.env" 2>/dev/null | tail -n 1)"
+	printf '%s' "${value:-$fallback}"
 }
 
 require_command() {
@@ -209,6 +215,7 @@ fi
 
 sync_base_image="$image_repository/sync-base:$release_version"
 ui_image="$image_repository/ui:$release_version"
+sftp_image="$image_repository/sftp:$release_version"
 
 echo "VCF Services installer"
 echo "The health endpoint and UMDS patch-store subtree are intentionally unauthenticated."
@@ -235,7 +242,7 @@ token_url="$REPLY_VALUE"
 token_url_pattern='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~:/?%&=+,@-]*)?$'
 [[ "$token_url" =~ $token_url_pattern ]] || { echo "ERROR: token URL must be a valid HTTPS URL" >&2; exit 2; }
 
-ask STORAGE_MODE "Depot storage mode (local or nfs)" "local"
+ask STORAGE_MODE "Depot and backup storage mode (local or nfs)" "$(saved_setting STORAGE_MODE local)"
 storage_mode="${REPLY_VALUE,,}"
 [[ "$storage_mode" == local || "$storage_mode" == nfs ]] || { echo "ERROR: storage mode must be local or nfs" >&2; exit 2; }
 
@@ -244,18 +251,18 @@ nfs_server=""
 nfs_export=""
 nfs_options="nfsvers=4,rw,hard,timeo=600,retrans=2"
 if [ "$storage_mode" = local ]; then
-	ask DEPOT_LOCAL_PATH "Local depot directory" "$project_dir/data/depot"
+	ask DEPOT_LOCAL_PATH "Local depot directory" "$(saved_setting DEPOT_LOCAL_PATH "$project_dir/data/depot")"
 	depot_local_path="$REPLY_VALUE"
 	[[ "$depot_local_path" = /* ]] || depot_local_path="$project_dir/${depot_local_path#./}"
 	depot_local_path="$(realpath -m "$depot_local_path")"
 else
-	ask NFS_SERVER "NFS server" "nfs.example.com"
+	ask NFS_SERVER "NFS server" "$(saved_setting NFS_SERVER nfs.example.com)"
 	nfs_server="$REPLY_VALUE"
 	[[ "$nfs_server" =~ ^[A-Za-z0-9.:-]+$ ]] || { echo "ERROR: invalid NFS server" >&2; exit 2; }
-	ask NFS_EXPORT "NFS export path" "/exports/vcf-services-depot"
+	ask NFS_EXPORT "NFS export path" "$(saved_setting NFS_EXPORT /exports/vcf-services-depot)"
 	nfs_export="$REPLY_VALUE"
 	[[ "$nfs_export" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "ERROR: NFS export must be a plain absolute path" >&2; exit 2; }
-	ask NFS_OPTIONS "NFS mount options" "$nfs_options"
+	ask NFS_OPTIONS "NFS mount options" "$(saved_setting NFS_OPTIONS "$nfs_options")"
 	nfs_options="$REPLY_VALUE"
 	[[ "$nfs_options" =~ ^[A-Za-z0-9_=,.-]+$ ]] || { echo "ERROR: NFS options contain unsupported characters" >&2; exit 2; }
 fi
@@ -287,7 +294,46 @@ fi
 
 ask HTTPS_PORT "Published HTTPS port" "443"
 https_port="$REPLY_VALUE"
-[[ "$https_port" =~ ^[0-9]+$ ]] && [ "$https_port" -ge 1 ] && [ "$https_port" -le 65535 ] || { echo "ERROR: invalid HTTPS port" >&2; exit 2; }
+validate_tcp_port "$https_port" || exit 2
+
+ask BACKUP_ENABLED "Enable the SFTP backup target (true or false)" "$(saved_setting BACKUP_ENABLED true)"
+backup_enabled="${REPLY_VALUE,,}"
+case "$backup_enabled" in
+	yes|1) backup_enabled=true ;;
+	no|0) backup_enabled=false ;;
+	true|false) ;;
+	*) echo "ERROR: backup enabled must be true or false" >&2; exit 2 ;;
+esac
+
+ask SFTP_PORT "Published SFTP port" "$(saved_setting SFTP_PORT 2222)"
+sftp_port="$REPLY_VALUE"
+validate_tcp_port "$sftp_port" || exit 2
+[ "$sftp_port" != "$https_port" ] || { echo "ERROR: SFTP_PORT must differ from HTTPS_PORT" >&2; exit 2; }
+
+ask SFTP_UID_GID "Backup service UID:GID" "$(saved_setting SFTP_UID_GID 1003:1003)"
+sftp_uid_gid="$REPLY_VALUE"
+validate_uid_gid "$sftp_uid_gid" || exit 2
+
+sftp_password=""
+sftp_password_file="$project_dir/secrets/sftp/password"
+if [ "$backup_enabled" = true ]; then
+	if [[ -v "answers[SFTP_PASSWORD]" ]]; then
+		sftp_password="${answers[SFTP_PASSWORD]}"
+	elif [ ! -s "$sftp_password_file" ]; then
+		ask SFTP_PASSWORD "SFTP backup password" "" true
+		sftp_password="$REPLY_VALUE"
+	fi
+	if [ -n "$sftp_password" ]; then
+		if [ -z "$answers_file" ]; then
+			read -r -s -p "Confirm SFTP backup password [no default]: " sftp_password_confirm
+			echo
+			[ "$sftp_password" = "$sftp_password_confirm" ] || { echo "ERROR: SFTP passwords do not match" >&2; exit 2; }
+		fi
+	elif [ ! -s "$sftp_password_file" ]; then
+		echo "ERROR: an SFTP backup password is required when backup is enabled" >&2
+		exit 2
+	fi
+fi
 
 ask VCF_VERSION "VCF version filter" "9.1.0"
 vcf_version="$REPLY_VALUE"
@@ -328,16 +374,31 @@ vkr_value_pattern='^[A-Za-z0-9._ -]*$'
 	exit 2
 }
 
+sftp_uid="${sftp_uid_gid%%:*}"
+sftp_gid="${sftp_uid_gid#*:}"
+backup_local_path=""
+backup_nfs_export=""
+if [ "$storage_mode" = local ]; then
+	backup_local_path="$depot_local_path/backup"
+else
+	backup_nfs_export="${nfs_export%/}/backup"
+fi
+
 echo "Running host preflight checks"
 [ "$(uname -m)" = x86_64 ] || { echo "ERROR: only x86_64 hosts are supported" >&2; exit 1; }
 if [ "$EUID" -ne 0 ] && ! id -nG | tr ' ' '\n' | grep -qx docker; then
 	echo "ERROR: run as root or as a member of the docker group" >&2
 	exit 1
 fi
-for command_name in docker curl openssl jq realpath sha256sum; do require_command "$command_name"; done
+for command_name in docker curl openssl jq realpath sha256sum ss; do require_command "$command_name"; done
 case "$vcfdt_archive" in *.zip) require_command unzip ;; *) require_command tar ;; esac
 docker info >/dev/null 2>&1 || { echo "ERROR: current user cannot access the Docker daemon" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "ERROR: Docker Compose v2 is required" >&2; exit 1; }
+if host_tcp_port_is_bound "$sftp_port" \
+	&& ! container_publishes_tcp_port vcf-services-sftp "$sftp_port"; then
+	echo "ERROR: SFTP_PORT $sftp_port is already bound on this host. Choose another port and rerun install.sh." >&2
+	exit 1
+fi
 if [ "$storage_mode" = nfs ]; then
 	command -v mount.nfs >/dev/null 2>&1 || { echo "ERROR: install nfs-common before using NFS storage" >&2; exit 1; }
 fi
@@ -347,11 +408,18 @@ if [ "$outbound_status" = 000 ]; then
 	exit 1
 fi
 
-mkdir -p "$project_dir/config" "$project_dir/secrets/tls" "$project_dir/data" "$project_dir/build/vcfdt"
+mkdir -p "$project_dir/config" "$project_dir/secrets/tls" "$project_dir/secrets/sftp" \
+	"$project_dir/data" "$project_dir/build/vcfdt"
 chmod 0700 "$project_dir/secrets"
+chmod 0700 "$project_dir/secrets/sftp"
+if [ -n "$sftp_password" ]; then
+	printf '%s\n' "$sftp_password" > "$sftp_password_file"
+	chmod 0600 "$sftp_password_file"
+	sftp_password=""
+fi
 
 if [ "$storage_mode" = local ]; then
-	mkdir -p "$depot_local_path"
+	mkdir -p "$depot_local_path" "$backup_local_path"
 	available_kb="$(df -Pk "$depot_local_path" | awk 'NR==2 {print $4}')"
 	minimum_kb=$((minimum_free_gb * 1024 * 1024))
 	[ "$available_kb" -ge "$minimum_kb" ] || {
@@ -367,6 +435,13 @@ else
 		sh -c "df -Pk /depot | awk 'NR==2 {print \$4}'")"; then
 		docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
 		echo "ERROR: NFS export could not be mounted" >&2
+		exit 1
+	fi
+	if ! docker run --rm --user "$sftp_uid:$sftp_gid" -v "$preflight_volume:/storage:rw" alpine:3.20 \
+		sh -c 'mkdir -p /storage/backup && test -w /storage/backup'; then
+		docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
+		echo "ERROR: SFTP UID:GID $sftp_uid_gid cannot create or write $backup_nfs_export." >&2
+		echo "       Confirm the NFS export ownership and that it permits the Docker host." >&2
 		exit 1
 	fi
 	docker volume rm "$preflight_volume" >/dev/null
@@ -397,6 +472,9 @@ vcfdt_version="${vcfdt_version:-unknown}"
 depot_volume_fingerprint="$(printf '%s\n' "$storage_mode|$depot_local_path|$nfs_server|$nfs_export|$nfs_options" \
 	| sha256sum | cut -c1-12)"
 depot_volume_name="vcf-services-depot-store-$depot_volume_fingerprint"
+backup_volume_fingerprint="$(printf '%s\n' "$storage_mode|$backup_local_path|$nfs_server|$backup_nfs_export|$nfs_options" \
+	| sha256sum | cut -c1-12)"
+backup_volume_name="vcf-services-backup-store-$backup_volume_fingerprint"
 
 write_setting() {
 	local key="$1" value="$2" escaped
@@ -430,6 +508,12 @@ write_setting NFS_SERVER "$nfs_server"
 write_setting NFS_EXPORT "$nfs_export"
 write_setting NFS_OPTIONS "$nfs_options"
 write_setting HTTPS_PORT "$https_port"
+write_setting BACKUP_ENABLED "$backup_enabled"
+write_setting SFTP_PORT "$sftp_port"
+write_setting SFTP_UID_GID "$sftp_uid_gid"
+write_setting BACKUP_VOLUME_NAME "$backup_volume_name"
+write_setting BACKUP_LOCAL_PATH "$backup_local_path"
+write_setting BACKUP_NFS_EXPORT "$backup_nfs_export"
 write_setting VCFDT_VERSION "$vcfdt_version"
 chmod 0640 "$settings_tmp"
 mv "$settings_tmp" "$project_dir/config/settings.env"
@@ -437,17 +521,26 @@ mv "$settings_tmp" "$project_dir/config/settings.env"
 env_tmp="$(mktemp "$project_dir/.env.XXXXXX")"
 {
 	printf 'HTTPS_PORT=%s\n' "$https_port"
+	printf 'SFTP_PORT=%s\n' "$sftp_port"
 	printf 'DEPOT_VOLUME_NAME=%s\n' "$depot_volume_name"
+	printf 'BACKUP_VOLUME_NAME=%s\n' "$backup_volume_name"
 	printf 'VCF_SERVICES_VERSION=%s\n' "$release_version"
 	printf 'VCF_SERVICES_UI_IMAGE=%s\n' "$ui_image"
+	printf 'VCF_SERVICES_SFTP_IMAGE=%s\n' "$sftp_image"
 	if [ "$storage_mode" = local ]; then
 		printf 'DEPOT_VOLUME_TYPE=none\n'
 		printf 'DEPOT_VOLUME_OPTIONS=bind\n'
 		printf 'DEPOT_VOLUME_DEVICE=%s\n' "$depot_local_path"
+		printf 'BACKUP_VOLUME_TYPE=none\n'
+		printf 'BACKUP_VOLUME_OPTIONS=bind\n'
+		printf 'BACKUP_VOLUME_DEVICE=%s\n' "$backup_local_path"
 	else
 		printf 'DEPOT_VOLUME_TYPE=nfs\n'
 		printf 'DEPOT_VOLUME_OPTIONS=addr=%s,%s\n' "$nfs_server" "$nfs_options"
 		printf 'DEPOT_VOLUME_DEVICE=:%s\n' "$nfs_export"
+		printf 'BACKUP_VOLUME_TYPE=nfs\n'
+		printf 'BACKUP_VOLUME_OPTIONS=addr=%s,%s\n' "$nfs_server" "$nfs_options"
+		printf 'BACKUP_VOLUME_DEVICE=:%s\n' "$backup_nfs_export"
 	fi
 } >> "$env_tmp"
 chmod 0600 "$env_tmp"
@@ -501,6 +594,7 @@ pull_product_image() {
 echo "Pulling product images and building the local licensed sync layer"
 pull_product_image "$ui_image"
 pull_product_image "$sync_base_image"
+pull_product_image "$sftp_image"
 docker build --build-arg "SYNC_BASE_IMAGE=$sync_base_image" \
 	-f "$project_dir/Dockerfile.sync" -t vcf-services-sync:local "$project_dir"
 
@@ -511,6 +605,41 @@ if [ -n "$tool_version_output" ]; then
 fi
 
 docker volume create vcf-services-vcfdt-state >/dev/null
+docker volume create vcf-services-sftp-host-keys >/dev/null
+if ! docker volume inspect "$backup_volume_name" >/dev/null 2>&1; then
+	if [ "$storage_mode" = local ]; then
+		docker volume create --driver local \
+			--label com.docker.compose.project=vcf-services \
+			--label com.docker.compose.volume=backup_store \
+			--opt type=none --opt o=bind \
+			--opt "device=$backup_local_path" "$backup_volume_name" >/dev/null
+	else
+		docker volume create --driver local \
+			--label com.docker.compose.project=vcf-services \
+			--label com.docker.compose.volume=backup_store \
+			--opt type=nfs \
+			--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$backup_nfs_export" \
+			"$backup_volume_name" >/dev/null
+	fi
+fi
+docker run --rm --entrypoint /bin/sh -v "$backup_volume_name:/mnt/backup:rw" "$sftp_image" \
+	-c 'set -eu
+		expected="$1:$2"
+		current="$(stat -c "%u:%g" /mnt/backup)"
+		first="$(find /mnt/backup -mindepth 1 -maxdepth 1 -print -quit)"
+		if [ "$current" != "$expected" ] && [ -z "$first" ]; then
+			chown "$expected" /mnt/backup
+		fi' sh "$sftp_uid" "$sftp_gid"
+if ! docker run --rm --user "$sftp_uid:$sftp_gid" --entrypoint /bin/sh \
+	-v "$backup_volume_name:/mnt/backup:rw" "$sftp_image" \
+	-c 'set -eu
+		mkdir -p /mnt/backup/sddc-manager /mnt/backup/nsx /mnt/backup/vcenter
+		touch /mnt/backup/.vcf-services-write-check
+		rm /mnt/backup/.vcf-services-write-check'; then
+	echo "ERROR: SFTP UID:GID $sftp_uid_gid cannot write the backup storage." >&2
+	echo "       Existing content was not re-owned. Correct the share ownership, then rerun install.sh." >&2
+	exit 1
+fi
 machine_id_output="$(docker run --rm \
 	--entrypoint /opt/vcfdt/bin/vcf-download-tool \
 	-v vcf-services-vcfdt-state:/root/.local/share/vmware/vdt \
@@ -558,7 +687,7 @@ docker compose up -d
 # Compose keeps the old sync container. Restart it so it re-reads arming state.
 docker compose restart depot-sync
 
-containers=(vcf-services-depot-web vcf-services-sync vcf-services-ui vcf-services-redis)
+containers=(vcf-services-depot-web vcf-services-sync vcf-services-sftp vcf-services-ui vcf-services-redis)
 deadline=$((SECONDS + 120))
 while [ "$SECONDS" -lt "$deadline" ]; do
 	all_healthy=true
@@ -593,6 +722,16 @@ curl -kfsS --resolve "$resolve_arg" "$base_url/healthz" | grep -qx ok
 curl -kfsS --resolve "$resolve_arg" -u "$auth_username:$auth_password" "$base_url/admin/" | grep -q "VCF Services"
 AUTH_USERNAME="$auth_username" AUTH_PASSWORD="$auth_password" \
 	"$project_dir/scripts/verify-byte-exact.sh" "$base_url" "$resolve_arg"
+if [ "$backup_enabled" = true ]; then
+	sftp_verify_password="$(cat "$sftp_password_file")"
+	SSHPASS="$sftp_verify_password" docker run --rm --network host --entrypoint /bin/sh \
+		-e SSHPASS -e "SFTP_PORT=$sftp_port" "$sftp_image" \
+		-c 'printf "ls -la /mnt/backup\nbye\n" | sshpass -e sftp -q \
+			-o BatchMode=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+			-P "$SFTP_PORT" vcfbackup@127.0.0.1 >/dev/null'
+	sftp_verify_password=""
+	docker compose logs sftp-backup | grep -q '(ECDSA)'
+fi
 
 echo
 echo "VCF Services is running and passed live HTTPS checks."
@@ -602,6 +741,13 @@ echo "UMDS patch store, unauthenticated: $base_url/umds-patch-store/"
 echo "Health, unauthenticated: $base_url/healthz"
 echo "Fleet content gateway source path: /PROD/COMP/VKR/"
 echo "Credential format: $auth_username:<the password entered during installation>"
+if [ "$backup_enabled" = true ]; then
+	echo "SFTP backup: sftp://$product_fqdn:$sftp_port/mnt/backup/<component>"
+	echo "SFTP credential: vcfbackup:<the SFTP password entered during installation>"
+	echo "SFTP host fingerprints: docker compose logs sftp-backup"
+else
+	echo "SFTP backup: disabled in the admin settings"
+fi
 if [ ! -s "$project_dir/secrets/activation-code.txt" ]; then
 	echo "Sync status: not armed: activation code missing. Register the Software Depot ID above, then rerun install.sh."
 fi
