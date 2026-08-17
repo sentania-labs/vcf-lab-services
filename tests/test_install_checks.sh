@@ -3,7 +3,17 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 work_dir="$(mktemp -d /tmp/vcf-services-install-checks-test.XXXXXX)"
-trap 'rm -rf "$work_dir"' EXIT
+state_test_image="vcf-services-state-import-test-$$"
+state_test_volumes=()
+cleanup() {
+	local volume
+	for volume in "${state_test_volumes[@]}"; do
+		docker volume rm "$volume" >/dev/null 2>&1 || true
+	done
+	docker image rm "$state_test_image" >/dev/null 2>&1 || true
+	rm -rf "$work_dir"
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -69,5 +79,85 @@ expired_error="$(validate_provided_tls "$work_dir/expired.crt" "$work_dir/good.k
 	&& fail "expired certificate accepted"
 grep -qi "expired" <<< "$expired_error" || fail "expired certificate error message missing"
 echo "tls validation tests passed"
+
+validate_depot_fixture() {
+	local fixture="$1"
+	docker run --rm \
+		--mount "type=bind,src=$fixture,dst=/depot,readonly" \
+		--mount "type=bind,src=$project_dir/scripts/validate-adopted-depot.sh,dst=/validate-adopted-depot.sh,readonly" \
+		alpine:3.20 sh /validate-adopted-depot.sh /depot
+}
+
+valid_depot="$project_dir/tests/fixtures/adopt-depot-valid"
+invalid_depot="$project_dir/tests/fixtures/adopt-depot-invalid"
+validate_depot_fixture "$valid_depot" >/dev/null || fail "valid-looking adopted depot rejected"
+
+invalid_error="$(validate_depot_fixture "$invalid_depot" 2>&1)" \
+	&& fail "invalid adopted depot accepted"
+grep -q '/depot/PROD/COMP is missing' <<< "$invalid_error" \
+	|| fail "invalid depot error did not name the missing VCFDT structure"
+
+wrong_root_depot="$work_dir/wrong-root-depot"
+cp -a "$valid_depot" "$wrong_root_depot"
+rm "$wrong_root_depot/umds-patch-store"
+ln -s /old-vcfdt/depot/PROD/COMP/ESX_HOST/patch-store "$wrong_root_depot/umds-patch-store"
+wrong_root_error="$(validate_depot_fixture "$wrong_root_depot" 2>&1)" \
+	&& fail "adopted depot with an incompatible absolute symlink accepted"
+grep -q 'absolute symlinks must stay under /depot' <<< "$wrong_root_error" \
+	|| fail "wrong-root symlink error did not explain the /depot constraint"
+
+dangling_depot="$work_dir/dangling-depot"
+cp -a "$valid_depot" "$dangling_depot"
+rm "$dangling_depot/umds-patch-store"
+ln -s /depot/PROD/COMP/missing "$dangling_depot/umds-patch-store"
+dangling_error="$(validate_depot_fixture "$dangling_depot" 2>&1)" \
+	&& fail "adopted depot with a dangling /depot symlink accepted"
+grep -q 'does not resolve with the depot mounted at /depot' <<< "$dangling_error" \
+	|| fail "dangling symlink error did not explain the resolution failure"
+echo "adopted depot validation tests passed"
+
+docker build -q -t "$state_test_image" "$project_dir/tests/fixtures/vcfdt-state-tool" >/dev/null
+directory_source="$work_dir/vdt-state"
+mkdir -p "$directory_source"
+printf '11111111-1111-4111-8111-111111111111\n' > "$directory_source/machine_id"
+printf 'source remains read-only\n' > "$directory_source/source-marker"
+directory_source_hash="$(sha256sum "$directory_source/machine_id" "$directory_source/source-marker")"
+directory_target="vcf-services-state-import-directory-$$"
+state_test_volumes+=("$directory_target")
+imported_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" directory "$directory_source" "$directory_target" 2>/dev/null)"
+[ "$imported_id" = '11111111-1111-4111-8111-111111111111' ] \
+	|| fail "directory state import returned the wrong Software Depot ID"
+[ "$(sha256sum "$directory_source/machine_id" "$directory_source/source-marker")" = "$directory_source_hash" ] \
+	|| fail "directory state source changed during import"
+rerun_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" directory "$directory_source" "$directory_target" 2>/dev/null)"
+[ "$rerun_id" = "$imported_id" ] || fail "state import rerun was not idempotent"
+
+volume_source="vcf-services-state-import-source-$$"
+volume_target="vcf-services-state-import-volume-$$"
+state_test_volumes+=("$volume_source" "$volume_target")
+docker volume create "$volume_source" >/dev/null
+docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$volume_source,dst=/state" \
+	"$state_test_image" -c "printf '%s\\n' '22222222-2222-4222-8222-222222222222' > /state/machine_id"
+volume_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" volume "$volume_source" "$volume_target" 2>/dev/null)"
+[ "$volume_id" = '22222222-2222-4222-8222-222222222222' ] \
+	|| fail "Docker volume state import returned the wrong Software Depot ID"
+
+conflict_source="$work_dir/conflict-state"
+mkdir -p "$conflict_source"
+printf '33333333-3333-4333-8333-333333333333\n' > "$conflict_source/machine_id"
+conflict_error="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" directory "$conflict_source" "$volume_target" 2>&1)" \
+	&& fail "state import overwrote a different Software Depot ID"
+grep -q 'refusing to overwrite' <<< "$conflict_error" \
+	|| fail "state conflict error did not explain the overwrite refusal"
+preserved_id="$(docker run --rm --entrypoint /opt/vcfdt/bin/vcf-download-tool \
+	--mount "type=volume,src=$volume_target,dst=/root/.local/share/vmware/vdt,readonly" \
+	"$state_test_image" configuration get --machineId)"
+[ "$preserved_id" = "$volume_id" ] || fail "state conflict changed the existing target ID"
+echo "VCFDT state import tests passed"
 
 echo "install checks tests passed"

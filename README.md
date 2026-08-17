@@ -119,6 +119,44 @@ Back up this small volume and `secrets/`; losing the ID invalidates the
 activation code. The depot itself can be downloaded again. A plain copy of the
 depot tree preserves its portable layout.
 
+### Adopt an existing depot and Software Depot ID
+
+Adoption points this stack at an existing depot tree and imports the existing
+VCFDT state without changing either source. First back up the source state and
+depot. Set the normal storage answers to the existing location, then add one
+state-source option to the installer:
+
+```bash
+# Existing depot on a host path
+./install.sh --answers-file /secure/adopt-local.env \
+  --adopt-state-dir /srv/old-vcfdt-state/vdt
+
+# Existing depot on NFS and state in another Docker volume
+./install.sh --answers-file /secure/adopt-nfs.env \
+  --adopt-state-volume old-vcfdt-state
+```
+
+For the local example, set `STORAGE_MODE=local` and `DEPOT_LOCAL_PATH` to the
+existing depot root. For NFS, set `STORAGE_MODE=nfs`, `NFS_SERVER`,
+`NFS_EXPORT`, and `NFS_OPTIONS` to the existing export. The state directory or
+volume must contain the contents normally mounted at
+`/root/.local/share/vmware/vdt`, not its parent directory.
+
+The installer mounts both sources read-only for validation. A depot must have a
+populated `PROD/COMP` tree. Every symlink must resolve when the tree is mounted
+at `/depot`, and every absolute symlink must point to `/depot` or below it.
+VCFDT writes absolute symlinks, so a depot created at another container path is
+not eligible for adoption as-is. Validation failure names the first
+incompatible path and starts no service against it.
+
+After both sources pass validation, the installer copies only the small VCFDT
+state into the fixed `vcf-services-vcfdt-state` volume, reads the imported
+Software Depot ID back through VCFDT, and requires it to match the source. It
+does not copy or write depot content. A rerun with the same imported ID skips
+the copy. If the fixed volume is non-empty and contains a different or
+unreadable ID, the installer refuses to overwrite it so an existing activation
+cannot be lost.
+
 Configuration lives in `config/settings.env`. It is deliberately a simple,
 atomic file-backed format so later GUI settings support can update it without
 introducing a database. Compose-only storage and network selections are

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+state_file="${HOME}/.local/share/vmware/vdt/machine_id"
+if [ "${1:-}" = configuration ] && [ "${2:-}" = get ] && [ "${3:-}" = --machineId ]; then
+	[ -s "$state_file" ]
+	cat "$state_file"
+	exit 0
+fi
+exit 2

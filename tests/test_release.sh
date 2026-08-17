@@ -27,6 +27,8 @@ required=(
 	"vcf-lab-services-$version/caddy/Caddyfile"
 	"vcf-lab-services-$version/docs/releasing.md"
 	"vcf-lab-services-$version/scripts/install-checks.sh"
+	"vcf-lab-services-$version/scripts/import-vcfdt-state.sh"
+	"vcf-lab-services-$version/scripts/validate-adopted-depot.sh"
 )
 listing="$(tar -tzf "$archive")"
 for path in "${required[@]}"; do
