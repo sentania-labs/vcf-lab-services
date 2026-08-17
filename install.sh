@@ -14,12 +14,16 @@ image_repository=""
 release_version_override=""
 image_repository_override=""
 release_source=bundle
+adopt_state_dir=""
+adopt_state_volume=""
+adopt_mode=false
 
 usage() {
 	cat <<'EOF'
 Usage: ./install.sh [--answers-file PATH] [--min-free-gb NUMBER]
                     [--min-backup-free-gb NUMBER]
                     [--version TAG] [--image-repository REPOSITORY]
+                    [--adopt-state-dir PATH | --adopt-state-volume NAME]
        ./install.sh --validate-archive PATH
 
 The depot free-space floor defaults to 500 GB. Use --min-free-gb only when a
@@ -33,6 +37,9 @@ A packaged release bundle carries its own version and image repository, and is
 the normal operator path. In a source checkout the image repository defaults to
 the GHCR namespace of the checkout's origin remote and the image tag defaults to
 "latest"; use --version and --image-repository to point at specific images.
+
+The adopt options import an existing VCFDT state directory or Docker volume.
+Select the existing depot through the normal local or NFS storage answers.
 EOF
 }
 
@@ -68,6 +75,16 @@ while [ "$#" -gt 0 ]; do
 			image_repository_override="$2"
 			shift 2
 			;;
+		--adopt-state-dir)
+			[ "$#" -ge 2 ] || { echo "ERROR: --adopt-state-dir requires a path" >&2; exit 2; }
+			adopt_state_dir="$2"
+			shift 2
+			;;
+		--adopt-state-volume)
+			[ "$#" -ge 2 ] || { echo "ERROR: --adopt-state-volume requires a Docker volume name" >&2; exit 2; }
+			adopt_state_volume="$2"
+			shift 2
+			;;
 		-h|--help)
 			usage
 			exit 0
@@ -85,6 +102,23 @@ done
 	echo "ERROR: backup free-space floor must be a whole number" >&2
 	exit 2
 }
+if [ -n "$adopt_state_dir" ] && [ -n "$adopt_state_volume" ]; then
+	echo "ERROR: use only one of --adopt-state-dir or --adopt-state-volume" >&2
+	exit 2
+fi
+if [ -n "$adopt_state_dir" ] || [ -n "$adopt_state_volume" ]; then
+	adopt_mode=true
+fi
+if [ -n "$adopt_state_volume" ]; then
+	[[ "$adopt_state_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]+$ ]] || {
+		echo "ERROR: invalid Docker volume name for --adopt-state-volume" >&2
+		exit 2
+	}
+	[ "$adopt_state_volume" != vcf-services-vcfdt-state ] || {
+		echo "ERROR: the adoption source must not be the fixed target volume vcf-services-vcfdt-state" >&2
+		exit 2
+	}
+fi
 
 declare -A answers=()
 allowed_answer() {
@@ -277,7 +311,15 @@ if [ "$storage_mode" = local ]; then
 	ask DEPOT_LOCAL_PATH "Local depot directory" "$saved_depot_local_path"
 	depot_local_path="$REPLY_VALUE"
 	[[ "$depot_local_path" = /* ]] || depot_local_path="$project_dir/${depot_local_path#./}"
-	depot_local_path="$(realpath -m "$depot_local_path")"
+	if [ "$adopt_mode" = true ]; then
+		[ -d "$depot_local_path" ] || {
+			echo "ERROR: adopted local depot directory not found: $depot_local_path" >&2
+			exit 2
+		}
+		depot_local_path="$(realpath -e "$depot_local_path")"
+	else
+		depot_local_path="$(realpath -m "$depot_local_path")"
+	fi
 	ask BACKUP_LOCAL_PATH "Local backup directory (kept outside the depot)" "$saved_backup_local_path"
 	backup_local_path="$REPLY_VALUE"
 	[[ "$backup_local_path" = /* ]] || backup_local_path="$project_dir/${backup_local_path#./}"
@@ -428,6 +470,15 @@ if host_tcp_port_is_bound "$sftp_port" \
 	echo "ERROR: SFTP_PORT $sftp_port is already bound on this host. Choose another port and rerun install.sh." >&2
 	exit 1
 fi
+if [ -n "$adopt_state_dir" ]; then
+	[ -d "$adopt_state_dir" ] || { echo "ERROR: VCFDT state directory not found: $adopt_state_dir" >&2; exit 1; }
+	adopt_state_dir="$(realpath -e "$adopt_state_dir")"
+elif [ -n "$adopt_state_volume" ]; then
+	docker volume inspect "$adopt_state_volume" >/dev/null 2>&1 || {
+		echo "ERROR: VCFDT state source volume not found: $adopt_state_volume" >&2
+		exit 1
+	}
+fi
 if [ "$storage_mode" = nfs ]; then
 	command -v mount.nfs >/dev/null 2>&1 || { echo "ERROR: install nfs-common before using NFS storage" >&2; exit 1; }
 fi
@@ -448,7 +499,10 @@ if [ -n "$sftp_password" ]; then
 fi
 
 if [ "$storage_mode" = local ]; then
-	mkdir -p "$depot_local_path" "$backup_local_path"
+	mkdir -p "$backup_local_path"
+	if [ "$adopt_mode" = false ]; then
+		mkdir -p "$depot_local_path"
+	fi
 	available_kb="$(df -Pk "$depot_local_path" | awk 'NR==2 {print $4}')"
 	minimum_kb=$((minimum_free_gb * 1024 * 1024))
 	[ "$available_kb" -ge "$minimum_kb" ] || {
@@ -469,7 +523,6 @@ else
 		echo "ERROR: NFS export could not be mounted" >&2
 		exit 1
 	fi
-	docker volume rm "$preflight_volume" >/dev/null
 	backup_preflight_volume="vcf-services-nfs-backup-preflight-$$"
 	docker volume create --driver local --opt type=nfs \
 		--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$backup_nfs_export" \
@@ -487,9 +540,32 @@ else
 		"$backup_minimum_free_gb" "$backup_advisory_free_gb" || exit 1
 	minimum_kb=$((minimum_free_gb * 1024 * 1024))
 	[ "$available_kb" -ge "$minimum_kb" ] || {
+		docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
 		echo "ERROR: NFS depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
 		exit 1
 	}
+fi
+
+if [ "$adopt_mode" = true ]; then
+	echo "Validating the existing depot read-only at /depot"
+	validator_mount="type=bind,src=$project_dir/scripts/validate-adopted-depot.sh,dst=/validate-adopted-depot.sh,readonly"
+	if [ "$storage_mode" = local ]; then
+		depot_validation_mount="type=bind,src=$depot_local_path,dst=/depot,readonly"
+		if ! docker run --rm --mount "$depot_validation_mount" --mount "$validator_mount" \
+			alpine:3.20 sh /validate-adopted-depot.sh /depot; then
+			exit 1
+		fi
+	else
+		depot_validation_mount="type=volume,src=$preflight_volume,dst=/depot,readonly"
+		if ! docker run --rm --mount "$depot_validation_mount" --mount "$validator_mount" \
+			alpine:3.20 sh /validate-adopted-depot.sh /depot; then
+			docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
+			exit 1
+		fi
+	fi
+fi
+if [ "$storage_mode" = nfs ]; then
+	docker volume rm "$preflight_volume" >/dev/null
 fi
 
 echo "Staging the licensed VCF Download Tool locally"
@@ -644,7 +720,6 @@ if [ -n "$tool_version_output" ]; then
 	sed -i "s|^VCFDT_VERSION=.*$|VCFDT_VERSION=\"$vcfdt_version\"|" "$project_dir/config/settings.env"
 fi
 
-docker volume create vcf-services-vcfdt-state >/dev/null
 docker volume create vcf-services-sftp-host-keys >/dev/null
 if ! docker volume inspect "$backup_volume_name" >/dev/null 2>&1; then
 	if [ "$storage_mode" = local ]; then
@@ -676,10 +751,24 @@ if ! docker run --rm --user "$sftp_uid:$sftp_gid" --entrypoint /bin/sh \
 	echo "       The re-own attempt did not take effect. Correct the share ownership, then rerun install.sh." >&2
 	exit 1
 fi
-machine_id_output="$(docker run --rm \
-	--entrypoint /opt/vcfdt/bin/vcf-download-tool \
-	-v vcf-services-vcfdt-state:/root/.local/share/vmware/vdt \
-	vcf-services-sync:local configuration get --machineId)"
+if [ "$adopt_mode" = true ]; then
+	if [ -n "$adopt_state_dir" ]; then
+		state_source_kind=directory
+		state_source_value="$adopt_state_dir"
+	else
+		state_source_kind=volume
+		state_source_value="$adopt_state_volume"
+	fi
+	machine_id_output="$("$project_dir/scripts/import-vcfdt-state.sh" \
+		vcf-services-sync:local "$state_source_kind" "$state_source_value" \
+		vcf-services-vcfdt-state)"
+else
+	docker volume create vcf-services-vcfdt-state >/dev/null
+	machine_id_output="$(docker run --rm \
+		--entrypoint /opt/vcfdt/bin/vcf-download-tool \
+		-v vcf-services-vcfdt-state:/root/.local/share/vmware/vdt \
+		vcf-services-sync:local configuration get --machineId)"
+fi
 echo
 echo "Software Depot ID"
 echo "$machine_id_output"
