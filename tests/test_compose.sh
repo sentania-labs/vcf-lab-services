@@ -57,7 +57,8 @@ cat > "$work_dir/bin/docker" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$DOCKER_CALLS"
-case "$1 $2" in
+case "$1 ${2:-}" in
+	"info ") [ "${MOCK_DAEMON_UP:-true}" = true ] ;;
 	"volume inspect") [ "${MOCK_VOLUME_EXISTS:-}" = true ] ;;
 	"image inspect") [ "${MOCK_IMAGE_EXISTS:-}" = true ] ;;
 	"compose up") exit 0 ;;
@@ -68,6 +69,17 @@ EOF
 chmod +x "$work_dir/bin/docker"
 export DOCKER_CALLS="$work_dir/docker.calls"
 
+set +e
+daemon_output="$(MOCK_DAEMON_UP=false PATH="$work_dir/bin:$PATH" ./compose.sh up -d 2>&1)"
+daemon_status=$?
+set -e
+[ "$daemon_status" -eq 1 ] || fail "compose preflight ignored an unreachable Docker daemon"
+grep -q 'cannot reach the Docker daemon' <<< "$daemon_output" \
+	|| fail "compose preflight misdiagnosed an unreachable Docker daemon"
+! grep -q 'Run ./install.sh instead' <<< "$daemon_output" \
+	|| fail "compose preflight blamed the installation for a daemon outage"
+
+: > "$DOCKER_CALLS"
 set +e
 preflight_output="$(PATH="$work_dir/bin:$PATH" ./compose.sh up -d 2>&1)"
 preflight_status=$?
@@ -110,6 +122,13 @@ grep -qx 'compose up -d' "$DOCKER_CALLS" || fail "validated up command was not p
 : > "$DOCKER_CALLS"
 PATH="$work_dir/bin:$PATH" ./compose.sh ps
 grep -qx 'compose ps' "$DOCKER_CALLS" || fail "day-to-day Compose command was not passed through"
+
+# The wrapper acts on its own project no matter where the operator invokes it.
+: > "$DOCKER_CALLS"
+(cd "$work_dir" && MOCK_VOLUME_EXISTS=true MOCK_IMAGE_EXISTS=true \
+	PATH="$work_dir/bin:$PATH" "$project_dir/compose.sh" up -d)
+grep -qx 'compose up -d' "$DOCKER_CALLS" \
+	|| fail "compose wrapper failed when invoked from another directory"
 
 # Bus key names stay consistent across producers, consumers, and the contract.
 for name in 'vcf-services:sync:requests' 'vcf-services:sync:status' 'vcf-services:sync:log' 'vcf-services:sync:versions'; do

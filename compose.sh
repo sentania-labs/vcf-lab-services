@@ -1,7 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
+project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$project_dir"
+
 if [ "${1:-}" = up ]; then
+	if ! docker info >/dev/null 2>&1; then
+		echo "ERROR: cannot reach the Docker daemon." >&2
+		echo "Start Docker and make sure this account can use it, then retry." >&2
+		exit 1
+	fi
 	missing=()
 	if ! docker volume inspect vcf-services-vcfdt-state >/dev/null 2>&1; then
 		missing+=("external volume vcf-services-vcfdt-state")

@@ -122,11 +122,12 @@ SDDC Manager, so trusting the depot on those appliances does not make UMDS
 trust it.
 
 For the default self-signed certificate, securely copy
-`secrets/tls/server.crt` from the depot host to the UMDS host. For a supplied
-certificate, copy each issuing root and intermediate CA certificate from your
-PKI instead of the depot's server certificate. Keep each CA certificate in a
-separate PEM file. Then install the certificate material as root on the UMDS
-host:
+`secrets/tls/server.crt` from the depot host to the UMDS host as
+`/tmp/vcf-services-depot.crt` (use the `.pem` extension on Photon OS). For a
+supplied certificate, copy each issuing root and intermediate CA certificate
+from your PKI instead of the depot's server certificate, keeping each CA
+certificate in a separate file with its own name. Then install the certificate
+material as root on the UMDS host:
 
 ```bash
 # Ubuntu or Debian UMDS host
@@ -141,13 +142,19 @@ install -m 0644 /tmp/vcf-services-depot.pem \
 ```
 
 Repeat the `install` command for each root and intermediate file when using a
-supplied certificate. Verify from the UMDS host without an insecure TLS option,
-then configure UMDS with the same patch-store base URL:
+supplied certificate. Verify the trust from the UMDS host against the
+unauthenticated health route, without an insecure TLS option:
 
 ```bash
-curl --fail --show-error https://vcf-services.example.com/umds-patch-store/
+curl --fail --show-error https://vcf-services.example.com/healthz
 ```
 
+An `ok` response means UMDS will accept the depot certificate. A TLS error means
+the trust store still lacks the certificate. The health route is used here
+because it always exists; the patch-store subtree only returns content after a
+patch sync has populated the depot.
+
+Then configure UMDS with the patch-store base URL.
 The URL is `https://<PRODUCT_FQDN>/umds-patch-store/` when HTTPS uses port 443.
 For any other configured port, it is
 `https://<PRODUCT_FQDN>:<HTTPS_PORT>/umds-patch-store/`, for example
