@@ -150,9 +150,7 @@ curl --fail --show-error https://vcf-services.example.com/healthz
 ```
 
 An `ok` response means UMDS will accept the depot certificate. A TLS error means
-the trust store still lacks the certificate. The health route is used here
-because it always exists; the patch-store subtree only returns content after a
-patch sync has populated the depot.
+the trust store still lacks the certificate.
 
 Then configure UMDS with the patch-store base URL.
 The URL is `https://<PRODUCT_FQDN>/umds-patch-store/` when HTTPS uses port 443.
