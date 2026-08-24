@@ -28,6 +28,8 @@ required=(
 	"vcf-lab-services-$version/caddy/Caddyfile"
 	"vcf-lab-services-$version/docs/releasing.md"
 	"vcf-lab-services-$version/scripts/install-checks.sh"
+	"vcf-lab-services-$version/scripts/import-vcfdt-state.sh"
+	"vcf-lab-services-$version/scripts/validate-adopted-depot.sh"
 )
 listing="$(tar -tzf "$archive")"
 for path in "${required[@]}"; do
@@ -97,6 +99,73 @@ expect_failure 2 'apply only to a source checkout' \
 	"$bundle_dir/install.sh" --version v9.9.9
 expect_failure 2 'apply only to a source checkout' \
 	"$bundle_dir/install.sh" --image-repository ghcr.io/example/other
+
+# Adoption cannot safely share a depot with the previous writer. A scripted
+# run must make the shutdown assertion explicitly, while interactive runs stop
+# at a prominent confirmation prompt.
+expect_failure 2 'adoption requires confirmation that the previous writer is stopped' \
+	"$bundle_dir/install.sh" --adopt-state-dir /tmp
+expect_failure 2 'VCFDT_ARCHIVE is missing' \
+	"$bundle_dir/install.sh" --adopt-state-dir /tmp --confirm-old-writer-stopped
+expect_failure 2 'requires --adopt-state-dir or --adopt-state-volume' \
+	"$bundle_dir/install.sh" --confirm-old-writer-stopped
+
+# The interactive half of the same contract, driven over a real terminal.
+adopt_answers="$work_dir/adopt-answers.env"
+printf 'VCFDT_ARCHIVE=%s/missing-vcf-download-tool.tar.gz\n' "$work_dir" > "$adopt_answers"
+
+writer_prompt='Type STOPPED to confirm'
+
+pty_expect() {
+	local description="$1" expected_status="$2" expected_text="$3" feed="$4" status=0 output
+	shift 4
+	output="$(python3 "$project_dir/tests/pty-run.py" --wait-for "$writer_prompt" "$feed" "$@" 2>&1)" || status=$?
+	[ "$status" -eq "$expected_status" ] || {
+		echo "$description: expected exit $expected_status, got $status" >&2
+		printf '%s\n' "$output" >&2
+		exit 1
+	}
+	grep -q -e "$expected_text" <<< "$output" || {
+		echo "$description: expected output to mention: $expected_text" >&2
+		printf '%s\n' "$output" >&2
+		exit 1
+	}
+}
+
+pty_expect 'typing STOPPED proceeds' 1 'VCFDT archive not found' 'STOPPED\n' \
+	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp
+pty_expect 'a lowercase reply refuses' 2 'adoption cancelled because writer shutdown was not confirmed' 'stopped\n' \
+	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp
+pty_expect 'an unrelated reply refuses' 2 'adoption cancelled because writer shutdown was not confirmed' 'yes\n' \
+	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp
+pty_expect 'an empty reply refuses' 2 'adoption cancelled because writer shutdown was not confirmed' '\n' \
+	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp
+pty_expect 'end of input refuses' 2 'adoption cancelled because writer shutdown was not confirmed' '\x04' \
+	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp
+
+# An interrupted confirmation must never fall through into the adoption path.
+interrupt_status=0
+interrupt_output="$(python3 "$project_dir/tests/pty-run.py" --wait-for "$writer_prompt" '\x03' \
+	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp 2>&1)" \
+	|| interrupt_status=$?
+[ "$interrupt_status" -ne 0 ] || {
+	echo "an interrupted writer confirmation must not succeed" >&2
+	exit 1
+}
+grep -q 'ADOPTION SAFETY CHECK' <<< "$interrupt_output" || {
+	echo "the interrupted run never reached the writer confirmation prompt" >&2
+	printf '%s\n' "$interrupt_output" >&2
+	exit 1
+}
+grep -q "$writer_prompt" <<< "$interrupt_output" || {
+	echo "the interrupted run never reached the writer confirmation prompt" >&2
+	printf '%s\n' "$interrupt_output" >&2
+	exit 1
+}
+if grep -q 'VCFDT archive not found' <<< "$interrupt_output"; then
+	echo "an interrupted writer confirmation continued into adoption" >&2
+	exit 1
+fi
 
 # Bundle metadata stays strict.
 printf 'VCF_SERVICES_UNEXPECTED=1\n' > "$bundle_dir/.release.env"

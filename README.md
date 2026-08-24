@@ -257,6 +257,103 @@ is advisory: the installer warns below 100 GB and continues, because backups are
 a smaller size class than the depot. Pass `--min-backup-free-gb NUMBER` to turn
 that into a hard floor.
 
+### Adopt an existing depot and Software Depot ID
+
+> [!WARNING]
+> Stop the previous VCFDT or depot-sync writer before adoption, even when it
+> runs in a container on another system. Keep it stopped throughout the new
+> installation and do not run the old and new writers against the same depot.
+> The installer cannot detect a writer on another system. Two active writers
+> can mutate the state during import or corrupt the shared depot.
+
+Adoption points this stack at an existing depot tree and imports the existing
+VCFDT state without changing either source. Follow these steps in order:
+
+1. Stop the previous VCFDT or depot-sync service and verify its writer process
+   is no longer running. Keep that deployment stopped through cutover.
+2. Back up the source VCFDT state, depot, and activation-code material.
+3. Set the normal storage answers to the existing depot location, then run the
+   installer with one state-source option:
+
+```bash
+# Existing depot on a host path
+./install.sh --answers-file /secure/adopt-local.env \
+  --adopt-state-dir /srv/old-vcfdt-state/vdt
+
+# Existing depot on NFS and state in another Docker volume
+./install.sh --answers-file /secure/adopt-nfs.env \
+  --adopt-state-volume old-vcfdt-state
+```
+
+Interactive adoption displays the writer safety check before reading either
+source and requires the operator to type `STOPPED`. A scripted run must stop
+the previous writer through its own orchestration, verify that shutdown, and
+then assert the completed prerequisite explicitly:
+
+```bash
+./install.sh --answers-file /secure/adopt-nfs.env \
+  --adopt-state-volume old-vcfdt-state \
+  --confirm-old-writer-stopped
+```
+
+`--confirm-old-writer-stopped` bypasses only the interactive prompt. It does
+not detect or stop a remote writer, and must not be used until automation has
+verified that the previous deployment is stopped.
+
+For the local example, set `STORAGE_MODE=local` and `DEPOT_LOCAL_PATH` to the
+existing depot root. For NFS, set `STORAGE_MODE=nfs`, `NFS_SERVER`,
+`NFS_EXPORT`, and `NFS_OPTIONS` to the existing export. The state directory or
+volume must contain the contents normally mounted at
+`/root/.local/share/vmware/vdt`, not its parent directory.
+
+Adoption reuses depot content that is already downloaded, so the installer
+skips its free-space floor in adopt mode. `--min-free-gb` is not needed for an
+existing depot that is already close to full.
+
+Adoption is recorded in `config/settings.env` as `DEPOT_ADOPTED`, holding the
+identity of the depot that was adopted, so it is a property of that depot rather
+than of one command. Every later `./install.sh` rerun against the same depot
+answers, for an activation code, a settings change, or an upgrade, keeps
+skipping the free-space floor and does not ask for the writer confirmation
+again, because a plain rerun re-imports nothing. Answer with a different depot
+location and the full free-space floor applies again to that new location. Pass
+the adopt options again only when you are importing state from a source once
+more, and stop the current writer first when you do.
+
+The installer mounts both sources read-only for validation. A depot must have a
+populated `PROD/COMP` tree. Every absolute or relative symlink must resolve to
+`/depot` or below it when the tree is mounted there. Normalized targets that
+escape through `..` are rejected. VCFDT writes absolute symlinks, so a depot
+created at another container path is not eligible for adoption as-is. A broken
+symlink whose normalized target still stays inside `/depot` is reported as a
+warning and adoption continues, because it is incomplete depot data rather than
+a containment breach. The installer scans the whole tree in one pass and lists
+every offending path, grouped so escaping links are separate from broken
+internal links, and starts no service against a depot that has any escaping or
+unreadable link.
+
+To read a Software Depot ID, the installer copies the small state tree to a
+scratch volume it deletes afterwards and asks VCFDT for the ID there. Neither
+the operator's source nor a pre-existing fixed volume is ever written to while
+its ID is being identified.
+
+After both sources pass validation, the installer copies only the small VCFDT
+state into the fixed `vcf-services-vcfdt-state` volume, reads the imported
+Software Depot ID back through VCFDT, and requires it to match the source. It
+does not copy or write depot content. The copy lands in a staging directory
+inside the fixed volume and is moved into place last, so an interrupted or
+failed import is cleared and retried on the next run instead of leaving a
+half-imported state behind. That retry still identifies any ID already in the
+fixed volume first and refuses if it differs from the source. A rerun with the
+same imported ID skips the copy. If the fixed volume is non-empty and contains
+a different or unreadable ID, the installer refuses to overwrite it so an
+existing activation cannot be lost. A leftover staging directory alone is never
+enough to justify clearing that volume: a volume that holds nothing but an
+abandoned staging directory is cleared and retried, and a staging directory
+found beside state whose ID already matches the source means an import was
+interrupted part way, so the state is cleared and reimported from the
+authoritative source rather than being declared complete.
+
 Configuration lives in `config/settings.env`. It is deliberately a simple,
 atomic file-backed format so later GUI settings support can update it without
 introducing a database. Compose-only storage and network selections are

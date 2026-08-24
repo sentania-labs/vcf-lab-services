@@ -35,6 +35,8 @@ files=(
 	docs/redis-contract.md
 	docs/releasing.md
 	scripts/install-checks.sh
+	scripts/import-vcfdt-state.sh
+	scripts/validate-adopted-depot.sh
 	scripts/verify-byte-exact.sh
 )
 for file in "${files[@]}"; do

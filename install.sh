@@ -14,12 +14,18 @@ image_repository=""
 release_version_override=""
 image_repository_override=""
 release_source=bundle
+adopt_state_dir=""
+adopt_state_volume=""
+adopt_mode=false
+confirm_old_writer_stopped=false
 
 usage() {
 	cat <<'EOF'
 Usage: ./install.sh [--answers-file PATH] [--min-free-gb NUMBER]
                     [--min-backup-free-gb NUMBER]
                     [--version TAG] [--image-repository REPOSITORY]
+                    [--adopt-state-dir PATH | --adopt-state-volume NAME]
+                    [--confirm-old-writer-stopped]
        ./install.sh --validate-archive PATH
 
 The depot free-space floor defaults to 500 GB. Use --min-free-gb only when a
@@ -33,6 +39,14 @@ A packaged release bundle carries its own version and image repository, and is
 the normal operator path. In a source checkout the image repository defaults to
 the GHCR namespace of the checkout's origin remote and the image tag defaults to
 "latest"; use --version and --image-repository to point at specific images.
+
+The adopt options import an existing VCFDT state directory or Docker volume.
+Select the existing depot through the normal local or NFS storage answers.
+Before adoption, stop the previous VCFDT or depot-sync writer and keep it
+stopped. Interactive adoption requires typing STOPPED at the safety prompt.
+For scripted adoption, --confirm-old-writer-stopped asserts that automation
+already stopped the previous writer. The installer cannot detect a writer on
+another system.
 EOF
 }
 
@@ -68,6 +82,20 @@ while [ "$#" -gt 0 ]; do
 			image_repository_override="$2"
 			shift 2
 			;;
+		--adopt-state-dir)
+			[ "$#" -ge 2 ] || { echo "ERROR: --adopt-state-dir requires a path" >&2; exit 2; }
+			adopt_state_dir="$2"
+			shift 2
+			;;
+		--adopt-state-volume)
+			[ "$#" -ge 2 ] || { echo "ERROR: --adopt-state-volume requires a Docker volume name" >&2; exit 2; }
+			adopt_state_volume="$2"
+			shift 2
+			;;
+		--confirm-old-writer-stopped)
+			confirm_old_writer_stopped=true
+			shift
+			;;
 		-h|--help)
 			usage
 			exit 0
@@ -85,6 +113,35 @@ done
 	echo "ERROR: backup free-space floor must be a whole number" >&2
 	exit 2
 }
+if [ -n "$adopt_state_dir" ] && [ -n "$adopt_state_volume" ]; then
+	echo "ERROR: use only one of --adopt-state-dir or --adopt-state-volume" >&2
+	exit 2
+fi
+if [ -n "$adopt_state_dir" ] || [ -n "$adopt_state_volume" ]; then
+	adopt_mode=true
+fi
+if [ "$confirm_old_writer_stopped" = true ] && [ "$adopt_mode" = false ]; then
+	echo "ERROR: --confirm-old-writer-stopped requires --adopt-state-dir or --adopt-state-volume" >&2
+	exit 2
+fi
+if [ -n "$adopt_state_dir" ]; then
+	case "$adopt_state_dir" in
+		*,*|*=*)
+			echo "ERROR: --adopt-state-dir path may not contain ',' or '=' because Docker's mount syntax cannot parse it: $adopt_state_dir" >&2
+			exit 2
+			;;
+	esac
+fi
+if [ -n "$adopt_state_volume" ]; then
+	[[ "$adopt_state_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]+$ ]] || {
+		echo "ERROR: invalid Docker volume name for --adopt-state-volume" >&2
+		exit 2
+	}
+	[ "$adopt_state_volume" != vcf-services-vcfdt-state ] || {
+		echo "ERROR: the adoption source must not be the fixed target volume vcf-services-vcfdt-state" >&2
+		exit 2
+	}
+fi
 
 declare -A answers=()
 allowed_answer() {
@@ -159,10 +216,45 @@ validate_archive() {
 	}
 }
 
+confirm_previous_writer_is_stopped() {
+	local scripted_confirmation="$1" reply
+	cat >&2 <<'EOF'
+
+ADOPTION SAFETY CHECK
+Stop the previous VCFDT or depot-sync writer before continuing, including a
+writer running in a container on another system. Keep it stopped throughout
+this installation. The installer cannot detect that remote writer, and two
+writers can change state during import or corrupt shared depot content.
+EOF
+	if [ "$scripted_confirmation" = true ]; then
+		echo "Previous writer shutdown asserted by --confirm-old-writer-stopped." >&2
+		return 0
+	fi
+	if [ ! -t 0 ]; then
+		echo "ERROR: adoption requires confirmation that the previous writer is stopped." >&2
+		echo "       After automation stops it, rerun with --confirm-old-writer-stopped." >&2
+		return 1
+	fi
+	printf 'Type STOPPED to confirm the previous writer is stopped: ' >&2
+	if ! IFS= read -r reply; then
+		echo >&2
+		echo "ERROR: adoption cancelled because writer shutdown was not confirmed." >&2
+		return 1
+	fi
+	[ "$reply" = STOPPED ] || {
+		echo "ERROR: adoption cancelled because writer shutdown was not confirmed." >&2
+		return 1
+	}
+}
+
 if [ -n "$validate_only" ]; then
 	validate_archive "$validate_only"
 	echo "VCFDT archive validation passed"
 	exit 0
+fi
+
+if [ "$adopt_mode" = true ]; then
+	confirm_previous_writer_is_stopped "$confirm_old_writer_stopped" || exit 2
 fi
 
 derive_image_repository() {
@@ -277,7 +369,21 @@ if [ "$storage_mode" = local ]; then
 	ask DEPOT_LOCAL_PATH "Local depot directory" "$saved_depot_local_path"
 	depot_local_path="$REPLY_VALUE"
 	[[ "$depot_local_path" = /* ]] || depot_local_path="$project_dir/${depot_local_path#./}"
-	depot_local_path="$(realpath -m "$depot_local_path")"
+	if [ "$adopt_mode" = true ]; then
+		[ -d "$depot_local_path" ] || {
+			echo "ERROR: adopted local depot directory not found: $depot_local_path" >&2
+			exit 2
+		}
+		depot_local_path="$(realpath -e "$depot_local_path")"
+		case "$depot_local_path" in
+			*,*|*=*)
+				echo "ERROR: adopted local depot path may not contain ',' or '=' because Docker's mount syntax cannot parse it: $depot_local_path" >&2
+				exit 2
+				;;
+		esac
+	else
+		depot_local_path="$(realpath -m "$depot_local_path")"
+	fi
 	ask BACKUP_LOCAL_PATH "Local backup directory (kept outside the depot)" "$saved_backup_local_path"
 	backup_local_path="$REPLY_VALUE"
 	[[ "$backup_local_path" = /* ]] || backup_local_path="$project_dir/${backup_local_path#./}"
@@ -302,6 +408,19 @@ else
 	saved_nfs_server="$nfs_server"
 	saved_nfs_export="$nfs_export"
 	saved_backup_nfs_export="$backup_nfs_export"
+fi
+
+depot_volume_fingerprint="$(printf '%s\n' "$storage_mode|$depot_local_path|$nfs_server|$nfs_export|$nfs_options" \
+	| sha256sum | cut -c1-12)"
+depot_volume_name="vcf-services-depot-store-$depot_volume_fingerprint"
+adopted_depot_fingerprint="$(saved_setting DEPOT_ADOPTED "")"
+if [ "$adopt_mode" = true ]; then
+	adopted_depot_fingerprint="$depot_volume_fingerprint"
+	skip_depot_free_space_floor=true
+elif [ -n "$adopted_depot_fingerprint" ] && [ "$adopted_depot_fingerprint" = "$depot_volume_fingerprint" ]; then
+	skip_depot_free_space_floor=true
+else
+	skip_depot_free_space_floor=false
 fi
 
 ask TLS_MODE "TLS mode (self-signed or provided)" "self-signed"
@@ -428,6 +547,15 @@ if host_tcp_port_is_bound "$sftp_port" \
 	echo "ERROR: SFTP_PORT $sftp_port is already bound on this host. Choose another port and rerun install.sh." >&2
 	exit 1
 fi
+if [ -n "$adopt_state_dir" ]; then
+	[ -d "$adopt_state_dir" ] || { echo "ERROR: VCFDT state directory not found: $adopt_state_dir" >&2; exit 1; }
+	adopt_state_dir="$(realpath -e "$adopt_state_dir")"
+elif [ -n "$adopt_state_volume" ]; then
+	docker volume inspect "$adopt_state_volume" >/dev/null 2>&1 || {
+		echo "ERROR: VCFDT state source volume not found: $adopt_state_volume" >&2
+		exit 1
+	}
+fi
 if [ "$storage_mode" = nfs ]; then
 	command -v mount.nfs >/dev/null 2>&1 || { echo "ERROR: install nfs-common before using NFS storage" >&2; exit 1; }
 fi
@@ -447,14 +575,47 @@ if [ -n "$sftp_password" ]; then
 	sftp_password=""
 fi
 
+stage_dir=""
+transient_volumes=()
+cleanup_transient() {
+	local volume
+	for volume in ${transient_volumes[@]+"${transient_volumes[@]}"}; do
+		docker volume rm "$volume" >/dev/null 2>&1 || true
+	done
+	transient_volumes=()
+	[ -z "$stage_dir" ] || rm -rf "$stage_dir"
+}
+trap cleanup_transient EXIT
+
+track_transient_volume() {
+	transient_volumes+=("$1")
+}
+
+drop_transient_volume() {
+	local kept=() volume
+	for volume in ${transient_volumes[@]+"${transient_volumes[@]}"}; do
+		[ "$volume" = "$1" ] || kept+=("$volume")
+	done
+	transient_volumes=(${kept[@]+"${kept[@]}"})
+}
+
 if [ "$storage_mode" = local ]; then
-	mkdir -p "$depot_local_path" "$backup_local_path"
-	available_kb="$(df -Pk "$depot_local_path" | awk 'NR==2 {print $4}')"
-	minimum_kb=$((minimum_free_gb * 1024 * 1024))
-	[ "$available_kb" -ge "$minimum_kb" ] || {
-		echo "ERROR: depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
-		exit 1
-	}
+	mkdir -p "$backup_local_path"
+	if [ "$adopt_mode" = true ]; then
+		echo "Adoption reuses existing depot content; skipping the ${minimum_free_gb} GB free-space floor"
+	elif [ "$skip_depot_free_space_floor" = true ]; then
+		mkdir -p "$depot_local_path"
+		echo "This depot was adopted with existing content; skipping the ${minimum_free_gb} GB free-space floor"
+		echo "Point the depot answers at a different location to restore the floor"
+	else
+		mkdir -p "$depot_local_path"
+		available_kb="$(df -Pk "$depot_local_path" | awk 'NR==2 {print $4}')"
+		minimum_kb=$((minimum_free_gb * 1024 * 1024))
+		[ "$available_kb" -ge "$minimum_kb" ] || {
+			echo "ERROR: depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
+			exit 1
+		}
+	fi
 	backup_available_kb="$(df -Pk "$backup_local_path" | awk 'NR==2 {print $4}')"
 	check_backup_free_space "$backup_available_kb" "$backup_local_path" \
 		"$backup_minimum_free_gb" "$backup_advisory_free_gb" || exit 1
@@ -463,38 +624,68 @@ else
 	docker volume create --driver local --opt type=nfs \
 		--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$nfs_export" \
 		"$preflight_volume" >/dev/null
+	track_transient_volume "$preflight_volume"
 	if ! available_kb="$(docker run --rm -v "$preflight_volume:/depot:ro" alpine:3.20 \
 		sh -c "df -Pk /depot | awk 'NR==2 {print \$4}'")"; then
-		docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
 		echo "ERROR: NFS export could not be mounted" >&2
 		exit 1
 	fi
-	docker volume rm "$preflight_volume" >/dev/null
 	backup_preflight_volume="vcf-services-nfs-backup-preflight-$$"
 	docker volume create --driver local --opt type=nfs \
 		--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$backup_nfs_export" \
 		"$backup_preflight_volume" >/dev/null
+	track_transient_volume "$backup_preflight_volume"
 	if ! backup_available_kb="$(docker run --rm --user "$sftp_uid:$sftp_gid" \
 		-v "$backup_preflight_volume:/storage:rw" alpine:3.20 \
 		sh -c "test -w /storage && df -Pk /storage | awk 'NR==2 {print \$4}'")"; then
-		docker volume rm "$backup_preflight_volume" >/dev/null 2>&1 || true
 		echo "ERROR: SFTP UID:GID $sftp_uid_gid cannot write $backup_nfs_export." >&2
 		echo "       Confirm the backup NFS export ownership and that it permits the Docker host." >&2
 		exit 1
 	fi
 	docker volume rm "$backup_preflight_volume" >/dev/null
+	drop_transient_volume "$backup_preflight_volume"
 	check_backup_free_space "$backup_available_kb" "$backup_nfs_export" \
 		"$backup_minimum_free_gb" "$backup_advisory_free_gb" || exit 1
-	minimum_kb=$((minimum_free_gb * 1024 * 1024))
-	[ "$available_kb" -ge "$minimum_kb" ] || {
-		echo "ERROR: NFS depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
+	if [ "$adopt_mode" = true ]; then
+		echo "Adoption reuses existing depot content; skipping the ${minimum_free_gb} GB free-space floor"
+	elif [ "$skip_depot_free_space_floor" = true ]; then
+		echo "This depot was adopted with existing content; skipping the ${minimum_free_gb} GB free-space floor"
+		echo "Point the depot answers at a different location to restore the floor"
+	else
+		minimum_kb=$((minimum_free_gb * 1024 * 1024))
+		[ "$available_kb" -ge "$minimum_kb" ] || {
+			echo "ERROR: NFS depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
+			exit 1
+		}
+	fi
+fi
+
+if [ "$adopt_mode" = true ]; then
+	echo "Validating the existing depot read-only at /depot"
+	case "$project_dir" in
+		*,*|*=*)
+			echo "ERROR: install directory may not contain ',' or '=' because Docker's mount syntax cannot parse it: $project_dir" >&2
+			exit 2
+			;;
+	esac
+	validator_mount="type=bind,src=$project_dir/scripts/validate-adopted-depot.sh,dst=/validate-adopted-depot.sh,readonly"
+	if [ "$storage_mode" = local ]; then
+		depot_validation_mount="type=bind,src=$depot_local_path,dst=/depot,readonly"
+	else
+		depot_validation_mount="type=volume,src=$preflight_volume,dst=/depot,readonly"
+	fi
+	if ! docker run --rm --mount "$depot_validation_mount" --mount "$validator_mount" \
+		alpine:3.20 sh /validate-adopted-depot.sh /depot; then
 		exit 1
-	}
+	fi
+fi
+if [ "$storage_mode" = nfs ]; then
+	docker volume rm "$preflight_volume" >/dev/null
+	drop_transient_volume "$preflight_volume"
 fi
 
 echo "Staging the licensed VCF Download Tool locally"
 stage_dir="$(mktemp -d /tmp/vcf-services-vcfdt.XXXXXX)"
-trap 'rm -rf "$stage_dir"' EXIT
 case "$vcfdt_archive" in
 	*.tar.gz|*.tgz) tar -xzf "$vcfdt_archive" -C "$stage_dir" ;;
 	*.zip) unzip -q "$vcfdt_archive" -d "$stage_dir" ;;
@@ -509,9 +700,6 @@ chmod 0755 "$project_dir/build/vcfdt/bin/vcf-download-tool"
 archive_name="$(basename "$vcfdt_archive")"
 vcfdt_version="$(sed -nE 's/^vcf-download-tool-([0-9][0-9A-Za-z._-]*)\.(tar\.gz|tgz|zip)$/\1/p' <<< "$archive_name")"
 vcfdt_version="${vcfdt_version:-unknown}"
-depot_volume_fingerprint="$(printf '%s\n' "$storage_mode|$depot_local_path|$nfs_server|$nfs_export|$nfs_options" \
-	| sha256sum | cut -c1-12)"
-depot_volume_name="vcf-services-depot-store-$depot_volume_fingerprint"
 backup_volume_fingerprint="$(printf '%s\n' "$storage_mode|$backup_local_path|$nfs_server|$backup_nfs_export|$nfs_options" \
 	| sha256sum | cut -c1-12)"
 backup_volume_name="vcf-services-backup-store-$backup_volume_fingerprint"
@@ -543,6 +731,7 @@ write_setting AUTH_USERNAME "$auth_username"
 write_setting TLS_MODE "$tls_mode"
 write_setting STORAGE_MODE "$storage_mode"
 write_setting DEPOT_VOLUME_NAME "$depot_volume_name"
+write_setting DEPOT_ADOPTED "$adopted_depot_fingerprint"
 write_setting DEPOT_LOCAL_PATH "$saved_depot_local_path"
 write_setting NFS_SERVER "$saved_nfs_server"
 write_setting NFS_EXPORT "$saved_nfs_export"
@@ -644,7 +833,6 @@ if [ -n "$tool_version_output" ]; then
 	sed -i "s|^VCFDT_VERSION=.*$|VCFDT_VERSION=\"$vcfdt_version\"|" "$project_dir/config/settings.env"
 fi
 
-docker volume create vcf-services-vcfdt-state >/dev/null
 docker volume create vcf-services-sftp-host-keys >/dev/null
 if ! docker volume inspect "$backup_volume_name" >/dev/null 2>&1; then
 	if [ "$storage_mode" = local ]; then
@@ -676,10 +864,24 @@ if ! docker run --rm --user "$sftp_uid:$sftp_gid" --entrypoint /bin/sh \
 	echo "       The re-own attempt did not take effect. Correct the share ownership, then rerun install.sh." >&2
 	exit 1
 fi
-machine_id_output="$(docker run --rm \
-	--entrypoint /opt/vcfdt/bin/vcf-download-tool \
-	-v vcf-services-vcfdt-state:/root/.local/share/vmware/vdt \
-	vcf-services-sync:local configuration get --machineId)"
+if [ "$adopt_mode" = true ]; then
+	if [ -n "$adopt_state_dir" ]; then
+		state_source_kind=directory
+		state_source_value="$adopt_state_dir"
+	else
+		state_source_kind=volume
+		state_source_value="$adopt_state_volume"
+	fi
+	machine_id_output="$("$project_dir/scripts/import-vcfdt-state.sh" \
+		vcf-services-sync:local "$state_source_kind" "$state_source_value" \
+		vcf-services-vcfdt-state)"
+else
+	docker volume create vcf-services-vcfdt-state >/dev/null
+	machine_id_output="$(docker run --rm \
+		--entrypoint /opt/vcfdt/bin/vcf-download-tool \
+		-v vcf-services-vcfdt-state:/root/.local/share/vmware/vdt \
+		vcf-services-sync:local configuration get --machineId)"
+fi
 echo
 echo "Software Depot ID"
 echo "$machine_id_output"
