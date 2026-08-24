@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Run a command on a pseudo-terminal so interactive prompts can be tested.
 
-Usage: pty-run.py INPUT COMMAND [ARG...]
+Usage: pty-run.py [--wait-for MARKER] INPUT COMMAND [ARG...]
 
 INPUT is a Python escaped string typed at the terminal once the command has
 produced its first output, so the command is always running by the time the
-input arrives. Use \\x04 for end-of-input and \\x03 for an interrupt. The
-command's combined output is written to stdout and its exit status is returned,
-with 128 + signal for a command killed by a signal.
+input arrives. Pass --wait-for to hold the input back until MARKER appears in
+the output instead, which pins the input to a specific prompt rather than to
+whatever the command printed first. Use \\x04 for end-of-input and \\x03 for an
+interrupt. The command's combined output is written to stdout and its exit
+status is returned, with 128 + signal for a command killed by a signal.
 """
 import os
 import pty
@@ -17,15 +19,23 @@ import sys
 import time
 
 TIMEOUT_SECONDS = 120
-FIRST_OUTPUT_SECONDS = 60
+FEED_TRIGGER_SECONDS = 60
 
 
 def main():
-    if len(sys.argv) < 3:
-        sys.stderr.write("usage: pty-run.py INPUT COMMAND [ARG...]\n")
+    argv = sys.argv[1:]
+    marker = b""
+    if argv[:1] == ["--wait-for"]:
+        if len(argv) < 2:
+            sys.stderr.write("pty-run.py: --wait-for needs a marker\n")
+            return 2
+        marker = argv[1].encode("utf-8")
+        argv = argv[2:]
+    if len(argv) < 2:
+        sys.stderr.write("usage: pty-run.py [--wait-for MARKER] INPUT COMMAND [ARG...]\n")
         return 2
-    feed = sys.argv[1].encode("utf-8").decode("unicode_escape").encode("latin-1")
-    command = sys.argv[2:]
+    feed = argv[0].encode("utf-8").decode("unicode_escape").encode("latin-1")
+    command = argv[1:]
 
     pid, master = pty.fork()
     if pid == 0:
@@ -37,7 +47,7 @@ def main():
 
     output = bytearray()
     deadline = time.monotonic() + TIMEOUT_SECONDS
-    first_output_deadline = time.monotonic() + FIRST_OUTPUT_SECONDS
+    feed_deadline = time.monotonic() + FEED_TRIGGER_SECONDS
     pending_feed = feed
     timed_out = False
     finished = False
@@ -48,7 +58,7 @@ def main():
             os.kill(pid, signal.SIGKILL)
             break
         if pending_feed:
-            remaining = min(remaining, max(0.05, first_output_deadline - time.monotonic()))
+            remaining = min(remaining, max(0.05, feed_deadline - time.monotonic()))
         readable, _, _ = select.select([master], [], [], remaining)
         if readable:
             try:
@@ -60,7 +70,8 @@ def main():
                     output.extend(chunk)
                 else:
                     finished = True
-        if pending_feed and (output or time.monotonic() >= first_output_deadline):
+        feed_is_due = bytes(marker) in bytes(output) if marker else bool(output)
+        if pending_feed and (feed_is_due or time.monotonic() >= feed_deadline):
             os.write(master, pending_feed)
             pending_feed = b""
         if finished:

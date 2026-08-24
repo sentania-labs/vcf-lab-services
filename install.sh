@@ -420,7 +420,6 @@ if [ "$adopt_mode" = true ]; then
 elif [ -n "$adopted_depot_fingerprint" ] && [ "$adopted_depot_fingerprint" = "$depot_volume_fingerprint" ]; then
 	skip_depot_free_space_floor=true
 else
-	adopted_depot_fingerprint=""
 	skip_depot_free_space_floor=false
 fi
 

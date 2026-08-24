@@ -114,10 +114,12 @@ expect_failure 2 'requires --adopt-state-dir or --adopt-state-volume' \
 adopt_answers="$work_dir/adopt-answers.env"
 printf 'VCFDT_ARCHIVE=%s/missing-vcf-download-tool.tar.gz\n' "$work_dir" > "$adopt_answers"
 
+writer_prompt='Type STOPPED to confirm'
+
 pty_expect() {
 	local description="$1" expected_status="$2" expected_text="$3" feed="$4" status=0 output
 	shift 4
-	output="$(python3 "$project_dir/tests/pty-run.py" "$feed" "$@" 2>&1)" || status=$?
+	output="$(python3 "$project_dir/tests/pty-run.py" --wait-for "$writer_prompt" "$feed" "$@" 2>&1)" || status=$?
 	[ "$status" -eq "$expected_status" ] || {
 		echo "$description: expected exit $expected_status, got $status" >&2
 		printf '%s\n' "$output" >&2
@@ -143,7 +145,7 @@ pty_expect 'end of input refuses' 2 'adoption cancelled because writer shutdown 
 
 # An interrupted confirmation must never fall through into the adoption path.
 interrupt_status=0
-interrupt_output="$(python3 "$project_dir/tests/pty-run.py" '\x03' \
+interrupt_output="$(python3 "$project_dir/tests/pty-run.py" --wait-for "$writer_prompt" '\x03' \
 	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp 2>&1)" \
 	|| interrupt_status=$?
 [ "$interrupt_status" -ne 0 ] || {
@@ -155,7 +157,7 @@ grep -q 'ADOPTION SAFETY CHECK' <<< "$interrupt_output" || {
 	printf '%s\n' "$interrupt_output" >&2
 	exit 1
 }
-grep -q 'Type STOPPED to confirm' <<< "$interrupt_output" || {
+grep -q "$writer_prompt" <<< "$interrupt_output" || {
 	echo "the interrupted run never reached the writer confirmation prompt" >&2
 	printf '%s\n' "$interrupt_output" >&2
 	exit 1

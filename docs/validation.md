@@ -41,12 +41,14 @@ on behalf of state this run does not own: a stale import marker sitting beside
 genuine but unreadable state is refused with the volume byte-for-byte intact, a
 stale marker beside a matching ID is treated as an interrupted import and
 reimported from the source rather than declared complete, a volume holding only
-an abandoned staging directory is cleared and retried, and a copy failure
-neither leaves half-imported content in a volume this run created nor empties a
-volume it does not own. The release test proves non-interactive adoption refuses
+an abandoned staging directory is cleared and retried, a copy failure leaves no
+half-imported content in a volume this run created, and a target holding a
+different ID is refused before any copy is attempted, with its contents
+untouched. The release test proves non-interactive adoption refuses
 to proceed without an explicit previous-writer shutdown assertion and that
 `--confirm-old-writer-stopped` advances only scripted adoption. It drives the
 interactive branch over a real pseudo-terminal through `tests/pty-run.py`:
+each reply is typed only once the confirmation prompt itself has appeared, so
 typing exactly `STOPPED` proceeds, while a case-mismatched reply, an unrelated
 reply, an empty reply, end of input, and an interrupt all refuse before either
 source is read. The
