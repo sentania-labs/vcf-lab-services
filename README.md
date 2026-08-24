@@ -10,6 +10,10 @@ The licensed VCF Download Tool is never included, downloaded, or redistributed
 by this project. You provide the archive obtained from the Broadcom support
 portal during installation.
 
+Run `./install.sh` for the first installation. `docker compose up` alone cannot
+work because the installer layers your operator-supplied licensed tool into a
+local image and creates its protected state volume.
+
 ## Requirements
 
 - Linux on x86_64
@@ -74,11 +78,19 @@ credential configured by the installer.
 
 ## Operations
 
+If you need to start the stack manually after installation, use
+`./compose.sh up -d`. It checks that the Docker daemon is reachable and that
+the install-created state volume and local sync image exist before invoking
+Compose with your original arguments. The normal day-to-day commands remain
+direct Compose commands:
+
 ```bash
 docker compose ps
 docker exec vcf-services-sync /usr/local/bin/sync.sh --status
 docker exec vcf-services-sync /usr/local/bin/sync.sh patches
 docker compose logs -f depot-sync
+docker compose restart
+docker compose down
 ```
 
 Sync targets are serialized with a lock and run sequentially. One failed target
@@ -106,6 +118,55 @@ the VCF Installer and SDDC Manager trust stores before configuring depot
 consumers. With a supplied certificate, import the issuing CA chain instead.
 The installer validates that a supplied certificate matches the configured
 FQDN and private key.
+
+`vmware-umds` verifies certificates against the operating system trust store
+on the host where UMDS runs. That host is separate from the VCF Installer and
+SDDC Manager, so trusting the depot on those appliances does not make UMDS
+trust it.
+
+For the default self-signed certificate, securely copy
+`secrets/tls/server.crt` from the depot host to the UMDS host as
+`/tmp/vcf-services-depot.crt` (use the `.pem` extension on Photon OS). For a
+supplied certificate, copy each issuing root and intermediate CA certificate
+from your PKI instead of the depot's server certificate, keeping each CA
+certificate in a separate file with its own name. Then install the certificate
+material as root on the UMDS host:
+
+```bash
+# Ubuntu or Debian UMDS host
+install -m 0644 /tmp/vcf-services-depot.crt \
+  /usr/local/share/ca-certificates/vcf-services-depot.crt
+update-ca-certificates
+
+# Photon OS UMDS host
+install -m 0644 /tmp/vcf-services-depot.pem \
+  /etc/ssl/certs/vcf-services-depot.pem
+/usr/bin/rehash_ca_certificates.sh
+```
+
+Repeat the `install` command for each root and intermediate file when using a
+supplied certificate. Verify the trust from the UMDS host against the
+unauthenticated health route, without an insecure TLS option. Use
+`https://<PRODUCT_FQDN>/healthz` when HTTPS uses port 443, and
+`https://<PRODUCT_FQDN>:<HTTPS_PORT>/healthz` for any other configured port:
+
+```bash
+# HTTPS on the default port 443
+curl --fail --show-error https://vcf-services.example.com/healthz
+
+# HTTPS on a nonstandard port, for example 8443
+curl --fail --show-error https://vcf-services.example.com:8443/healthz
+```
+
+An `ok` response means UMDS will accept the depot certificate. A TLS error means
+the trust store still lacks the certificate. A connection refused or timeout
+means the URL is using the wrong port, not that the certificate is untrusted.
+
+Then configure UMDS with the patch-store base URL.
+The URL is `https://<PRODUCT_FQDN>/umds-patch-store/` when HTTPS uses port 443.
+For any other configured port, it is
+`https://<PRODUCT_FQDN>:<HTTPS_PORT>/umds-patch-store/`, for example
+`https://vcf-services.example.com:8443/umds-patch-store/`.
 
 ## Persistence and recovery
 

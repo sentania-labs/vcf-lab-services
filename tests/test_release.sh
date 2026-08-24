@@ -21,6 +21,7 @@ archive="$work_dir/vcf-lab-services-$version.tar.gz"
 required=(
 	"vcf-lab-services-$version/.release.env"
 	"vcf-lab-services-$version/install.sh"
+	"vcf-lab-services-$version/compose.sh"
 	"vcf-lab-services-$version/docker-compose.yml"
 	"vcf-lab-services-$version/Dockerfile.sync"
 	"vcf-lab-services-$version/Dockerfile.sync.dockerignore"
@@ -35,6 +36,7 @@ done
 ! grep -Eq 'Dockerfile\.sync-base|Dockerfile\.ui|(^|/)ui/|(^|/)sync/' <<< "$listing"
 
 tar -xzf "$archive" -C "$work_dir"
+[ -x "$work_dir/vcf-lab-services-$version/compose.sh" ]
 grep -qx "VCF_SERVICES_VERSION=$version" "$work_dir/vcf-lab-services-$version/.release.env"
 grep -qx "VCF_SERVICES_IMAGE_REPOSITORY=$repository" "$work_dir/vcf-lab-services-$version/.release.env"
 "$project_dir/tests/make-stub-vcfdt.sh" "$work_dir/vcf-download-tool-0.0.0-stub.tar.gz" >/dev/null
