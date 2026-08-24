@@ -223,6 +223,21 @@ partial_leftover="$(docker run --rm --entrypoint /bin/sh \
 conflict_source="$work_dir/conflict-state"
 mkdir -p "$conflict_source"
 printf '33333333-3333-4333-8333-333333333333\n' > "$conflict_source/machine_id"
+
+docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$partial_target,dst=/state" \
+	"$state_test_image" -c 'mkdir -p /state/.vcf-services-import-staging'
+stale_marker_error="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" directory "$conflict_source" "$partial_target" 2>&1)" \
+	&& fail "a stale import marker let a different Software Depot ID be wiped"
+grep -q 'refusing to overwrite' <<< "$stale_marker_error" \
+	|| fail "stale import marker conflict did not explain the overwrite refusal"
+stale_marker_id="$(docker run --rm --entrypoint /opt/vcfdt/bin/vcf-download-tool \
+	--mount "type=volume,src=$partial_target,dst=/root/.local/share/vmware/vdt,readonly" \
+	"$state_test_image" configuration get --machineId)"
+[ "$stale_marker_id" = '22222222-2222-4222-8222-222222222222' ] \
+	|| fail "stale import marker conflict changed the existing target ID"
+
 conflict_error="$("$project_dir/scripts/import-vcfdt-state.sh" \
 	"$state_test_image" directory "$conflict_source" "$volume_target" 2>&1)" \
 	&& fail "state import overwrote a different Software Depot ID"
