@@ -115,12 +115,22 @@ container_publishes_tcp_port() {
 		"$container" 2>/dev/null | grep -qx "$port"
 }
 
+path_has_no_parent_segment() {
+	local path="$1"
+	case "/$path/" in
+		*/../*) echo "ERROR: $path must not contain a '..' segment" >&2; return 1 ;;
+	esac
+	return 0
+}
+
 paths_are_disjoint() {
 	local first="${1%/}" second="${2%/}"
 	[ -n "$first" ] && [ -n "$second" ] || {
 		echo "ERROR: both paths must be non-empty" >&2
 		return 1
 	}
+	path_has_no_parent_segment "$first" || return 1
+	path_has_no_parent_segment "$second" || return 1
 	[ "$first" != "$second" ] || {
 		echo "ERROR: $second must not be the same directory as $first" >&2
 		return 1
@@ -131,5 +141,22 @@ paths_are_disjoint() {
 	case "$first/" in
 		"$second"/*) echo "ERROR: $second must not contain $first" >&2; return 1 ;;
 	esac
+	return 0
+}
+
+check_backup_free_space() {
+	local available_kb="$1" label="$2" hard_floor_gb="$3" advisory_gb="$4"
+	local available_gb=$((available_kb / 1024 / 1024))
+	if [ -n "$hard_floor_gb" ]; then
+		if [ "$available_gb" -lt "$hard_floor_gb" ]; then
+			echo "ERROR: backup storage $label has ${available_gb} GB free, below the requested ${hard_floor_gb} GB floor." >&2
+			return 1
+		fi
+		return 0
+	fi
+	if [ "$available_gb" -lt "$advisory_gb" ]; then
+		echo "WARNING: backup storage $label has ${available_gb} GB free, under the ${advisory_gb} GB advisory level." >&2
+		echo "         Backups will still be accepted. Use --min-backup-free-gb to make this a hard floor." >&2
+	fi
 	return 0
 }

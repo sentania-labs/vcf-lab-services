@@ -107,6 +107,9 @@ while [ "$SECONDS" -lt "$deadline" ]; do
 	sleep 2
 done
 [ "$owner" = "1005:1005" ] || fail "changed UID:GID did not re-own the existing backup tree (saw $owner)"
+marker="$(docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:ro" "$image" \
+	-c 'cat /keys/backup-owner')"
+[ "$marker" = "1005:1005 ok" ] || fail "re-own marker was not recorded (saw $marker)"
 SSHPASS=sftp-test-password docker run --rm --network host --entrypoint /bin/sh \
 	-e SSHPASS -e "SFTP_PORT=$host_port" -v "$work_dir:/work:ro" "$image" \
 	-c 'printf "put /work/payload.txt /mnt/backup/vcenter/reowned.txt\nbye\n" | \

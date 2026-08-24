@@ -154,6 +154,9 @@ def _bool_setting(value, fallback=True):
     return fallback
 
 
+DEFAULT_NFS_OPTIONS = "nfsvers=4,rw,hard,timeo=600,retrans=2"
+
+
 def _int_setting(value, fallback):
     try:
         return int(str(value).strip())
@@ -165,6 +168,8 @@ def _paths_are_disjoint(first, second):
     first = first.rstrip("/")
     second = second.rstrip("/")
     if not first or not second or first == second:
+        return False
+    if any(part == ".." for path in (first, second) for part in path.split("/")):
         return False
     return not (
         second.startswith(first + "/") or first.startswith(second + "/")
@@ -187,9 +192,7 @@ def _backup_settings_doc(settings=None):
         "nfsServer": settings.get("NFS_SERVER", ""),
         "nfsExport": settings.get("NFS_EXPORT", ""),
         "backupNfsExport": backup_nfs_export,
-        "nfsOptions": settings.get(
-            "NFS_OPTIONS", "nfsvers=4,rw,hard,timeo=600,retrans=2"
-        ),
+        "nfsOptions": settings.get("NFS_OPTIONS") or DEFAULT_NFS_OPTIONS,
         "backupPath": backup_local_path
         if storage_mode == "local"
         else backup_nfs_export,
@@ -356,6 +359,8 @@ def update_backup_settings():
     nfs_export = str(body.get("nfsExport", ""))
     backup_nfs_export = str(body.get("backupNfsExport", ""))
     nfs_options = str(body.get("nfsOptions", ""))
+    if storage_mode == "local" and not re.fullmatch(r"[A-Za-z0-9_=,.-]+", nfs_options):
+        nfs_options = DEFAULT_NFS_OPTIONS
     if not re.fullmatch(r"[A-Za-z0-9_=,.-]+", nfs_options):
         return jsonify({"error": "NFS options contain unsupported characters"}), 400
     if storage_mode == "local":
@@ -367,7 +372,10 @@ def update_backup_settings():
             ), 400
         if not _paths_are_disjoint(local_path, backup_local_path):
             return jsonify(
-                {"error": "the backup path must sit outside the depot path"}
+                {
+                    "error": "the backup path must sit outside the depot path"
+                    " and neither may contain a '..' segment"
+                }
             ), 400
         nfs_server = stored.get("NFS_SERVER", "")
         nfs_export = stored.get("NFS_EXPORT", "")
@@ -386,7 +394,10 @@ def update_backup_settings():
             ), 400
         if not _paths_are_disjoint(nfs_export, backup_nfs_export):
             return jsonify(
-                {"error": "the backup export must sit outside the depot export"}
+                {
+                    "error": "the backup export must sit outside the depot export"
+                    " and neither may contain a '..' segment"
+                }
             ), 400
         local_path = stored.get("DEPOT_LOCAL_PATH", "")
         backup_local_path = stored.get("BACKUP_LOCAL_PATH", "")

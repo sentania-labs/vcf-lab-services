@@ -26,50 +26,55 @@ validate_uid_gid() {
 apply_identity() {
 	uid_gid="$(setting SFTP_UID_GID 1003:1003)"
 	validate_uid_gid "$uid_gid" || {
-		echo "ERROR: SFTP_UID_GID must contain a non-root numeric UID:GID" >&2
-		exit 1
+		echo "WARNING: SFTP_UID_GID must contain a non-root numeric UID:GID. Keeping the running identity." >&2
+		return 1
 	}
 	uid="${uid_gid%%:*}"
 	gid="${uid_gid#*:}"
 
 	if getent group "$backup_user" >/dev/null 2>&1; then
 		current_gid="$(getent group "$backup_user" | cut -d: -f3)"
-		[ "$current_gid" = "$gid" ] || groupmod -g "$gid" "$backup_user"
+		if [ "$current_gid" != "$gid" ]; then
+			groupmod -g "$gid" "$backup_user" || {
+				echo "WARNING: could not move $backup_user to GID $gid. Retrying shortly." >&2
+				return 1
+			}
+		fi
 	else
 		if getent group "$gid" >/dev/null 2>&1; then
-			echo "ERROR: configured SFTP GID $gid is already assigned in the container" >&2
-			exit 1
+			echo "WARNING: configured SFTP GID $gid is already assigned in the container" >&2
+			return 1
 		fi
-		groupadd -g "$gid" "$backup_user"
+		groupadd -g "$gid" "$backup_user" || {
+			echo "WARNING: could not create the $backup_user group with GID $gid. Retrying shortly." >&2
+			return 1
+		}
 	fi
 
 	if id "$backup_user" >/dev/null 2>&1; then
 		current_uid="$(id -u "$backup_user")"
-		[ "$current_uid" = "$uid" ] || usermod -u "$uid" "$backup_user"
-		usermod -g "$gid" -d /mnt/backup -s /bin/sh "$backup_user"
+		if [ "$current_uid" != "$uid" ]; then
+			usermod -u "$uid" "$backup_user" || {
+				echo "WARNING: could not move $backup_user to UID $uid, usually because a transfer is still running. Retrying shortly." >&2
+				return 1
+			}
+		fi
+		usermod -g "$gid" -d /mnt/backup -s /bin/sh "$backup_user" || {
+			echo "WARNING: could not update the $backup_user account. Retrying shortly." >&2
+			return 1
+		}
 	else
 		if getent passwd "$uid" >/dev/null 2>&1; then
-			echo "ERROR: configured SFTP UID $uid is already assigned in the container" >&2
-			exit 1
+			echo "WARNING: configured SFTP UID $uid is already assigned in the container" >&2
+			return 1
 		fi
-		useradd -M -u "$uid" -g "$gid" -d /mnt/backup -s /bin/sh "$backup_user"
+		useradd -M -u "$uid" -g "$gid" -d /mnt/backup -s /bin/sh "$backup_user" || {
+			echo "WARNING: could not create the $backup_user account. Retrying shortly." >&2
+			return 1
+		}
 	fi
-	own_backup_tree "$uid" "$gid"
+	/usr/local/bin/sftp-own-backup.sh "$uid" "$gid" || true
 	last_uid_gid="$uid_gid"
-}
-
-own_backup_tree() {
-	uid="$1"
-	gid="$2"
-	current="$(stat -c '%u:%g' /mnt/backup 2>/dev/null || true)"
-	if [ "$current" = "$uid:$gid" ]; then
-		return 0
-	fi
-	if chown -R "$uid:$gid" /mnt/backup 2>/dev/null; then
-		echo "Re-owned /mnt/backup as $uid:$gid"
-		return 0
-	fi
-	echo "WARNING: could not re-own /mnt/backup as $uid:$gid. Backup writes will fail until the share ownership is corrected." >&2
 	return 0
 }
 
@@ -138,14 +143,22 @@ while :; do
 	uid_gid="$(setting SFTP_UID_GID 1003:1003)"
 	case "$enabled" in
 		true|yes|1)
-			[ "$uid_gid" = "$last_uid_gid" ] || apply_identity
-			password_hash=""
-			[ -s "$password_file" ] && password_hash="$(sha256sum "$password_file" | cut -d' ' -f1)"
-			[ "$password_hash" = "$last_password_hash" ] || apply_password
-			if [ -z "$sshd_pid" ] || ! kill -0 "$sshd_pid" 2>/dev/null; then
-				/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config &
-				sshd_pid=$!
-				echo "SFTP backup service enabled for $backup_user with UID:GID $uid_gid"
+			if [ "$uid_gid" != "$last_uid_gid" ]; then
+				apply_identity || true
+			fi
+			if [ -z "$last_uid_gid" ]; then
+				stop_sshd
+			else
+				password_hash=""
+				if [ -s "$password_file" ]; then
+					password_hash="$(sha256sum "$password_file" | cut -d' ' -f1)"
+				fi
+				[ "$password_hash" = "$last_password_hash" ] || apply_password
+				if [ -z "$sshd_pid" ] || ! kill -0 "$sshd_pid" 2>/dev/null; then
+					/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config &
+					sshd_pid=$!
+					echo "SFTP backup service enabled for $backup_user with UID:GID $uid_gid"
+				fi
 			fi
 			;;
 		false|no|0)

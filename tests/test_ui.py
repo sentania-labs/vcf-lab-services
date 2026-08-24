@@ -259,6 +259,41 @@ class UiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("outside the depot", response.get_json()["error"])
 
+    def test_parent_segment_paths_are_rejected(self):
+        response = self.client.post(
+            "/api/settings/backup",
+            json={
+                "enabled": False,
+                "port": 2222,
+                "uidGid": "1003:1003",
+                "storageMode": "nfs",
+                "nfsServer": "nfs.example.test",
+                "nfsExport": "/exports/vcf-services-depot",
+                "backupNfsExport": "/exports/vcf-services-depot/../vcf-services-depot/backup",
+                "nfsOptions": "nfsvers=4,rw",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("..", response.get_json()["error"])
+
+    def test_local_save_falls_back_to_default_nfs_options(self):
+        response = self.client.post(
+            "/api/settings/backup",
+            json={
+                "enabled": False,
+                "port": 2222,
+                "uidGid": "1003:1003",
+                "storageMode": "local",
+                "localPath": "/srv/vcf-services/depot",
+                "backupLocalPath": "/srv/vcf-services/backup",
+                "nfsOptions": "",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["nfsOptions"], "nfsvers=4,rw,hard,timeo=600,retrans=2"
+        )
+
     def test_switching_to_nfs_preserves_the_local_paths(self):
         self.settings.write_text(
             self.settings.read_text()

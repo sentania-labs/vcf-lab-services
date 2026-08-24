@@ -9,7 +9,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 product_files=(docker-compose.yml compose.sh install.sh caddy/Caddyfile config/answers.example
 	config/settings.env.example Dockerfile.sync Dockerfile.sync-base Dockerfile.ui
 	Dockerfile.sftp Dockerfile.sftp.dockerignore sftp/entrypoint.sh sftp/healthcheck.sh sftp/sshd_config
-	sync/entrypoint.sh sync/sync.sh sync/targets/vkr.sh scripts/verify-byte-exact.sh
+	sftp/own-backup.sh sync/entrypoint.sh sync/sync.sh sync/targets/vkr.sh scripts/verify-byte-exact.sh
 	ui/app.py ui/requirements.txt ui/templates/index.html)
 
 # No Docker socket, Docker proxy, or Docker client dependency anywhere.
@@ -67,7 +67,10 @@ grep -q '^Subsystem sftp /usr/lib/openssh/sftp-server$' sftp/sshd_config \
 ! grep -Eq 'ChrootDirectory|internal-sftp' sftp/sshd_config || fail "SFTP must not chroot or rewrite absolute paths"
 grep -q '^ForceCommand /usr/lib/openssh/sftp-server$' sftp/sshd_config \
 	|| fail "SFTP must force file transfer only, with no shell or remote command"
-grep -q 'own_backup_tree' sftp/entrypoint.sh || fail "SFTP must re-own the backup tree on a UID:GID change"
+grep -q 'sftp-own-backup.sh' sftp/entrypoint.sh || fail "SFTP must re-own the backup tree on a UID:GID change"
+grep -q 'sftp-own-backup.sh' install.sh || fail "installer and service must share one re-own implementation"
+grep -q 'backup-owner' sftp/own-backup.sh || fail "re-own must be keyed on a persistent marker, not the mount root owner"
+grep -q -- '--min-backup-free-gb' install.sh || fail "installer must offer an opt-in backup free-space floor"
 ! grep -q 'depot_local_path/backup' install.sh || fail "backup storage must not nest inside the depot tree"
 grep -q 'paths_are_disjoint "\$depot_local_path" "\$backup_local_path"' install.sh \
 	|| fail "installer must reject a backup directory inside the depot directory"

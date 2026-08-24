@@ -105,9 +105,13 @@ The service deliberately has no chroot. This preserves the absolute
 the external OpenSSH `sftp-server` subsystem and password authentication, and
 `ForceCommand` restricts the account to file transfer, so the password grants no
 shell or remote command execution. The installer prepares the component
-directories using the configured numeric identity, default `1003:1003`, and both
-the installer and the service re-own the backup tree when that identity changes,
-so a UID:GID change from the admin console needs no host-side remediation.
+directories using the configured numeric identity, default `1003:1003`. The
+installer and the service share one re-own implementation keyed on a persistent
+marker in the host-keys volume, so a UID:GID change from the admin console
+re-owns the backup tree once and a restart never rewalks it. Where the storage
+refuses an ownership change, such as an NFS export with `root_squash`, the
+service logs the required owner instead and the change is not retried until the
+setting changes again.
 
 ECDSA, Ed25519, and RSA host keys are generated once in the external
 `vcf-services-sftp-host-keys` volume. Every container start prints all three
@@ -235,10 +239,15 @@ Backup data uses a separate volume mounted read-write at `/mnt/backup`. Its
 location is prompted separately from the depot and must sit outside the depot
 tree: `BACKUP_LOCAL_PATH` in local mode, `BACKUP_NFS_EXPORT` in NFS mode. The
 installer and the admin console both reject a backup location nested inside the
-depot, so backups are never browsed or served by the depot web service and never
-scanned as depot content. The NFS export must allow the Docker host and the
-configured SFTP UID:GID to write it. Depot content is never exposed through the
-SFTP account.
+depot, and reject any path containing a `..` segment, so backups are never
+browsed or served by the depot web service and never scanned as depot content.
+The NFS export must allow the Docker host and the configured SFTP UID:GID to
+write it. Depot content is never exposed through the SFTP account.
+
+Backup storage is always checked for existence and writability. Its free space
+is advisory: the installer warns below 100 GB and continues, because backups are
+a smaller size class than the depot. Pass `--min-backup-free-gb NUMBER` to turn
+that into a hard floor.
 
 Configuration lives in `config/settings.env`. It is deliberately a simple,
 atomic file-backed format so later GUI settings support can update it without

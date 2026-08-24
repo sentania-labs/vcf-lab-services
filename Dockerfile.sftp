@@ -22,7 +22,9 @@ RUN apt-get update \
 COPY sftp/sshd_config /etc/ssh/sshd_config
 COPY sftp/entrypoint.sh /usr/local/bin/sftp-entrypoint.sh
 COPY sftp/healthcheck.sh /usr/local/bin/sftp-healthcheck.sh
-RUN chmod 0755 /usr/local/bin/sftp-entrypoint.sh /usr/local/bin/sftp-healthcheck.sh
+COPY sftp/own-backup.sh /usr/local/bin/sftp-own-backup.sh
+RUN chmod 0755 /usr/local/bin/sftp-entrypoint.sh /usr/local/bin/sftp-healthcheck.sh \
+    /usr/local/bin/sftp-own-backup.sh
 
 EXPOSE 22
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=6 \

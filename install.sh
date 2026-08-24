@@ -6,6 +6,8 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$project_dir/scripts/install-checks.sh"
 answers_file=""
 minimum_free_gb=500
+backup_minimum_free_gb=""
+backup_advisory_free_gb=100
 validate_only=""
 release_version=""
 image_repository=""
@@ -16,11 +18,16 @@ release_source=bundle
 usage() {
 	cat <<'EOF'
 Usage: ./install.sh [--answers-file PATH] [--min-free-gb NUMBER]
+                    [--min-backup-free-gb NUMBER]
                     [--version TAG] [--image-repository REPOSITORY]
        ./install.sh --validate-archive PATH
 
-The free-space floor defaults to 500 GB. Use --min-free-gb only when a smaller
-lab or test store is intentional.
+The depot free-space floor defaults to 500 GB. Use --min-free-gb only when a
+smaller lab or test store is intentional.
+
+Backup storage is a smaller size class, so it is always checked for existence
+and writability but its free space is only advisory: the installer warns below
+100 GB and continues. Use --min-backup-free-gb to opt into a hard backup floor.
 
 A packaged release bundle carries its own version and image repository, and is
 the normal operator path. In a source checkout the image repository defaults to
@@ -39,6 +46,11 @@ while [ "$#" -gt 0 ]; do
 		--min-free-gb)
 			[ "$#" -ge 2 ] || { echo "ERROR: --min-free-gb requires a number" >&2; exit 2; }
 			minimum_free_gb="$2"
+			shift 2
+			;;
+		--min-backup-free-gb)
+			[ "$#" -ge 2 ] || { echo "ERROR: --min-backup-free-gb requires a number" >&2; exit 2; }
+			backup_minimum_free_gb="$2"
 			shift 2
 			;;
 		--validate-archive)
@@ -69,6 +81,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 [[ "$minimum_free_gb" =~ ^[0-9]+$ ]] || { echo "ERROR: free-space floor must be a whole number" >&2; exit 2; }
+[ -z "$backup_minimum_free_gb" ] || [[ "$backup_minimum_free_gb" =~ ^[0-9]+$ ]] || {
+	echo "ERROR: backup free-space floor must be a whole number" >&2
+	exit 2
+}
 
 declare -A answers=()
 allowed_answer() {
@@ -439,6 +455,9 @@ if [ "$storage_mode" = local ]; then
 		echo "ERROR: depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
 		exit 1
 	}
+	backup_available_kb="$(df -Pk "$backup_local_path" | awk 'NR==2 {print $4}')"
+	check_backup_free_space "$backup_available_kb" "$backup_local_path" \
+		"$backup_minimum_free_gb" "$backup_advisory_free_gb" || exit 1
 else
 	preflight_volume="vcf-services-nfs-preflight-$$"
 	docker volume create --driver local --opt type=nfs \
@@ -455,14 +474,17 @@ else
 	docker volume create --driver local --opt type=nfs \
 		--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$backup_nfs_export" \
 		"$backup_preflight_volume" >/dev/null
-	if ! docker run --rm --user "$sftp_uid:$sftp_gid" -v "$backup_preflight_volume:/storage:rw" alpine:3.20 \
-		sh -c 'test -w /storage'; then
+	if ! backup_available_kb="$(docker run --rm --user "$sftp_uid:$sftp_gid" \
+		-v "$backup_preflight_volume:/storage:rw" alpine:3.20 \
+		sh -c "test -w /storage && df -Pk /storage | awk 'NR==2 {print \$4}'")"; then
 		docker volume rm "$backup_preflight_volume" >/dev/null 2>&1 || true
 		echo "ERROR: SFTP UID:GID $sftp_uid_gid cannot write $backup_nfs_export." >&2
 		echo "       Confirm the backup NFS export ownership and that it permits the Docker host." >&2
 		exit 1
 	fi
 	docker volume rm "$backup_preflight_volume" >/dev/null
+	check_backup_free_space "$backup_available_kb" "$backup_nfs_export" \
+		"$backup_minimum_free_gb" "$backup_advisory_free_gb" || exit 1
 	minimum_kb=$((minimum_free_gb * 1024 * 1024))
 	[ "$available_kb" -ge "$minimum_kb" ] || {
 		echo "ERROR: NFS depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
@@ -640,14 +662,10 @@ if ! docker volume inspect "$backup_volume_name" >/dev/null 2>&1; then
 			"$backup_volume_name" >/dev/null
 	fi
 fi
-docker run --rm --entrypoint /bin/sh -v "$backup_volume_name:/mnt/backup:rw" "$sftp_image" \
-	-c 'set -eu
-		expected="$1:$2"
-		current="$(stat -c "%u:%g" /mnt/backup)"
-		if [ "$current" != "$expected" ]; then
-			chown -R "$expected" /mnt/backup
-		fi' sh "$sftp_uid" "$sftp_gid" || \
-	echo "WARNING: could not re-own the backup storage as $sftp_uid_gid" >&2
+docker run --rm --entrypoint /usr/local/bin/sftp-own-backup.sh \
+	-v "$backup_volume_name:/mnt/backup:rw" \
+	-v vcf-services-sftp-host-keys:/etc/ssh/keys:rw \
+	"$sftp_image" "$sftp_uid" "$sftp_gid" || true
 if ! docker run --rm --user "$sftp_uid:$sftp_gid" --entrypoint /bin/sh \
 	-v "$backup_volume_name:/mnt/backup:rw" "$sftp_image" \
 	-c 'set -eu

@@ -97,6 +97,21 @@ paths_are_disjoint /srv/depot/inner /srv/depot 2>/dev/null && fail "backup path 
 paths_are_disjoint /srv/depot /srv/depot/ 2>/dev/null && fail "identical depot and backup paths accepted"
 paths_are_disjoint /srv/depot "" 2>/dev/null && fail "empty backup path accepted"
 paths_are_disjoint /srv/depot /srv/depot-archive || fail "shared path prefix wrongly treated as nested"
+paths_are_disjoint /exports/depot /exports/depot/../depot/backup 2>/dev/null \
+	&& fail "backup path with a .. segment accepted"
+paths_are_disjoint /exports/depot/../depot /exports/backup 2>/dev/null \
+	&& fail "depot path with a .. segment accepted"
+paths_are_disjoint /srv/depot..archive /srv/backup || fail "a literal .. inside a name wrongly rejected"
+
+check_backup_free_space $((200 * 1024 * 1024)) /srv/backup "" 100 >/dev/null \
+	|| fail "healthy backup capacity reported a problem"
+low_capacity_output="$(check_backup_free_space $((10 * 1024 * 1024)) /srv/backup "" 100 2>&1)" \
+	|| fail "low backup capacity must warn, not fail"
+grep -q "^WARNING" <<< "$low_capacity_output" || fail "low backup capacity warning missing"
+check_backup_free_space $((10 * 1024 * 1024)) /srv/backup 100 100 2>/dev/null \
+	&& fail "requested hard backup floor was not enforced"
+check_backup_free_space $((200 * 1024 * 1024)) /srv/backup 100 100 >/dev/null \
+	|| fail "hard backup floor rejected sufficient space"
 echo "SFTP installer validation tests passed"
 
 echo "install checks tests passed"
