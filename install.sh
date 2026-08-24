@@ -73,7 +73,7 @@ done
 declare -A answers=()
 allowed_answer() {
 	case "$1" in
-		VCFDT_ARCHIVE|PRODUCT_FQDN|TZ|STORAGE_MODE|DEPOT_LOCAL_PATH|NFS_SERVER|NFS_EXPORT|NFS_OPTIONS|TLS_MODE|TLS_CERT_PATH|TLS_KEY_PATH|AUTH_USERNAME|AUTH_PASSWORD|HTTPS_PORT|BACKUP_ENABLED|SFTP_PORT|SFTP_PASSWORD|SFTP_UID_GID|VCF_VERSION|SKU|SYNC_TARGETS|CRON_SCHEDULE|CEIP|ESX_MODE|LOG_RETENTION|VKR_MATCH|VKR_OS|DEPOT_ENDPOINT|TOKEN_URL|ACTIVATION_CODE) return 0 ;;
+		VCFDT_ARCHIVE|PRODUCT_FQDN|TZ|STORAGE_MODE|DEPOT_LOCAL_PATH|BACKUP_LOCAL_PATH|NFS_SERVER|NFS_EXPORT|BACKUP_NFS_EXPORT|NFS_OPTIONS|TLS_MODE|TLS_CERT_PATH|TLS_KEY_PATH|AUTH_USERNAME|AUTH_PASSWORD|HTTPS_PORT|BACKUP_ENABLED|SFTP_PORT|SFTP_PASSWORD|SFTP_UID_GID|VCF_VERSION|SKU|SYNC_TARGETS|CRON_SCHEDULE|CEIP|ESX_MODE|LOG_RETENTION|VKR_MATCH|VKR_OS|DEPOT_ENDPOINT|TOKEN_URL|ACTIVATION_CODE) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -247,24 +247,45 @@ storage_mode="${REPLY_VALUE,,}"
 [[ "$storage_mode" == local || "$storage_mode" == nfs ]] || { echo "ERROR: storage mode must be local or nfs" >&2; exit 2; }
 
 depot_local_path=""
+backup_local_path=""
 nfs_server=""
 nfs_export=""
+backup_nfs_export=""
 nfs_options="nfsvers=4,rw,hard,timeo=600,retrans=2"
+saved_depot_local_path="$(saved_setting DEPOT_LOCAL_PATH "$project_dir/data/depot")"
+saved_backup_local_path="$(saved_setting BACKUP_LOCAL_PATH "$project_dir/data/backup")"
+saved_nfs_server="$(saved_setting NFS_SERVER nfs.example.com)"
+saved_nfs_export="$(saved_setting NFS_EXPORT /exports/vcf-services-depot)"
+saved_backup_nfs_export="$(saved_setting BACKUP_NFS_EXPORT /exports/vcf-services-backup)"
 if [ "$storage_mode" = local ]; then
-	ask DEPOT_LOCAL_PATH "Local depot directory" "$(saved_setting DEPOT_LOCAL_PATH "$project_dir/data/depot")"
+	ask DEPOT_LOCAL_PATH "Local depot directory" "$saved_depot_local_path"
 	depot_local_path="$REPLY_VALUE"
 	[[ "$depot_local_path" = /* ]] || depot_local_path="$project_dir/${depot_local_path#./}"
 	depot_local_path="$(realpath -m "$depot_local_path")"
+	ask BACKUP_LOCAL_PATH "Local backup directory (kept outside the depot)" "$saved_backup_local_path"
+	backup_local_path="$REPLY_VALUE"
+	[[ "$backup_local_path" = /* ]] || backup_local_path="$project_dir/${backup_local_path#./}"
+	backup_local_path="$(realpath -m "$backup_local_path")"
+	paths_are_disjoint "$depot_local_path" "$backup_local_path" || exit 2
+	saved_depot_local_path="$depot_local_path"
+	saved_backup_local_path="$backup_local_path"
 else
-	ask NFS_SERVER "NFS server" "$(saved_setting NFS_SERVER nfs.example.com)"
+	ask NFS_SERVER "NFS server" "$saved_nfs_server"
 	nfs_server="$REPLY_VALUE"
 	[[ "$nfs_server" =~ ^[A-Za-z0-9.:-]+$ ]] || { echo "ERROR: invalid NFS server" >&2; exit 2; }
-	ask NFS_EXPORT "NFS export path" "$(saved_setting NFS_EXPORT /exports/vcf-services-depot)"
+	ask NFS_EXPORT "NFS export path" "$saved_nfs_export"
 	nfs_export="$REPLY_VALUE"
 	[[ "$nfs_export" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "ERROR: NFS export must be a plain absolute path" >&2; exit 2; }
+	ask BACKUP_NFS_EXPORT "NFS export path for backups (kept outside the depot export)" "$saved_backup_nfs_export"
+	backup_nfs_export="$REPLY_VALUE"
+	[[ "$backup_nfs_export" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "ERROR: backup NFS export must be a plain absolute path" >&2; exit 2; }
+	paths_are_disjoint "$nfs_export" "$backup_nfs_export" || exit 2
 	ask NFS_OPTIONS "NFS mount options" "$(saved_setting NFS_OPTIONS "$nfs_options")"
 	nfs_options="$REPLY_VALUE"
 	[[ "$nfs_options" =~ ^[A-Za-z0-9_=,.-]+$ ]] || { echo "ERROR: NFS options contain unsupported characters" >&2; exit 2; }
+	saved_nfs_server="$nfs_server"
+	saved_nfs_export="$nfs_export"
+	saved_backup_nfs_export="$backup_nfs_export"
 fi
 
 ask TLS_MODE "TLS mode (self-signed or provided)" "self-signed"
@@ -376,14 +397,6 @@ vkr_value_pattern='^[A-Za-z0-9._ -]*$'
 
 sftp_uid="${sftp_uid_gid%%:*}"
 sftp_gid="${sftp_uid_gid#*:}"
-backup_local_path=""
-backup_nfs_export=""
-if [ "$storage_mode" = local ]; then
-	backup_local_path="$depot_local_path/backup"
-else
-	backup_nfs_export="${nfs_export%/}/backup"
-fi
-
 echo "Running host preflight checks"
 [ "$(uname -m)" = x86_64 ] || { echo "ERROR: only x86_64 hosts are supported" >&2; exit 1; }
 if [ "$EUID" -ne 0 ] && ! id -nG | tr ' ' '\n' | grep -qx docker; then
@@ -437,14 +450,19 @@ else
 		echo "ERROR: NFS export could not be mounted" >&2
 		exit 1
 	fi
-	if ! docker run --rm --user "$sftp_uid:$sftp_gid" -v "$preflight_volume:/storage:rw" alpine:3.20 \
-		sh -c 'mkdir -p /storage/backup && test -w /storage/backup'; then
-		docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
-		echo "ERROR: SFTP UID:GID $sftp_uid_gid cannot create or write $backup_nfs_export." >&2
-		echo "       Confirm the NFS export ownership and that it permits the Docker host." >&2
+	docker volume rm "$preflight_volume" >/dev/null
+	backup_preflight_volume="vcf-services-nfs-backup-preflight-$$"
+	docker volume create --driver local --opt type=nfs \
+		--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$backup_nfs_export" \
+		"$backup_preflight_volume" >/dev/null
+	if ! docker run --rm --user "$sftp_uid:$sftp_gid" -v "$backup_preflight_volume:/storage:rw" alpine:3.20 \
+		sh -c 'test -w /storage'; then
+		docker volume rm "$backup_preflight_volume" >/dev/null 2>&1 || true
+		echo "ERROR: SFTP UID:GID $sftp_uid_gid cannot write $backup_nfs_export." >&2
+		echo "       Confirm the backup NFS export ownership and that it permits the Docker host." >&2
 		exit 1
 	fi
-	docker volume rm "$preflight_volume" >/dev/null
+	docker volume rm "$backup_preflight_volume" >/dev/null
 	minimum_kb=$((minimum_free_gb * 1024 * 1024))
 	[ "$available_kb" -ge "$minimum_kb" ] || {
 		echo "ERROR: NFS depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
@@ -503,17 +521,17 @@ write_setting AUTH_USERNAME "$auth_username"
 write_setting TLS_MODE "$tls_mode"
 write_setting STORAGE_MODE "$storage_mode"
 write_setting DEPOT_VOLUME_NAME "$depot_volume_name"
-write_setting DEPOT_LOCAL_PATH "$depot_local_path"
-write_setting NFS_SERVER "$nfs_server"
-write_setting NFS_EXPORT "$nfs_export"
+write_setting DEPOT_LOCAL_PATH "$saved_depot_local_path"
+write_setting NFS_SERVER "$saved_nfs_server"
+write_setting NFS_EXPORT "$saved_nfs_export"
 write_setting NFS_OPTIONS "$nfs_options"
 write_setting HTTPS_PORT "$https_port"
 write_setting BACKUP_ENABLED "$backup_enabled"
 write_setting SFTP_PORT "$sftp_port"
 write_setting SFTP_UID_GID "$sftp_uid_gid"
 write_setting BACKUP_VOLUME_NAME "$backup_volume_name"
-write_setting BACKUP_LOCAL_PATH "$backup_local_path"
-write_setting BACKUP_NFS_EXPORT "$backup_nfs_export"
+write_setting BACKUP_LOCAL_PATH "$saved_backup_local_path"
+write_setting BACKUP_NFS_EXPORT "$saved_backup_nfs_export"
 write_setting VCFDT_VERSION "$vcfdt_version"
 chmod 0640 "$settings_tmp"
 mv "$settings_tmp" "$project_dir/config/settings.env"
@@ -626,10 +644,10 @@ docker run --rm --entrypoint /bin/sh -v "$backup_volume_name:/mnt/backup:rw" "$s
 	-c 'set -eu
 		expected="$1:$2"
 		current="$(stat -c "%u:%g" /mnt/backup)"
-		first="$(find /mnt/backup -mindepth 1 -maxdepth 1 -print -quit)"
-		if [ "$current" != "$expected" ] && [ -z "$first" ]; then
-			chown "$expected" /mnt/backup
-		fi' sh "$sftp_uid" "$sftp_gid"
+		if [ "$current" != "$expected" ]; then
+			chown -R "$expected" /mnt/backup
+		fi' sh "$sftp_uid" "$sftp_gid" || \
+	echo "WARNING: could not re-own the backup storage as $sftp_uid_gid" >&2
 if ! docker run --rm --user "$sftp_uid:$sftp_gid" --entrypoint /bin/sh \
 	-v "$backup_volume_name:/mnt/backup:rw" "$sftp_image" \
 	-c 'set -eu
@@ -637,7 +655,7 @@ if ! docker run --rm --user "$sftp_uid:$sftp_gid" --entrypoint /bin/sh \
 		touch /mnt/backup/.vcf-services-write-check
 		rm /mnt/backup/.vcf-services-write-check'; then
 	echo "ERROR: SFTP UID:GID $sftp_uid_gid cannot write the backup storage." >&2
-	echo "       Existing content was not re-owned. Correct the share ownership, then rerun install.sh." >&2
+	echo "       The re-own attempt did not take effect. Correct the share ownership, then rerun install.sh." >&2
 	exit 1
 fi
 machine_id_output="$(docker run --rm \

@@ -25,3 +25,4 @@ UsePAM no
 LogLevel VERBOSE
 
 Subsystem sftp /usr/lib/openssh/sftp-server
+ForceCommand /usr/lib/openssh/sftp-server

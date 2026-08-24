@@ -91,6 +91,12 @@ docker() {
 container_publishes_tcp_port test-container 2222 || fail "container host port was not detected"
 container_publishes_tcp_port test-container 2223 && fail "wrong container host port was accepted"
 unset -f docker
+paths_are_disjoint /srv/depot /srv/backup || fail "sibling depot and backup paths rejected"
+paths_are_disjoint /srv/depot /srv/depot/backup 2>/dev/null && fail "backup path inside the depot accepted"
+paths_are_disjoint /srv/depot/inner /srv/depot 2>/dev/null && fail "backup path containing the depot accepted"
+paths_are_disjoint /srv/depot /srv/depot/ 2>/dev/null && fail "identical depot and backup paths accepted"
+paths_are_disjoint /srv/depot "" 2>/dev/null && fail "empty backup path accepted"
+paths_are_disjoint /srv/depot /srv/depot-archive || fail "shared path prefix wrongly treated as nested"
 echo "SFTP installer validation tests passed"
 
 echo "install checks tests passed"

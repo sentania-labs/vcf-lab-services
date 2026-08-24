@@ -102,10 +102,12 @@ UAT candidates, not claims of successful live validation.
 
 The service deliberately has no chroot. This preserves the absolute
 `/mnt/backup/<component>` namespace required by the VCF configurations. It uses
-the external OpenSSH `sftp-server` subsystem and password authentication. The
-installer prepares the component directories using the configured numeric
-identity, default `1003:1003`, without recursively changing existing backup
-ownership.
+the external OpenSSH `sftp-server` subsystem and password authentication, and
+`ForceCommand` restricts the account to file transfer, so the password grants no
+shell or remote command execution. The installer prepares the component
+directories using the configured numeric identity, default `1003:1003`, and both
+the installer and the service re-own the backup tree when that identity changes,
+so a UID:GID change from the admin console needs no host-side remediation.
 
 ECDSA, Ed25519, and RSA host keys are generated once in the external
 `vcf-services-sftp-host-keys` volume. Every container start prints all three
@@ -229,11 +231,14 @@ Back up this small volume and `secrets/`; losing the ID invalidates the
 activation code. The depot itself can be downloaded again. A plain copy of the
 depot tree preserves its portable layout.
 
-Backup data uses a separate volume mounted read-write at `/mnt/backup`. In
-local mode it is the `backup` directory below the configured depot root. In NFS
-mode it is the `backup` directory below the configured export. The NFS export
-must allow the Docker host and the configured SFTP UID:GID to write that
-directory. Depot content is never exposed through the SFTP account.
+Backup data uses a separate volume mounted read-write at `/mnt/backup`. Its
+location is prompted separately from the depot and must sit outside the depot
+tree: `BACKUP_LOCAL_PATH` in local mode, `BACKUP_NFS_EXPORT` in NFS mode. The
+installer and the admin console both reject a backup location nested inside the
+depot, so backups are never browsed or served by the depot web service and never
+scanned as depot content. The NFS export must allow the Docker host and the
+configured SFTP UID:GID to write it. Depot content is never exposed through the
+SFTP account.
 
 Configuration lives in `config/settings.env`. It is deliberately a simple,
 atomic file-backed format so later GUI settings support can update it without

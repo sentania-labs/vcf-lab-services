@@ -114,3 +114,22 @@ container_publishes_tcp_port() {
 	docker inspect -f '{{range $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{println .HostPort}}{{end}}{{end}}' \
 		"$container" 2>/dev/null | grep -qx "$port"
 }
+
+paths_are_disjoint() {
+	local first="${1%/}" second="${2%/}"
+	[ -n "$first" ] && [ -n "$second" ] || {
+		echo "ERROR: both paths must be non-empty" >&2
+		return 1
+	}
+	[ "$first" != "$second" ] || {
+		echo "ERROR: $second must not be the same directory as $first" >&2
+		return 1
+	}
+	case "$second/" in
+		"$first"/*) echo "ERROR: $second must not sit inside $first" >&2; return 1 ;;
+	esac
+	case "$first/" in
+		"$second"/*) echo "ERROR: $second must not contain $first" >&2; return 1 ;;
+	esac
+	return 0
+}

@@ -154,25 +154,45 @@ def _bool_setting(value, fallback=True):
     return fallback
 
 
+def _int_setting(value, fallback):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _paths_are_disjoint(first, second):
+    first = first.rstrip("/")
+    second = second.rstrip("/")
+    if not first or not second or first == second:
+        return False
+    return not (
+        second.startswith(first + "/") or first.startswith(second + "/")
+    )
+
+
 def _backup_settings_doc(settings=None):
     settings = settings or _settings()
     storage_mode = settings.get("STORAGE_MODE", "local")
+    backup_local_path = settings.get("BACKUP_LOCAL_PATH", "")
+    backup_nfs_export = settings.get("BACKUP_NFS_EXPORT", "")
     return {
         "enabled": _bool_setting(settings.get("BACKUP_ENABLED"), True),
-        "port": int(settings.get("SFTP_PORT", "2222")),
+        "port": _int_setting(settings.get("SFTP_PORT"), 2222),
         "user": "vcfbackup",
         "uidGid": settings.get("SFTP_UID_GID", "1003:1003"),
         "storageMode": storage_mode,
         "localPath": settings.get("DEPOT_LOCAL_PATH", ""),
+        "backupLocalPath": backup_local_path,
         "nfsServer": settings.get("NFS_SERVER", ""),
         "nfsExport": settings.get("NFS_EXPORT", ""),
+        "backupNfsExport": backup_nfs_export,
         "nfsOptions": settings.get(
             "NFS_OPTIONS", "nfsvers=4,rw,hard,timeo=600,retrans=2"
         ),
-        "backupPath": settings.get(
-            "BACKUP_LOCAL_PATH" if storage_mode == "local" else "BACKUP_NFS_EXPORT",
-            "",
-        ),
+        "backupPath": backup_local_path
+        if storage_mode == "local"
+        else backup_nfs_export,
         "passwordConfigured": SFTP_PASSWORD_FILE.is_file()
         and SFTP_PASSWORD_FILE.stat().st_size > 0,
     }
@@ -329,25 +349,50 @@ def update_backup_settings():
     if storage_mode not in {"local", "nfs"}:
         return jsonify({"error": "storage mode must be local or nfs"}), 400
 
+    stored = _settings()
     local_path = str(body.get("localPath", ""))
+    backup_local_path = str(body.get("backupLocalPath", ""))
     nfs_server = str(body.get("nfsServer", ""))
     nfs_export = str(body.get("nfsExport", ""))
+    backup_nfs_export = str(body.get("backupNfsExport", ""))
     nfs_options = str(body.get("nfsOptions", ""))
+    if not re.fullmatch(r"[A-Za-z0-9_=,.-]+", nfs_options):
+        return jsonify({"error": "NFS options contain unsupported characters"}), 400
     if storage_mode == "local":
         if not re.fullmatch(r"/[A-Za-z0-9_./-]+", local_path):
             return jsonify({"error": "local path must be a plain absolute path"}), 400
-        nfs_server = ""
-        nfs_export = ""
-        backup_path = local_path.rstrip("/") + "/backup"
+        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", backup_local_path):
+            return jsonify(
+                {"error": "local backup path must be a plain absolute path"}
+            ), 400
+        if not _paths_are_disjoint(local_path, backup_local_path):
+            return jsonify(
+                {"error": "the backup path must sit outside the depot path"}
+            ), 400
+        nfs_server = stored.get("NFS_SERVER", "")
+        nfs_export = stored.get("NFS_EXPORT", "")
+        backup_nfs_export = stored.get("BACKUP_NFS_EXPORT", "")
+        depot_material_path, backup_material_path = local_path, backup_local_path
+        depot_material_export, backup_material_export = "", ""
+        depot_material_server = ""
     else:
-        local_path = ""
         if not re.fullmatch(r"[A-Za-z0-9.:-]+", nfs_server):
             return jsonify({"error": "NFS server is invalid"}), 400
         if not re.fullmatch(r"/[A-Za-z0-9_./-]+", nfs_export):
             return jsonify({"error": "NFS export must be a plain absolute path"}), 400
-        if not re.fullmatch(r"[A-Za-z0-9_=,.-]+", nfs_options):
-            return jsonify({"error": "NFS options contain unsupported characters"}), 400
-        backup_path = nfs_export.rstrip("/") + "/backup"
+        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", backup_nfs_export):
+            return jsonify(
+                {"error": "backup NFS export must be a plain absolute path"}
+            ), 400
+        if not _paths_are_disjoint(nfs_export, backup_nfs_export):
+            return jsonify(
+                {"error": "the backup export must sit outside the depot export"}
+            ), 400
+        local_path = stored.get("DEPOT_LOCAL_PATH", "")
+        backup_local_path = stored.get("BACKUP_LOCAL_PATH", "")
+        depot_material_path, backup_material_path = "", ""
+        depot_material_export, backup_material_export = nfs_export, backup_nfs_export
+        depot_material_server = nfs_server
 
     password = body.get("password")
     if password is not None:
@@ -363,11 +408,12 @@ def update_backup_settings():
         return jsonify({"error": "a password is required before backup can be enabled"}), 400
 
     depot_material = "|".join(
-        [storage_mode, local_path, nfs_server, nfs_export, nfs_options]
+        [storage_mode, depot_material_path, depot_material_server,
+         depot_material_export, nfs_options]
     )
     backup_material = "|".join(
-        [storage_mode, backup_path if storage_mode == "local" else "", nfs_server,
-         backup_path if storage_mode == "nfs" else "", nfs_options]
+        [storage_mode, backup_material_path, depot_material_server,
+         backup_material_export, nfs_options]
     )
     updates = {
         "BACKUP_ENABLED": str(enabled).lower(),
@@ -382,8 +428,8 @@ def update_backup_settings():
         + hashlib.sha256((depot_material + "\n").encode()).hexdigest()[:12],
         "BACKUP_VOLUME_NAME": "vcf-services-backup-store-"
         + hashlib.sha256((backup_material + "\n").encode()).hexdigest()[:12],
-        "BACKUP_LOCAL_PATH": backup_path if storage_mode == "local" else "",
-        "BACKUP_NFS_EXPORT": backup_path if storage_mode == "nfs" else "",
+        "BACKUP_LOCAL_PATH": backup_local_path,
+        "BACKUP_NFS_EXPORT": backup_nfs_export,
     }
     before = _backup_settings_doc()
     try:
@@ -396,7 +442,8 @@ def update_backup_settings():
     after = _backup_settings_doc()
     restart_required = any(
         before[key] != after[key]
-        for key in ("port", "storageMode", "localPath", "nfsServer", "nfsExport", "nfsOptions")
+        for key in ("port", "storageMode", "localPath", "backupLocalPath",
+                    "nfsServer", "nfsExport", "backupNfsExport", "nfsOptions")
     )
     return jsonify(
         {

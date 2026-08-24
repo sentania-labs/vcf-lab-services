@@ -65,6 +65,12 @@ grep -q '^AllowUsers vcfbackup$' sftp/sshd_config || fail "SFTP must allow only 
 grep -q '^Subsystem sftp /usr/lib/openssh/sftp-server$' sftp/sshd_config \
 	|| fail "SFTP must use the external sftp-server subsystem"
 ! grep -Eq 'ChrootDirectory|internal-sftp' sftp/sshd_config || fail "SFTP must not chroot or rewrite absolute paths"
+grep -q '^ForceCommand /usr/lib/openssh/sftp-server$' sftp/sshd_config \
+	|| fail "SFTP must force file transfer only, with no shell or remote command"
+grep -q 'own_backup_tree' sftp/entrypoint.sh || fail "SFTP must re-own the backup tree on a UID:GID change"
+! grep -q 'depot_local_path/backup' install.sh || fail "backup storage must not nest inside the depot tree"
+grep -q 'paths_are_disjoint "\$depot_local_path" "\$backup_local_path"' install.sh \
+	|| fail "installer must reject a backup directory inside the depot directory"
 grep -q 'host_tcp_port_is_bound' install.sh || fail "installer port collision check missing"
 ! grep -q 'SFTP_PASSWORD=' docker-compose.yml || fail "SFTP password material belongs only in the secret file"
 

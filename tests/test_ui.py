@@ -175,6 +175,7 @@ class UiApiTests(unittest.TestCase):
                 "uidGid": "1003:1003",
                 "storageMode": "local",
                 "localPath": "/srv/vcf-services/depot",
+                "backupLocalPath": "/srv/vcf-services/backup",
                 "nfsServer": "",
                 "nfsExport": "",
                 "nfsOptions": "nfsvers=4,rw,hard,timeo=600,retrans=2",
@@ -192,9 +193,9 @@ class UiApiTests(unittest.TestCase):
                 "uidGid": "1004:1005",
                 "password": "a strong test password",
                 "storageMode": "nfs",
-                "localPath": "",
                 "nfsServer": "nfs.example.test",
                 "nfsExport": "/exports/vcf-services",
+                "backupNfsExport": "/exports/vcf-services-backup",
                 "nfsOptions": "nfsvers=4,rw,hard,timeo=600,retrans=2",
             },
         )
@@ -202,7 +203,7 @@ class UiApiTests(unittest.TestCase):
         body = response.get_json()
         self.assertTrue(body["saved"])
         self.assertTrue(body["installerRerunRequired"])
-        self.assertEqual(body["backupPath"], "/exports/vcf-services/backup")
+        self.assertEqual(body["backupPath"], "/exports/vcf-services-backup")
         self.assertTrue(body["passwordConfigured"])
         self.assertEqual(
             (self.sftp_secrets / "password").read_text(), "a strong test password\n"
@@ -211,7 +212,9 @@ class UiApiTests(unittest.TestCase):
         self.assertIn('VCF_VERSION="9.1.0"', settings_text)
         self.assertIn('SFTP_PORT="2223"', settings_text)
         self.assertIn('SFTP_UID_GID="1004:1005"', settings_text)
-        self.assertIn('BACKUP_NFS_EXPORT="/exports/vcf-services/backup"', settings_text)
+        self.assertIn(
+            'BACKUP_NFS_EXPORT="/exports/vcf-services-backup"', settings_text
+        )
 
     def test_backup_settings_validate_uid_gid(self):
         response = self.client.post(
@@ -222,6 +225,7 @@ class UiApiTests(unittest.TestCase):
                 "uidGid": "0:1003",
                 "storageMode": "local",
                 "localPath": "/srv/vcf-services/depot",
+                "backupLocalPath": "/srv/vcf-services/backup",
                 "nfsServer": "",
                 "nfsExport": "",
                 "nfsOptions": "nfsvers=4,rw",
@@ -229,6 +233,55 @@ class UiApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("non-root", response.get_json()["error"])
+
+    def test_backup_port_falls_back_when_setting_is_unparsable(self):
+        self.settings.write_text(
+            self.settings.read_text() + 'SFTP_PORT=""\n'
+        )
+        body = self.client.get("/api/settings/backup").get_json()
+        self.assertEqual(body["port"], 2222)
+
+    def test_backup_path_inside_the_depot_is_rejected(self):
+        response = self.client.post(
+            "/api/settings/backup",
+            json={
+                "enabled": False,
+                "port": 2222,
+                "uidGid": "1003:1003",
+                "storageMode": "local",
+                "localPath": "/srv/vcf-services/depot",
+                "backupLocalPath": "/srv/vcf-services/depot/backup",
+                "nfsServer": "",
+                "nfsExport": "",
+                "nfsOptions": "nfsvers=4,rw",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("outside the depot", response.get_json()["error"])
+
+    def test_switching_to_nfs_preserves_the_local_paths(self):
+        self.settings.write_text(
+            self.settings.read_text()
+            + 'DEPOT_LOCAL_PATH="/srv/vcf-services/depot"\n'
+            + 'BACKUP_LOCAL_PATH="/srv/vcf-services/backup"\n'
+        )
+        response = self.client.post(
+            "/api/settings/backup",
+            json={
+                "enabled": False,
+                "port": 2222,
+                "uidGid": "1003:1003",
+                "storageMode": "nfs",
+                "nfsServer": "nfs.example.test",
+                "nfsExport": "/exports/vcf-services-depot",
+                "backupNfsExport": "/exports/vcf-services-backup",
+                "nfsOptions": "nfsvers=4,rw",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        settings_text = self.settings.read_text()
+        self.assertIn('DEPOT_LOCAL_PATH="/srv/vcf-services/depot"', settings_text)
+        self.assertIn('BACKUP_LOCAL_PATH="/srv/vcf-services/backup"', settings_text)
 
     def test_versions_parses_bus_document(self):
         doc = {

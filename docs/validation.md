@@ -43,8 +43,9 @@ unless an operator explicitly supplies its generated archive to the installer.
 The SFTP runtime test builds and starts the real backup image, uploads through
 password-authenticated SFTP to an absolute `/mnt/backup/vcenter` path, rejects
 an incorrect password, verifies all three host-key types and logged
-fingerprints, and proves those keys remain unchanged across container
-recreation.
+fingerprints, proves the account cannot run a shell or a remote command, proves
+a UID:GID change re-owns the existing backup tree, and proves those keys remain
+unchanged across container recreation.
 
 The release test dry-runs the versioned installation bundle, verifies its
 checksum and required entry points, and proves that the bundle consumes the

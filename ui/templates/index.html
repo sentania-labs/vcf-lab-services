@@ -104,11 +104,13 @@
       <div class="field full"><label for="bk-password">Password</label><input id="bk-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep the current secret"></div>
       <div class="field"><label for="bk-storage">Shared depot and backup storage mode</label>
         <select id="bk-storage"><option value="local">Local</option><option value="nfs">NFS</option></select></div>
-      <div class="field" id="bk-local-wrap"><label for="bk-local">Local depot root</label><input id="bk-local" placeholder="/srv/vcf-services/depot"></div>
+      <div class="field bk-local" id="bk-local-wrap"><label for="bk-local">Local depot root</label><input id="bk-local" placeholder="/srv/vcf-services/depot"></div>
+      <div class="field bk-local"><label for="bk-backup-local">Local backup root</label><input id="bk-backup-local" placeholder="/srv/vcf-services/backup"></div>
       <div class="field bk-nfs"><label for="bk-nfs-server">NFS server</label><input id="bk-nfs-server"></div>
-      <div class="field bk-nfs"><label for="bk-nfs-export">NFS export</label><input id="bk-nfs-export"></div>
+      <div class="field bk-nfs"><label for="bk-nfs-export">Depot NFS export</label><input id="bk-nfs-export"></div>
+      <div class="field bk-nfs"><label for="bk-backup-nfs-export">Backup NFS export</label><input id="bk-backup-nfs-export"></div>
       <div class="field bk-nfs"><label for="bk-nfs-options">NFS options</label><input id="bk-nfs-options"></div>
-      <div class="field full"><div class="stat"><div class="k">Backup path</div><div class="v" id="bk-path">...</div></div></div>
+      <div class="field full"><div class="stat"><div class="k">Backup root in use</div><div class="v" id="bk-path">...</div></div></div>
     </div>
     <p class="help">Enable, password, and UID:GID changes reload within five seconds. Port and shared storage changes are staged safely and require an installer rerun because they change host mounts or published ports.</p>
     <div class="row" style="margin-top:12px"><button id="bk-save">Save backup settings</button><span id="bk-flash" class="muted"></span></div>
@@ -136,7 +138,7 @@ const fmt = value => value ? new Date(value).toLocaleString() : 'not available';
 
 function toggleBackupStorage() {
   const nfs = byId('bk-storage').value === 'nfs';
-  byId('bk-local-wrap').hidden = nfs;
+  document.querySelectorAll('.bk-local').forEach(field => field.hidden = nfs);
   document.querySelectorAll('.bk-nfs').forEach(field => field.hidden = !nfs);
 }
 
@@ -151,8 +153,10 @@ async function loadBackupSettings() {
     byId('bk-uidgid').value = settings.uidGid;
     byId('bk-storage').value = settings.storageMode;
     byId('bk-local').value = settings.localPath;
+    byId('bk-backup-local').value = settings.backupLocalPath;
     byId('bk-nfs-server').value = settings.nfsServer;
     byId('bk-nfs-export').value = settings.nfsExport;
+    byId('bk-backup-nfs-export').value = settings.backupNfsExport;
     byId('bk-nfs-options').value = settings.nfsOptions;
     byId('bk-path').textContent = settings.backupPath || 'created during installation';
     byId('bk-password').placeholder = settings.passwordConfigured
@@ -246,8 +250,10 @@ byId('bk-save').onclick = async () => {
     password: byId('bk-password').value || null,
     storageMode: byId('bk-storage').value,
     localPath: byId('bk-local').value,
+    backupLocalPath: byId('bk-backup-local').value,
     nfsServer: byId('bk-nfs-server').value,
     nfsExport: byId('bk-nfs-export').value,
+    backupNfsExport: byId('bk-backup-nfs-export').value,
     nfsOptions: byId('bk-nfs-options').value
   };
   try {

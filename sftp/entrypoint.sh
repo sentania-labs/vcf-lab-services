@@ -54,7 +54,23 @@ apply_identity() {
 		fi
 		useradd -M -u "$uid" -g "$gid" -d /mnt/backup -s /bin/sh "$backup_user"
 	fi
+	own_backup_tree "$uid" "$gid"
 	last_uid_gid="$uid_gid"
+}
+
+own_backup_tree() {
+	uid="$1"
+	gid="$2"
+	current="$(stat -c '%u:%g' /mnt/backup 2>/dev/null || true)"
+	if [ "$current" = "$uid:$gid" ]; then
+		return 0
+	fi
+	if chown -R "$uid:$gid" /mnt/backup 2>/dev/null; then
+		echo "Re-owned /mnt/backup as $uid:$gid"
+		return 0
+	fi
+	echo "WARNING: could not re-own /mnt/backup as $uid:$gid. Backup writes will fail until the share ownership is corrected." >&2
+	return 0
 }
 
 apply_password() {

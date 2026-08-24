@@ -8,6 +8,8 @@ DEPOT_LOCAL_PATH=/srv/vcf-services/depot
 NFS_SERVER=nfs.example.com
 NFS_EXPORT=/exports/vcf-services-depot
 NFS_OPTIONS=nfsvers=4,rw,hard,timeo=600,retrans=2
+BACKUP_LOCAL_PATH=/srv/vcf-services/backup
+BACKUP_NFS_EXPORT=/exports/vcf-services-backup
 TLS_MODE=self-signed
 TLS_CERT_PATH=
 TLS_KEY_PATH=

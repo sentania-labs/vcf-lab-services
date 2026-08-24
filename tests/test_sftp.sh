@@ -88,6 +88,32 @@ if SSHPASS=wrong-password timeout 15 docker run --rm --network host --entrypoint
 	fail "SFTP accepted the wrong password"
 fi
 
+remote_command_output="$(SSHPASS=sftp-test-password timeout 15 docker run --rm --network host \
+	--entrypoint /bin/sh -e SSHPASS -e "SFTP_PORT=$host_port" "$image" \
+	-c 'sshpass -e ssh -o BatchMode=no -o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null -p "$SFTP_PORT" vcfbackup@127.0.0.1 id' 2>/dev/null \
+	| tr -cd "[:print:]" || true)"
+case "$remote_command_output" in
+	*uid=*) fail "SFTP account was able to run a remote command" ;;
+esac
+
+printf 'BACKUP_ENABLED="true"\nSFTP_UID_GID="1005:1005"\n' > "$work_dir/config/settings.env"
+deadline=$((SECONDS + 60))
+owner=""
+while [ "$SECONDS" -lt "$deadline" ]; do
+	owner="$(docker run --rm --entrypoint /bin/sh -v "$backup_volume:/mnt/backup:ro" "$image" \
+		-c 'stat -c "%u:%g" /mnt/backup/vcenter/payload.txt')"
+	[ "$owner" = "1005:1005" ] && break
+	sleep 2
+done
+[ "$owner" = "1005:1005" ] || fail "changed UID:GID did not re-own the existing backup tree (saw $owner)"
+SSHPASS=sftp-test-password docker run --rm --network host --entrypoint /bin/sh \
+	-e SSHPASS -e "SFTP_PORT=$host_port" -v "$work_dir:/work:ro" "$image" \
+	-c 'printf "put /work/payload.txt /mnt/backup/vcenter/reowned.txt\nbye\n" | \
+		sshpass -e sftp -q -o BatchMode=no -o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null -P "$SFTP_PORT" vcfbackup@127.0.0.1' \
+	|| fail "upload failed after the UID:GID change"
+
 docker rm -f "$container" >/dev/null
 start_server || fail "recreated SFTP container did not become healthy"
 after_hash="$(docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:ro" "$image" \
