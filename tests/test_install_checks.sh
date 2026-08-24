@@ -280,6 +280,55 @@ stale_marker_id="$(docker run --rm --entrypoint /opt/vcfdt/bin/vcf-download-tool
 [ "$stale_marker_id" = '22222222-2222-4222-8222-222222222222' ] \
 	|| fail "stale import marker conflict changed the existing target ID"
 
+unreadable_target="vcf-services-state-import-unreadable-$$"
+state_test_volumes+=("$unreadable_target")
+docker volume create "$unreadable_target" >/dev/null
+docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$unreadable_target,dst=/state" \
+	"$state_test_image" -c 'mkdir -p /state/.vcf-services-import-staging
+: > /state/machine_id
+printf %s "irreplaceable activation state" > /state/registration.dat'
+unreadable_target_error="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" volume "$volume_source" "$unreadable_target" 2>&1)" \
+	&& fail "a stale import marker let unreadable target state be overwritten"
+grep -q 'machine-ID state could not be read' <<< "$unreadable_target_error" \
+	|| fail "unreadable target refusal did not explain why the volume was left alone"
+unreadable_target_contents="$(docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$unreadable_target,dst=/state,readonly" \
+	"$state_test_image" -c 'cd /state && find . | sort | tr "\n" " " && cat ./registration.dat')"
+[ "$unreadable_target_contents" = '. ./.vcf-services-import-staging ./machine_id ./registration.dat irreplaceable activation state' ] \
+	|| fail "refusing an unreadable target still changed its contents"
+
+staging_only_target="vcf-services-state-import-staging-only-$$"
+state_test_volumes+=("$staging_only_target")
+docker volume create "$staging_only_target" >/dev/null
+docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$staging_only_target,dst=/state" \
+	"$state_test_image" -c 'mkdir -p /state/.vcf-services-import-staging
+printf %s leftover > /state/.vcf-services-import-staging/half-copied'
+staging_only_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" volume "$volume_source" "$staging_only_target" 2>/dev/null)"
+[ "$staging_only_id" = '22222222-2222-4222-8222-222222222222' ] \
+	|| fail "an abandoned staging-only target did not recover"
+
+matching_stale_target="vcf-services-state-import-matching-stale-$$"
+state_test_volumes+=("$matching_stale_target")
+docker volume create "$matching_stale_target" >/dev/null
+docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$matching_stale_target,dst=/state" \
+	"$state_test_image" -c "mkdir -p /state/.vcf-services-import-staging
+printf '%s\\n' '22222222-2222-4222-8222-222222222222' > /state/machine_id
+printf %s 'keep me' > /state/registration.dat"
+matching_stale_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" volume "$volume_source" "$matching_stale_target" 2>/dev/null)"
+[ "$matching_stale_id" = '22222222-2222-4222-8222-222222222222' ] \
+	|| fail "a matching target with a stale import marker was not accepted as-is"
+matching_stale_contents="$(docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$matching_stale_target,dst=/state,readonly" \
+	"$state_test_image" -c 'cd /state && find . | sort | tr "\n" " " && cat ./registration.dat')"
+[ "$matching_stale_contents" = '. ./machine_id ./registration.dat keep me' ] \
+	|| fail "clearing a stale import marker did not preserve the existing state"
+
 conflict_error="$("$project_dir/scripts/import-vcfdt-state.sh" \
 	"$state_test_image" directory "$conflict_source" "$volume_target" 2>&1)" \
 	&& fail "state import overwrote a different Software Depot ID"

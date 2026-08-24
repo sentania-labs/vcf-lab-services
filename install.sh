@@ -360,6 +360,13 @@ nfs_server=""
 nfs_export=""
 backup_nfs_export=""
 nfs_options="nfsvers=4,rw,hard,timeo=600,retrans=2"
+depot_previously_adopted="$(saved_setting DEPOT_ADOPTED false)"
+[ "$depot_previously_adopted" = true ] || depot_previously_adopted=false
+if [ "$adopt_mode" = true ] || [ "$depot_previously_adopted" = true ]; then
+	skip_depot_free_space_floor=true
+else
+	skip_depot_free_space_floor=false
+fi
 saved_depot_local_path="$(saved_setting DEPOT_LOCAL_PATH "$project_dir/data/depot")"
 saved_backup_local_path="$(saved_setting BACKUP_LOCAL_PATH "$project_dir/data/backup")"
 saved_nfs_server="$(saved_setting NFS_SERVER nfs.example.com)"
@@ -588,12 +595,13 @@ drop_transient_volume() {
 
 if [ "$storage_mode" = local ]; then
 	mkdir -p "$backup_local_path"
-	if [ "$adopt_mode" = false ]; then
-		mkdir -p "$depot_local_path"
-	fi
 	if [ "$adopt_mode" = true ]; then
 		echo "Adoption reuses existing depot content; skipping the ${minimum_free_gb} GB free-space floor"
+	elif [ "$skip_depot_free_space_floor" = true ]; then
+		mkdir -p "$depot_local_path"
+		echo "This depot was adopted with existing content; skipping the ${minimum_free_gb} GB free-space floor"
 	else
+		mkdir -p "$depot_local_path"
 		available_kb="$(df -Pk "$depot_local_path" | awk 'NR==2 {print $4}')"
 		minimum_kb=$((minimum_free_gb * 1024 * 1024))
 		[ "$available_kb" -ge "$minimum_kb" ] || {
@@ -633,6 +641,8 @@ else
 		"$backup_minimum_free_gb" "$backup_advisory_free_gb" || exit 1
 	if [ "$adopt_mode" = true ]; then
 		echo "Adoption reuses existing depot content; skipping the ${minimum_free_gb} GB free-space floor"
+	elif [ "$skip_depot_free_space_floor" = true ]; then
+		echo "This depot was adopted with existing content; skipping the ${minimum_free_gb} GB free-space floor"
 	else
 		minimum_kb=$((minimum_free_gb * 1024 * 1024))
 		[ "$available_kb" -ge "$minimum_kb" ] || {
@@ -716,6 +726,7 @@ write_setting AUTH_USERNAME "$auth_username"
 write_setting TLS_MODE "$tls_mode"
 write_setting STORAGE_MODE "$storage_mode"
 write_setting DEPOT_VOLUME_NAME "$depot_volume_name"
+write_setting DEPOT_ADOPTED "$skip_depot_free_space_floor"
 write_setting DEPOT_LOCAL_PATH "$saved_depot_local_path"
 write_setting NFS_SERVER "$saved_nfs_server"
 write_setting NFS_EXPORT "$saved_nfs_export"

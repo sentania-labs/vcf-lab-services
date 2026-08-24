@@ -15,7 +15,7 @@ if ! resolved_depot_root="$(readlink -f "$depot_root")"; then
 fi
 
 if ! content_entry="$(find "$depot_root/PROD/COMP" -mindepth 1 \( -type f -o -type l \) -print -quit)"; then
-	fail "$depot_root/PROD/COMP could not be read"
+	fail "$depot_root/PROD/COMP could not be read; the usual causes are an NFS export that squashes root, or directory permissions that deny the validator"
 fi
 [ -n "$content_entry" ] || fail "$depot_root/PROD/COMP contains no files or symlinks; this does not look like a populated VCFDT depot"
 
@@ -71,7 +71,7 @@ if ! symlink_report="$(find "$depot_root" -type l -exec sh -c '
 		fi
 	done
 ' sh "$resolved_depot_root" {} +)"; then
-	fail "$depot_root could not be scanned for symlinks"
+	fail "$depot_root could not be scanned for symlinks; the usual causes are an NFS export that squashes root so parts of the tree are unreadable, or a subtree whose permissions deny the validator. Confirm the export allows this host to read the whole depot, then retry"
 fi
 
 escapes="$(printf '%s\n' "$symlink_report" | grep '^ESCAPE	' || true)"

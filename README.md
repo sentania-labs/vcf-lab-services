@@ -310,6 +310,14 @@ Adoption reuses depot content that is already downloaded, so the installer
 skips its free-space floor in adopt mode. `--min-free-gb` is not needed for an
 existing depot that is already close to full.
 
+Adoption is recorded as `DEPOT_ADOPTED="true"` in `config/settings.env` once
+the depot validates, so it is a property of the deployment rather than of one
+command. Every later `./install.sh` rerun, for an activation code, a settings
+change, or an upgrade, keeps skipping the free-space floor and does not ask for
+the writer confirmation again, because a plain rerun re-imports nothing. Pass
+the adopt options again only when you are importing state from a source once
+more, and stop the current writer first when you do.
+
 The installer mounts both sources read-only for validation. A depot must have a
 populated `PROD/COMP` tree. Every absolute or relative symlink must resolve to
 `/depot` or below it when the tree is mounted there. Normalized targets that
@@ -337,7 +345,10 @@ half-imported state behind. That retry still identifies any ID already in the
 fixed volume first and refuses if it differs from the source. A rerun with the
 same imported ID skips the copy. If the fixed volume is non-empty and contains
 a different or unreadable ID, the installer refuses to overwrite it so an
-existing activation cannot be lost.
+existing activation cannot be lost. A leftover staging directory alone is never
+enough to justify clearing that volume: only a volume that holds nothing but an
+abandoned staging directory is cleared, and a staging directory found beside
+real state is removed on its own once the IDs match.
 
 Configuration lives in `config/settings.env`. It is deliberately a simple,
 atomic file-backed format so later GUI settings support can update it without

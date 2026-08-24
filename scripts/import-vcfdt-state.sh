@@ -12,6 +12,7 @@ scratch_prefix=vcf-services-vcfdt-state-probe-
 scratch_volume=""
 scratch_serial=0
 probed_machine_id=""
+target_is_owned_by_this_run=false
 
 cleanup() {
 	if [ -n "$scratch_volume" ]; then
@@ -139,13 +140,23 @@ volume_state_status() {
 		"$image" -c '
 			set -eu
 			if [ -e "/state/$1" ]; then
-				echo partial
+				if [ -z "$(find /state -mindepth 1 -maxdepth 1 ! -name "$1" -print -quit)" ]; then
+					echo staging-only
+				else
+					echo staging-mixed
+				fi
 			elif [ -z "$(find /state -mindepth 1 -print -quit)" ]; then
 				echo empty
 			else
 				echo populated
 			fi
 		' sh "$staging_dir_name"
+}
+
+remove_staging_dir() {
+	docker run --rm --entrypoint /bin/sh \
+		--mount "type=volume,src=$1,dst=/state" \
+		"$image" -c 'set -eu; rm -rf "/state/$1"' sh "$staging_dir_name"
 }
 
 empty_volume() {
@@ -196,13 +207,19 @@ if docker volume inspect "$target_volume" >/dev/null 2>&1; then
 		exit 1
 	fi
 	case "$target_status" in
-		empty|partial|populated) ;;
+		empty|staging-only|staging-mixed|populated) ;;
 		*)
 			echo "ERROR: refusing to touch $target_volume because its state could not be classified." >&2
 			exit 1
 			;;
 	esac
-	if [ "$target_status" != empty ]; then
+	if [ "$target_status" = empty ]; then
+		target_is_owned_by_this_run=true
+	elif [ "$target_status" = staging-only ]; then
+		echo "Clearing an incomplete earlier VCFDT state import from $target_volume" >&2
+		empty_volume "$target_volume"
+		target_is_owned_by_this_run=true
+	else
 		target_probe_status=0
 		probe_machine_id volume "$target_volume" || target_probe_status=$?
 		target_machine_id="$probed_machine_id"
@@ -211,24 +228,30 @@ if docker volume inspect "$target_volume" >/dev/null 2>&1; then
 			echo "       Back up and inspect the target volume before retrying." >&2
 			exit 1
 		fi
-		if [ "$target_probe_status" -eq 0 ] && [ "$target_machine_id" != "$source_machine_id" ]; then
-			refuse_conflicting_target "$target_machine_id"
-		fi
-		if [ "$target_status" = partial ]; then
-			echo "Clearing an incomplete earlier VCFDT state import from $target_volume" >&2
-			empty_volume "$target_volume"
-		elif [ "$target_probe_status" -eq 0 ]; then
-			echo "The target VCFDT state volume already contains the adopted Software Depot ID; no copy is needed." >&2
-			printf '%s\n' "$target_machine_id"
-			exit 0
-		else
+		if [ "$target_probe_status" -ne 0 ]; then
 			echo "ERROR: refusing to overwrite non-empty $target_volume because its machine-ID state could not be read." >&2
 			echo "       Back up and inspect the target volume before retrying." >&2
 			exit 1
 		fi
+		if [ "$target_machine_id" != "$source_machine_id" ]; then
+			refuse_conflicting_target "$target_machine_id"
+		fi
+		if [ "$target_status" = staging-mixed ]; then
+			echo "Removing a stale import staging directory from $target_volume" >&2
+			remove_staging_dir "$target_volume"
+		fi
+		echo "The target VCFDT state volume already contains the adopted Software Depot ID; no copy is needed." >&2
+		printf '%s\n' "$target_machine_id"
+		exit 0
 	fi
 else
 	docker volume create "$target_volume" >/dev/null
+	target_is_owned_by_this_run=true
+fi
+
+if [ "$target_is_owned_by_this_run" != true ]; then
+	echo "ERROR: refusing to import into $target_volume because this run does not own its contents." >&2
+	exit 1
 fi
 
 echo "Importing the verified VCFDT state into $target_volume" >&2
