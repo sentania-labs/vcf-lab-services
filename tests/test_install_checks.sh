@@ -7,7 +7,7 @@ state_test_image="vcf-services-state-import-test-$$"
 state_test_volumes=()
 cleanup() {
 	local volume
-	for volume in "${state_test_volumes[@]}"; do
+	for volume in ${state_test_volumes[@]+"${state_test_volumes[@]}"}; do
 		docker volume rm "$volume" >/dev/null 2>&1 || true
 	done
 	docker image rm "$state_test_image" >/dev/null 2>&1 || true

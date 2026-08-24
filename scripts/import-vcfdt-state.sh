@@ -8,8 +8,10 @@ target_volume="${4:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET
 
 state_dir=/root/.local/share/vmware/vdt
 staging_dir_name=.vcf-services-import-staging
+scratch_prefix=vcf-services-vcfdt-state-probe-
 scratch_volume=""
 scratch_serial=0
+probed_machine_id=""
 
 cleanup() {
 	if [ -n "$scratch_volume" ]; then
@@ -18,12 +20,35 @@ cleanup() {
 	fi
 }
 trap cleanup EXIT
+trap 'cleanup; trap - INT; kill -INT $$' INT
+trap 'cleanup; exit 143' TERM
+
+sweep_abandoned_scratch_volumes() {
+	local name owner
+	while read -r name; do
+		[ -n "$name" ] || continue
+		owner="${name#"$scratch_prefix"}"
+		owner="${owner%%-*}"
+		[[ "$owner" =~ ^[0-9]+$ ]] || continue
+		[ "$owner" != "$$" ] || continue
+		if kill -0 "$owner" 2>/dev/null; then continue; fi
+		docker volume rm -f "$name" >/dev/null 2>&1 || true
+	done < <(docker volume ls --quiet --filter "name=^${scratch_prefix}" 2>/dev/null || true)
+}
 
 state_mount_spec() {
 	local state_kind="$1" state_source="$2" access="${3:-readonly}" suffix=""
 	[ "$access" = readonly ] && suffix=',readonly'
 	case "$state_kind" in
-		directory) printf 'type=bind,src=%s,dst=%s%s' "$state_source" "$state_dir" "$suffix" ;;
+		directory)
+			case "$state_source" in
+				*,*|*=*)
+					echo "ERROR: the VCFDT state directory path may not contain ',' or '=': $state_source" >&2
+					return 1
+					;;
+			esac
+			printf 'type=bind,src=%s,dst=%s%s' "$state_source" "$state_dir" "$suffix"
+			;;
 		volume) printf 'type=volume,src=%s,dst=%s%s' "$state_source" "$state_dir" "$suffix" ;;
 		*) echo "ERROR: unsupported VCFDT state source type: $state_kind" >&2; return 1 ;;
 	esac
@@ -47,7 +72,7 @@ read_volume_machine_id() {
 reset_scratch_volume() {
 	cleanup
 	scratch_serial=$((scratch_serial + 1))
-	local name="vcf-services-vcfdt-state-probe-$$-$scratch_serial"
+	local name="$scratch_prefix$$-$scratch_serial"
 	docker volume rm -f "$name" >/dev/null 2>&1 || true
 	docker volume create "$name" >/dev/null
 	scratch_volume="$name"
@@ -71,6 +96,7 @@ copy_state_to_scratch() {
 
 probe_machine_id() {
 	local state_kind="$1" state_source="$2" copy_log machine_id
+	probed_machine_id=""
 	reset_scratch_volume
 	if ! copy_log="$(copy_state_to_scratch "$state_kind" "$state_source" 2>&1)"; then
 		[ -z "$copy_log" ] || printf '%s\n' "$copy_log" >&2
@@ -82,7 +108,7 @@ probe_machine_id() {
 		return 1
 	fi
 	cleanup
-	printf '%s\n' "$machine_id"
+	probed_machine_id="$machine_id"
 }
 
 copy_state_into_volume() {
@@ -145,9 +171,12 @@ if [ "$source_kind" = volume ] && [ "$source_value" = "$target_volume" ]; then
 	exit 2
 fi
 
+sweep_abandoned_scratch_volumes
+
 echo "Validating the existing VCFDT state read-only" >&2
 source_probe_status=0
-source_machine_id="$(probe_machine_id "$source_kind" "$source_value")" || source_probe_status=$?
+probe_machine_id "$source_kind" "$source_value" || source_probe_status=$?
+source_machine_id="$probed_machine_id"
 if [ "$source_probe_status" -eq 2 ]; then
 	echo "ERROR: the VCFDT state source could not be copied for inspection; see the error above." >&2
 	echo "       The source was mounted read-only and was not changed." >&2
@@ -175,7 +204,8 @@ if docker volume inspect "$target_volume" >/dev/null 2>&1; then
 	esac
 	if [ "$target_status" != empty ]; then
 		target_probe_status=0
-		target_machine_id="$(probe_machine_id volume "$target_volume")" || target_probe_status=$?
+		probe_machine_id volume "$target_volume" || target_probe_status=$?
+		target_machine_id="$probed_machine_id"
 		if [ "$target_probe_status" -eq 2 ]; then
 			echo "ERROR: refusing to touch non-empty $target_volume because it could not be copied for inspection." >&2
 			echo "       Back up and inspect the target volume before retrying." >&2

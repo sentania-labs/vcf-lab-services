@@ -109,6 +109,14 @@ fi
 if [ -n "$adopt_state_dir" ] || [ -n "$adopt_state_volume" ]; then
 	adopt_mode=true
 fi
+if [ -n "$adopt_state_dir" ]; then
+	case "$adopt_state_dir" in
+		*,*|*=*)
+			echo "ERROR: --adopt-state-dir path may not contain ',' or '=' because Docker's mount syntax cannot parse it: $adopt_state_dir" >&2
+			exit 2
+			;;
+	esac
+fi
 if [ -n "$adopt_state_volume" ]; then
 	[[ "$adopt_state_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]+$ ]] || {
 		echo "ERROR: invalid Docker volume name for --adopt-state-volume" >&2
