@@ -259,10 +259,21 @@ that into a hard floor.
 
 ### Adopt an existing depot and Software Depot ID
 
+> [!WARNING]
+> Stop the previous VCFDT or depot-sync writer before adoption, even when it
+> runs in a container on another system. Keep it stopped throughout the new
+> installation and do not run the old and new writers against the same depot.
+> The installer cannot detect a writer on another system. Two active writers
+> can mutate the state during import or corrupt the shared depot.
+
 Adoption points this stack at an existing depot tree and imports the existing
-VCFDT state without changing either source. First back up the source state and
-depot. Set the normal storage answers to the existing location, then add one
-state-source option to the installer:
+VCFDT state without changing either source. Follow these steps in order:
+
+1. Stop the previous VCFDT or depot-sync service and verify its writer process
+   is no longer running. Keep that deployment stopped through cutover.
+2. Back up the source VCFDT state, depot, and activation-code material.
+3. Set the normal storage answers to the existing depot location, then run the
+   installer with one state-source option:
 
 ```bash
 # Existing depot on a host path
@@ -273,6 +284,21 @@ state-source option to the installer:
 ./install.sh --answers-file /secure/adopt-nfs.env \
   --adopt-state-volume old-vcfdt-state
 ```
+
+Interactive adoption displays the writer safety check before reading either
+source and requires the operator to type `STOPPED`. A scripted run must stop
+the previous writer through its own orchestration, verify that shutdown, and
+then assert the completed prerequisite explicitly:
+
+```bash
+./install.sh --answers-file /secure/adopt-nfs.env \
+  --adopt-state-volume old-vcfdt-state \
+  --confirm-old-writer-stopped
+```
+
+`--confirm-old-writer-stopped` bypasses only the interactive prompt. It does
+not detect or stop a remote writer, and must not be used until automation has
+verified that the previous deployment is stopped.
 
 For the local example, set `STORAGE_MODE=local` and `DEPOT_LOCAL_PATH` to the
 existing depot root. For NFS, set `STORAGE_MODE=nfs`, `NFS_SERVER`,

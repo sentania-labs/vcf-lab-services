@@ -100,6 +100,16 @@ expect_failure 2 'apply only to a source checkout' \
 expect_failure 2 'apply only to a source checkout' \
 	"$bundle_dir/install.sh" --image-repository ghcr.io/example/other
 
+# Adoption cannot safely share a depot with the previous writer. A scripted
+# run must make the shutdown assertion explicitly, while interactive runs stop
+# at a prominent confirmation prompt.
+expect_failure 2 'adoption requires confirmation that the previous writer is stopped' \
+	"$bundle_dir/install.sh" --adopt-state-dir /tmp
+expect_failure 2 'VCFDT_ARCHIVE is missing' \
+	"$bundle_dir/install.sh" --adopt-state-dir /tmp --confirm-old-writer-stopped
+expect_failure 2 'requires --adopt-state-dir or --adopt-state-volume' \
+	"$bundle_dir/install.sh" --confirm-old-writer-stopped
+
 # Bundle metadata stays strict.
 printf 'VCF_SERVICES_UNEXPECTED=1\n' > "$bundle_dir/.release.env"
 expect_failure 1 'unsupported release metadata key' "$bundle_dir/install.sh"

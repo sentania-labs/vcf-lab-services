@@ -36,7 +36,9 @@ the whole tree is scanned in one pass so every offending path is reported,
 grouped separately for escaping and contained-but-broken links. The same test
 imports state from a directory and a Docker volume, verifies the Software Depot
 ID after copying, proves a rerun is idempotent, and proves that a conflicting
-target ID is preserved. The
+target ID is preserved. The release test proves non-interactive adoption
+refuses to proceed without an explicit previous-writer shutdown assertion and
+that `--confirm-old-writer-stopped` advances only scripted adoption. The
 UI test covers next-run calculation in the configured timezone and the backup
 settings API: safe defaults that never return the password, refusal to enable
 backup without one, atomic settings and password writes, UID:GID and port

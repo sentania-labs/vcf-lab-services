@@ -17,6 +17,7 @@ release_source=bundle
 adopt_state_dir=""
 adopt_state_volume=""
 adopt_mode=false
+confirm_old_writer_stopped=false
 
 usage() {
 	cat <<'EOF'
@@ -24,6 +25,7 @@ Usage: ./install.sh [--answers-file PATH] [--min-free-gb NUMBER]
                     [--min-backup-free-gb NUMBER]
                     [--version TAG] [--image-repository REPOSITORY]
                     [--adopt-state-dir PATH | --adopt-state-volume NAME]
+                    [--confirm-old-writer-stopped]
        ./install.sh --validate-archive PATH
 
 The depot free-space floor defaults to 500 GB. Use --min-free-gb only when a
@@ -40,6 +42,11 @@ the GHCR namespace of the checkout's origin remote and the image tag defaults to
 
 The adopt options import an existing VCFDT state directory or Docker volume.
 Select the existing depot through the normal local or NFS storage answers.
+Before adoption, stop the previous VCFDT or depot-sync writer and keep it
+stopped. Interactive adoption requires typing STOPPED at the safety prompt.
+For scripted adoption, --confirm-old-writer-stopped asserts that automation
+already stopped the previous writer. The installer cannot detect a writer on
+another system.
 EOF
 }
 
@@ -85,6 +92,10 @@ while [ "$#" -gt 0 ]; do
 			adopt_state_volume="$2"
 			shift 2
 			;;
+		--confirm-old-writer-stopped)
+			confirm_old_writer_stopped=true
+			shift
+			;;
 		-h|--help)
 			usage
 			exit 0
@@ -108,6 +119,10 @@ if [ -n "$adopt_state_dir" ] && [ -n "$adopt_state_volume" ]; then
 fi
 if [ -n "$adopt_state_dir" ] || [ -n "$adopt_state_volume" ]; then
 	adopt_mode=true
+fi
+if [ "$confirm_old_writer_stopped" = true ] && [ "$adopt_mode" = false ]; then
+	echo "ERROR: --confirm-old-writer-stopped requires --adopt-state-dir or --adopt-state-volume" >&2
+	exit 2
 fi
 if [ -n "$adopt_state_dir" ]; then
 	case "$adopt_state_dir" in
@@ -201,10 +216,45 @@ validate_archive() {
 	}
 }
 
+confirm_previous_writer_is_stopped() {
+	local scripted_confirmation="$1" reply
+	cat >&2 <<'EOF'
+
+ADOPTION SAFETY CHECK
+Stop the previous VCFDT or depot-sync writer before continuing, including a
+writer running in a container on another system. Keep it stopped throughout
+this installation. The installer cannot detect that remote writer, and two
+writers can change state during import or corrupt shared depot content.
+EOF
+	if [ "$scripted_confirmation" = true ]; then
+		echo "Previous writer shutdown asserted by --confirm-old-writer-stopped." >&2
+		return 0
+	fi
+	if [ ! -t 0 ]; then
+		echo "ERROR: adoption requires confirmation that the previous writer is stopped." >&2
+		echo "       After automation stops it, rerun with --confirm-old-writer-stopped." >&2
+		return 1
+	fi
+	printf 'Type STOPPED to confirm the previous writer is stopped: ' >&2
+	if ! IFS= read -r reply; then
+		echo >&2
+		echo "ERROR: adoption cancelled because writer shutdown was not confirmed." >&2
+		return 1
+	fi
+	[ "$reply" = STOPPED ] || {
+		echo "ERROR: adoption cancelled because writer shutdown was not confirmed." >&2
+		return 1
+	}
+}
+
 if [ -n "$validate_only" ]; then
 	validate_archive "$validate_only"
 	echo "VCFDT archive validation passed"
 	exit 0
+fi
+
+if [ "$adopt_mode" = true ]; then
+	confirm_previous_writer_is_stopped "$confirm_old_writer_stopped" || exit 2
 fi
 
 derive_image_repository() {
