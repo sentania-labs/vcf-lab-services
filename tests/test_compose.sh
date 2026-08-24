@@ -61,8 +61,7 @@ case "$1 ${2:-}" in
 	"info ") [ "${MOCK_DAEMON_UP:-true}" = true ] ;;
 	"volume inspect") [ "${MOCK_VOLUME_EXISTS:-}" = true ] ;;
 	"image inspect") [ "${MOCK_IMAGE_EXISTS:-}" = true ] ;;
-	"compose up") exit 0 ;;
-	"compose ps") exit 0 ;;
+	compose\ *) exit 0 ;;
 	*) exit 2 ;;
 esac
 EOF
@@ -95,6 +94,21 @@ grep -q 'Run ./install.sh instead' <<< "$preflight_output" \
 
 : > "$DOCKER_CALLS"
 set +e
+option_preflight_output="$(PATH="$work_dir/bin:$PATH" \
+	./compose.sh --profile debug --ansi never up -d 2>&1)"
+option_preflight_status=$?
+set -e
+[ "$option_preflight_status" -eq 1 ] \
+	|| fail "compose global options bypassed the installation preflight"
+grep -q 'external volume vcf-services-vcfdt-state' <<< "$option_preflight_output" \
+	|| fail "options-before-command preflight missed the external volume"
+grep -q 'local image vcf-services-sync:local' <<< "$option_preflight_output" \
+	|| fail "options-before-command preflight missed the local image"
+! grep -q '^compose ' "$DOCKER_CALLS" \
+	|| fail "Compose ran after an options-before-command preflight failure"
+
+: > "$DOCKER_CALLS"
+set +e
 volume_only_output="$(MOCK_VOLUME_EXISTS=true PATH="$work_dir/bin:$PATH" ./compose.sh up -d 2>&1)"
 volume_only_status=$?
 set -e
@@ -118,6 +132,12 @@ grep -q 'external volume vcf-services-vcfdt-state' <<< "$image_only_output" \
 : > "$DOCKER_CALLS"
 MOCK_VOLUME_EXISTS=true MOCK_IMAGE_EXISTS=true PATH="$work_dir/bin:$PATH" ./compose.sh up -d
 grep -qx 'compose up -d' "$DOCKER_CALLS" || fail "validated up command was not passed to Compose"
+
+: > "$DOCKER_CALLS"
+MOCK_VOLUME_EXISTS=true MOCK_IMAGE_EXISTS=true PATH="$work_dir/bin:$PATH" \
+	./compose.sh --profile debug --ansi never up -d
+grep -qx 'compose --profile debug --ansi never up -d' "$DOCKER_CALLS" \
+	|| fail "Compose global options were not preserved after preflight"
 
 : > "$DOCKER_CALLS"
 PATH="$work_dir/bin:$PATH" ./compose.sh ps
