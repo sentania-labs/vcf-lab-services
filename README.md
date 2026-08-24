@@ -303,9 +303,10 @@ does not copy or write depot content. The copy lands in a staging directory
 inside the fixed volume and is moved into place last, so an interrupted or
 failed import is cleared and retried on the next run instead of leaving a
 half-imported state behind. That retry still identifies any ID already in the
-fixed volume first and refuses if it differs from the source. A rerun with the same imported ID skips the copy. If the fixed volume is non-empty and contains a different or
-unreadable ID, the installer refuses to overwrite it so an existing activation
-cannot be lost.
+fixed volume first and refuses if it differs from the source. A rerun with the
+same imported ID skips the copy. If the fixed volume is non-empty and contains
+a different or unreadable ID, the installer refuses to overwrite it so an
+existing activation cannot be lost.
 
 Configuration lives in `config/settings.env`. It is deliberately a simple,
 atomic file-backed format so later GUI settings support can update it without
