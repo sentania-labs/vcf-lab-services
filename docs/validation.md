@@ -33,9 +33,10 @@ symlinks rooted somewhere other than `/depot`, normalized absolute and relative
 escapes, and unreadable symlinks, while a dangling symlink whose normalized
 target stays inside `/depot` only warns and adoption continues. They also prove
 the whole tree is scanned in one pass so every offending path is reported,
-grouped separately for escaping and contained-but-broken links. The same test imports state from a directory
-and a Docker volume, verifies the Software Depot ID after copying, proves a
-rerun is idempotent, and proves that a conflicting target ID is preserved. The
+grouped separately for escaping and contained-but-broken links. The same test
+imports state from a directory and a Docker volume, verifies the Software Depot
+ID after copying, proves a rerun is idempotent, and proves that a conflicting
+target ID is preserved. The
 UI test covers next-run calculation in the configured timezone and the backup
 settings API: safe defaults that never return the password, refusal to enable
 backup without one, atomic settings and password writes, UID:GID and port
