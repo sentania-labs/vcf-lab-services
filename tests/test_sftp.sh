@@ -6,6 +6,7 @@ work_dir="$(mktemp -d /tmp/vcf-services-sftp-test.XXXXXX)"
 suffix="$$"
 image="vcf-services-sftp:test-$suffix"
 container="vcf-services-sftp-test-$suffix"
+client_container="vcf-services-sftp-client-$suffix"
 backup_volume="vcf-services-sftp-test-backup-$suffix"
 key_volume="vcf-services-sftp-test-keys-$suffix"
 
@@ -14,6 +15,7 @@ cleanup() {
 	if [ "$status" -ne 0 ]; then
 		docker logs "$container" >&2 || true
 	fi
+	docker rm -f "$client_container" >/dev/null 2>&1 || true
 	docker rm -f "$container" >/dev/null 2>&1 || true
 	docker volume rm "$backup_volume" "$key_volume" >/dev/null 2>&1 || true
 	docker volume rm "vcf-services-sftp-test-backup2-$suffix" >/dev/null 2>&1 || true
@@ -97,6 +99,53 @@ remote_command_output="$(SSHPASS=sftp-test-password timeout 15 docker run --rm -
 case "$remote_command_output" in
 	*uid=*) fail "SFTP account was able to run a remote command" ;;
 esac
+
+SSHPASS=sftp-test-password docker run -d --name "$client_container" --network host \
+	--entrypoint /bin/sh -e SSHPASS -e "SFTP_PORT=$host_port" "$image" \
+	-c 'while :; do printf "pwd\n"; sleep 1; done | sshpass -e sftp -q -o BatchMode=no \
+		-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-P "$SFTP_PORT" vcfbackup@127.0.0.1' >/dev/null
+deadline=$((SECONDS + 30))
+session_started=false
+while [ "$SECONDS" -lt "$deadline" ]; do
+	if docker exec "$container" pgrep -u vcfbackup >/dev/null 2>&1; then
+		session_started=true
+		break
+	fi
+	sleep 1
+done
+[ "$session_started" = true ] || fail "long-lived SFTP test session did not authenticate"
+
+printf 'BACKUP_ENABLED="false"\nSFTP_UID_GID="1003:1003"\n' > "$work_dir/config/settings.env"
+deadline=$((SECONDS + 30))
+session_stopped=false
+while [ "$SECONDS" -lt "$deadline" ]; do
+	server_sessions="$(docker exec "$container" sh -c \
+		'pgrep -x sshd >/dev/null || pgrep -u vcfbackup >/dev/null; printf "%s" "$?"' 2>/dev/null || true)"
+	if [ "$server_sessions" = 1 ]; then
+		session_stopped=true
+		break
+	fi
+	sleep 1
+done
+if [ "$session_stopped" != true ]; then
+	docker top "$container" -eo pid,ppid,uid,stat,comm,args >&2 || true
+	fail "disabling SFTP left a listener or authenticated session process running"
+fi
+docker rm -f "$client_container" >/dev/null
+
+printf 'BACKUP_ENABLED="true"\nSFTP_UID_GID="1003:1003"\n' > "$work_dir/config/settings.env"
+deadline=$((SECONDS + 30))
+while [ "$SECONDS" -lt "$deadline" ]; do
+	if docker exec "$container" sh -c \
+		'test -s /run/sshd.pid && kill -0 "$(cat /run/sshd.pid)"' 2>/dev/null; then
+		break
+	fi
+	sleep 1
+done
+docker exec "$container" sh -c \
+	'test -s /run/sshd.pid && kill -0 "$(cat /run/sshd.pid)"' 2>/dev/null \
+	|| fail "SFTP listener did not return after re-enabling the service"
 
 printf 'BACKUP_ENABLED="true"\nSFTP_UID_GID="1005:1005"\n' > "$work_dir/config/settings.env"
 deadline=$((SECONDS + 60))

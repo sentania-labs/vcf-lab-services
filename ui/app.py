@@ -444,9 +444,9 @@ def update_backup_settings():
     }
     before = _backup_settings_doc()
     try:
+        _write_settings(updates)
         if password:
             _write_sftp_password(password)
-        _write_settings(updates)
     except OSError as exc:
         return jsonify({"error": f"could not save backup settings: {exc}"}), 500
 

@@ -120,6 +120,22 @@ generate_host_key() {
 stop_sshd() {
 	if [ -n "$sshd_pid" ] && kill -0 "$sshd_pid" 2>/dev/null; then
 		kill "$sshd_pid"
+	fi
+	# sshd forks a daemon for every connection, and the forced SFTP command runs
+	# as the backup user. Stop both layers so disabling the service revokes
+	# sessions that were authenticated before the listener was stopped.
+	pkill -TERM -x sshd 2>/dev/null || true
+	pkill -TERM -u "$backup_user" 2>/dev/null || true
+	remaining=5
+	while [ "$remaining" -gt 0 ] \
+		&& { pgrep -x sshd >/dev/null 2>&1 \
+			|| pgrep -u "$backup_user" >/dev/null 2>&1; }; do
+		sleep 1
+		remaining=$((remaining - 1))
+	done
+	pkill -KILL -x sshd 2>/dev/null || true
+	pkill -KILL -u "$backup_user" 2>/dev/null || true
+	if [ -n "$sshd_pid" ]; then
 		wait "$sshd_pid" 2>/dev/null || true
 	fi
 	sshd_pid=""

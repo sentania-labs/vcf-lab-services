@@ -216,6 +216,34 @@ class UiApiTests(unittest.TestCase):
             'BACKUP_NFS_EXPORT="/exports/vcf-services-backup"', settings_text
         )
 
+    def test_backup_settings_failure_does_not_replace_password(self):
+        password_file = self.sftp_secrets / "password"
+        password_file.write_text("existing password\n")
+        original_settings = self.settings.read_text()
+        with mock.patch.object(
+            self.module, "_write_settings", side_effect=OSError("read-only config")
+        ):
+            response = self.client.post(
+                "/api/settings/backup",
+                json={
+                    "enabled": True,
+                    "port": 2223,
+                    "uidGid": "1004:1005",
+                    "password": "replacement password",
+                    "storageMode": "local",
+                    "localPath": "/srv/vcf-services/depot",
+                    "backupLocalPath": "/srv/vcf-services/backup",
+                    "nfsServer": "",
+                    "nfsExport": "",
+                    "nfsOptions": "nfsvers=4,rw",
+                },
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("could not save", response.get_json()["error"])
+        self.assertEqual(password_file.read_text(), "existing password\n")
+        self.assertEqual(self.settings.read_text(), original_settings)
+
     def test_backup_settings_validate_uid_gid(self):
         response = self.client.post(
             "/api/settings/backup",

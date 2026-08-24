@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VCF_SERVICES_VERSION="$VCF_SERVICES_VERSION"
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-client openssh-server sshpass \
+ && apt-get install -y --no-install-recommends openssh-client openssh-server procps sshpass \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd /etc/ssh/keys
 
