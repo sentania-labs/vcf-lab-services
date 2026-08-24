@@ -30,7 +30,10 @@ also covers SFTP port and UID:GID validation plus bound-port detection. The
 installer checks also mount valid-looking and invalid depot fixtures at
 `/depot` and prove that adoption rejects missing VCFDT structure, absolute
 symlinks rooted somewhere other than `/depot`, normalized absolute and relative
-escapes, and dangling symlinks. The same test imports state from a directory
+escapes, and unreadable symlinks, while a dangling symlink whose normalized
+target stays inside `/depot` only warns and adoption continues. They also prove
+the whole tree is scanned in one pass so every offending path is reported,
+grouped separately for escaping and contained-but-broken links. The same test imports state from a directory
 and a Docker volume, verifies the Software Depot ID after copying, proves a
 rerun is idempotent, and proves that a conflicting target ID is preserved. The
 UI test covers next-run calculation in the configured timezone and the backup

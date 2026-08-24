@@ -20,6 +20,7 @@ fi
 [ -n "$content_entry" ] || fail "$depot_root/PROD/COMP contains no files or symlinks; this does not look like a populated VCFDT depot"
 
 if ! symlink_report="$(find "$depot_root" -type l -exec sh -c '
+	set -f
 	resolved_depot_root="$1"
 	shift
 
