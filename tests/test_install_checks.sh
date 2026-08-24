@@ -311,23 +311,58 @@ staging_only_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
 [ "$staging_only_id" = '22222222-2222-4222-8222-222222222222' ] \
 	|| fail "an abandoned staging-only target did not recover"
 
-matching_stale_target="vcf-services-state-import-matching-stale-$$"
-state_test_volumes+=("$matching_stale_target")
-docker volume create "$matching_stale_target" >/dev/null
+interrupted_target="vcf-services-state-import-interrupted-$$"
+state_test_volumes+=("$interrupted_target")
+docker volume create "$interrupted_target" >/dev/null
 docker run --rm --entrypoint /bin/sh \
-	--mount "type=volume,src=$matching_stale_target,dst=/state" \
+	--mount "type=volume,src=$interrupted_target,dst=/state" \
 	"$state_test_image" -c "mkdir -p /state/.vcf-services-import-staging
 printf '%s\\n' '22222222-2222-4222-8222-222222222222' > /state/machine_id
-printf %s 'keep me' > /state/registration.dat"
-matching_stale_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
-	"$state_test_image" volume "$volume_source" "$matching_stale_target" 2>/dev/null)"
-[ "$matching_stale_id" = '22222222-2222-4222-8222-222222222222' ] \
-	|| fail "a matching target with a stale import marker was not accepted as-is"
-matching_stale_contents="$(docker run --rm --entrypoint /bin/sh \
-	--mount "type=volume,src=$matching_stale_target,dst=/state,readonly" \
+printf %s 'half copied' > /state/.vcf-services-import-staging/source-marker"
+interrupted_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" volume "$volume_source" "$interrupted_target" 2>/dev/null)"
+[ "$interrupted_id" = '22222222-2222-4222-8222-222222222222' ] \
+	|| fail "an interrupted import with a matching ID did not recover"
+interrupted_contents="$(docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$interrupted_target,dst=/state,readonly" \
+	"$state_test_image" -c 'cd /state && find . | sort | tr "\n" " " && cat ./source-marker')"
+[ "$interrupted_contents" = '. ./machine_id ./source-marker source remains read-only' ] \
+	|| fail "an interrupted import was finalized instead of reimported from the source"
+
+unimportable_source="$work_dir/unimportable-state"
+mkdir -p "$unimportable_source/.vcf-services-import-staging"
+printf '22222222-2222-4222-8222-222222222222\n' > "$unimportable_source/machine_id"
+
+copy_failure_target="vcf-services-state-import-copy-failure-$$"
+state_test_volumes+=("$copy_failure_target")
+copy_failure_error="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" directory "$unimportable_source" "$copy_failure_target" 2>&1)" \
+	&& fail "a failed state copy was reported as a successful import"
+grep -q 'VCFDT state import failed' <<< "$copy_failure_error" \
+	|| fail "a failed state copy did not report the import failure"
+copy_failure_contents="$(docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$copy_failure_target,dst=/state,readonly" \
+	"$state_test_image" -c 'cd /state && find . | sort | tr "\n" " "')"
+[ "$copy_failure_contents" = '. ' ] \
+	|| fail "a failed state copy left half-imported content in the target it created"
+
+guarded_target="vcf-services-state-import-guarded-$$"
+state_test_volumes+=("$guarded_target")
+docker volume create "$guarded_target" >/dev/null
+docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$guarded_target,dst=/state" \
+	"$state_test_image" -c "printf '%s\\n' '44444444-4444-4444-8444-444444444444' > /state/machine_id
+printf %s 'irreplaceable activation state' > /state/registration.dat"
+guarded_error="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" directory "$unimportable_source" "$guarded_target" 2>&1)" \
+	&& fail "a state copy was attempted against a target this run does not own"
+grep -q 'refusing to overwrite' <<< "$guarded_error" \
+	|| fail "an unowned target was not refused before the copy was attempted"
+guarded_contents="$(docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$guarded_target,dst=/state,readonly" \
 	"$state_test_image" -c 'cd /state && find . | sort | tr "\n" " " && cat ./registration.dat')"
-[ "$matching_stale_contents" = '. ./machine_id ./registration.dat keep me' ] \
-	|| fail "clearing a stale import marker did not preserve the existing state"
+[ "$guarded_contents" = '. ./machine_id ./registration.dat irreplaceable activation state' ] \
+	|| fail "a failed state copy emptied a target this run does not own"
 
 conflict_error="$("$project_dir/scripts/import-vcfdt-state.sh" \
 	"$state_test_image" directory "$conflict_source" "$volume_target" 2>&1)" \

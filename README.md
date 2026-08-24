@@ -310,11 +310,13 @@ Adoption reuses depot content that is already downloaded, so the installer
 skips its free-space floor in adopt mode. `--min-free-gb` is not needed for an
 existing depot that is already close to full.
 
-Adoption is recorded as `DEPOT_ADOPTED="true"` in `config/settings.env` once
-the depot validates, so it is a property of the deployment rather than of one
-command. Every later `./install.sh` rerun, for an activation code, a settings
-change, or an upgrade, keeps skipping the free-space floor and does not ask for
-the writer confirmation again, because a plain rerun re-imports nothing. Pass
+Adoption is recorded in `config/settings.env` as `DEPOT_ADOPTED`, holding the
+identity of the depot that was adopted, so it is a property of that depot rather
+than of one command. Every later `./install.sh` rerun against the same depot
+answers, for an activation code, a settings change, or an upgrade, keeps
+skipping the free-space floor and does not ask for the writer confirmation
+again, because a plain rerun re-imports nothing. Answer with a different depot
+location and the full free-space floor applies again to that new location. Pass
 the adopt options again only when you are importing state from a source once
 more, and stop the current writer first when you do.
 
@@ -346,9 +348,11 @@ fixed volume first and refuses if it differs from the source. A rerun with the
 same imported ID skips the copy. If the fixed volume is non-empty and contains
 a different or unreadable ID, the installer refuses to overwrite it so an
 existing activation cannot be lost. A leftover staging directory alone is never
-enough to justify clearing that volume: only a volume that holds nothing but an
-abandoned staging directory is cleared, and a staging directory found beside
-real state is removed on its own once the IDs match.
+enough to justify clearing that volume: a volume that holds nothing but an
+abandoned staging directory is cleared and retried, and a staging directory
+found beside state whose ID already matches the source means an import was
+interrupted part way, so the state is cleared and reimported from the
+authoritative source rather than being declared complete.
 
 Configuration lives in `config/settings.env`. It is deliberately a simple,
 atomic file-backed format so later GUI settings support can update it without

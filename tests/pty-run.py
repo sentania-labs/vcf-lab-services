@@ -3,10 +3,11 @@
 
 Usage: pty-run.py INPUT COMMAND [ARG...]
 
-INPUT is a Python escaped string written to the terminal before the command
-output is collected. Use \\x04 for end-of-input and \\x03 for an interrupt.
-The command's combined output is written to stdout and its exit status is
-returned, with 128 + signal for a command killed by a signal.
+INPUT is a Python escaped string typed at the terminal once the command has
+produced its first output, so the command is always running by the time the
+input arrives. Use \\x04 for end-of-input and \\x03 for an interrupt. The
+command's combined output is written to stdout and its exit status is returned,
+with 128 + signal for a command killed by a signal.
 """
 import os
 import pty
@@ -16,6 +17,7 @@ import sys
 import time
 
 TIMEOUT_SECONDS = 120
+FIRST_OUTPUT_SECONDS = 60
 
 
 def main():
@@ -33,28 +35,36 @@ def main():
             pass
         os._exit(127)
 
-    if feed:
-        os.write(master, feed)
-
     output = bytearray()
     deadline = time.monotonic() + TIMEOUT_SECONDS
+    first_output_deadline = time.monotonic() + FIRST_OUTPUT_SECONDS
+    pending_feed = feed
     timed_out = False
+    finished = False
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
             os.kill(pid, signal.SIGKILL)
             break
+        if pending_feed:
+            remaining = min(remaining, max(0.05, first_output_deadline - time.monotonic()))
         readable, _, _ = select.select([master], [], [], remaining)
-        if not readable:
-            continue
-        try:
-            chunk = os.read(master, 4096)
-        except OSError:
+        if readable:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                finished = True
+            else:
+                if chunk:
+                    output.extend(chunk)
+                else:
+                    finished = True
+        if pending_feed and (output or time.monotonic() >= first_output_deadline):
+            os.write(master, pending_feed)
+            pending_feed = b""
+        if finished:
             break
-        if not chunk:
-            break
-        output.extend(chunk)
 
     os.close(master)
     _, status = os.waitpid(pid, 0)

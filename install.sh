@@ -360,13 +360,6 @@ nfs_server=""
 nfs_export=""
 backup_nfs_export=""
 nfs_options="nfsvers=4,rw,hard,timeo=600,retrans=2"
-depot_previously_adopted="$(saved_setting DEPOT_ADOPTED false)"
-[ "$depot_previously_adopted" = true ] || depot_previously_adopted=false
-if [ "$adopt_mode" = true ] || [ "$depot_previously_adopted" = true ]; then
-	skip_depot_free_space_floor=true
-else
-	skip_depot_free_space_floor=false
-fi
 saved_depot_local_path="$(saved_setting DEPOT_LOCAL_PATH "$project_dir/data/depot")"
 saved_backup_local_path="$(saved_setting BACKUP_LOCAL_PATH "$project_dir/data/backup")"
 saved_nfs_server="$(saved_setting NFS_SERVER nfs.example.com)"
@@ -415,6 +408,20 @@ else
 	saved_nfs_server="$nfs_server"
 	saved_nfs_export="$nfs_export"
 	saved_backup_nfs_export="$backup_nfs_export"
+fi
+
+depot_volume_fingerprint="$(printf '%s\n' "$storage_mode|$depot_local_path|$nfs_server|$nfs_export|$nfs_options" \
+	| sha256sum | cut -c1-12)"
+depot_volume_name="vcf-services-depot-store-$depot_volume_fingerprint"
+adopted_depot_fingerprint="$(saved_setting DEPOT_ADOPTED "")"
+if [ "$adopt_mode" = true ]; then
+	adopted_depot_fingerprint="$depot_volume_fingerprint"
+	skip_depot_free_space_floor=true
+elif [ -n "$adopted_depot_fingerprint" ] && [ "$adopted_depot_fingerprint" = "$depot_volume_fingerprint" ]; then
+	skip_depot_free_space_floor=true
+else
+	adopted_depot_fingerprint=""
+	skip_depot_free_space_floor=false
 fi
 
 ask TLS_MODE "TLS mode (self-signed or provided)" "self-signed"
@@ -600,6 +607,7 @@ if [ "$storage_mode" = local ]; then
 	elif [ "$skip_depot_free_space_floor" = true ]; then
 		mkdir -p "$depot_local_path"
 		echo "This depot was adopted with existing content; skipping the ${minimum_free_gb} GB free-space floor"
+		echo "Point the depot answers at a different location to restore the floor"
 	else
 		mkdir -p "$depot_local_path"
 		available_kb="$(df -Pk "$depot_local_path" | awk 'NR==2 {print $4}')"
@@ -643,6 +651,7 @@ else
 		echo "Adoption reuses existing depot content; skipping the ${minimum_free_gb} GB free-space floor"
 	elif [ "$skip_depot_free_space_floor" = true ]; then
 		echo "This depot was adopted with existing content; skipping the ${minimum_free_gb} GB free-space floor"
+		echo "Point the depot answers at a different location to restore the floor"
 	else
 		minimum_kb=$((minimum_free_gb * 1024 * 1024))
 		[ "$available_kb" -ge "$minimum_kb" ] || {
@@ -692,9 +701,6 @@ chmod 0755 "$project_dir/build/vcfdt/bin/vcf-download-tool"
 archive_name="$(basename "$vcfdt_archive")"
 vcfdt_version="$(sed -nE 's/^vcf-download-tool-([0-9][0-9A-Za-z._-]*)\.(tar\.gz|tgz|zip)$/\1/p' <<< "$archive_name")"
 vcfdt_version="${vcfdt_version:-unknown}"
-depot_volume_fingerprint="$(printf '%s\n' "$storage_mode|$depot_local_path|$nfs_server|$nfs_export|$nfs_options" \
-	| sha256sum | cut -c1-12)"
-depot_volume_name="vcf-services-depot-store-$depot_volume_fingerprint"
 backup_volume_fingerprint="$(printf '%s\n' "$storage_mode|$backup_local_path|$nfs_server|$backup_nfs_export|$nfs_options" \
 	| sha256sum | cut -c1-12)"
 backup_volume_name="vcf-services-backup-store-$backup_volume_fingerprint"
@@ -726,7 +732,7 @@ write_setting AUTH_USERNAME "$auth_username"
 write_setting TLS_MODE "$tls_mode"
 write_setting STORAGE_MODE "$storage_mode"
 write_setting DEPOT_VOLUME_NAME "$depot_volume_name"
-write_setting DEPOT_ADOPTED "$skip_depot_free_space_floor"
+write_setting DEPOT_ADOPTED "$adopted_depot_fingerprint"
 write_setting DEPOT_LOCAL_PATH "$saved_depot_local_path"
 write_setting NFS_SERVER "$saved_nfs_server"
 write_setting NFS_EXPORT "$saved_nfs_export"

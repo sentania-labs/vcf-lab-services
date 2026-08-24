@@ -150,6 +150,16 @@ interrupt_output="$(python3 "$project_dir/tests/pty-run.py" '\x03' \
 	echo "an interrupted writer confirmation must not succeed" >&2
 	exit 1
 }
+grep -q 'ADOPTION SAFETY CHECK' <<< "$interrupt_output" || {
+	echo "the interrupted run never reached the writer confirmation prompt" >&2
+	printf '%s\n' "$interrupt_output" >&2
+	exit 1
+}
+grep -q 'Type STOPPED to confirm' <<< "$interrupt_output" || {
+	echo "the interrupted run never reached the writer confirmation prompt" >&2
+	printf '%s\n' "$interrupt_output" >&2
+	exit 1
+}
 if grep -q 'VCFDT archive not found' <<< "$interrupt_output"; then
 	echo "an interrupted writer confirmation continued into adoption" >&2
 	exit 1

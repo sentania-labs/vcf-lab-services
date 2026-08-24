@@ -153,12 +153,6 @@ volume_state_status() {
 		' sh "$staging_dir_name"
 }
 
-remove_staging_dir() {
-	docker run --rm --entrypoint /bin/sh \
-		--mount "type=volume,src=$1,dst=/state" \
-		"$image" -c 'set -eu; rm -rf "/state/$1"' sh "$staging_dir_name"
-}
-
 empty_volume() {
 	docker run --rm --entrypoint /bin/sh \
 		--mount "type=volume,src=$1,dst=/state" \
@@ -237,12 +231,15 @@ if docker volume inspect "$target_volume" >/dev/null 2>&1; then
 			refuse_conflicting_target "$target_machine_id"
 		fi
 		if [ "$target_status" = staging-mixed ]; then
-			echo "Removing a stale import staging directory from $target_volume" >&2
-			remove_staging_dir "$target_volume"
+			echo "Clearing an interrupted earlier VCFDT state import from $target_volume" >&2
+			echo "       The target already carries the adopted Software Depot ID, so the state is reimported from the source." >&2
+			empty_volume "$target_volume"
+			target_is_owned_by_this_run=true
+		else
+			echo "The target VCFDT state volume already contains the adopted Software Depot ID; no copy is needed." >&2
+			printf '%s\n' "$target_machine_id"
+			exit 0
 		fi
-		echo "The target VCFDT state volume already contains the adopted Software Depot ID; no copy is needed." >&2
-		printf '%s\n' "$target_machine_id"
-		exit 0
 	fi
 else
 	docker volume create "$target_volume" >/dev/null

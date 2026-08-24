@@ -39,9 +39,11 @@ ID after copying, proves a rerun is idempotent, and proves that a conflicting
 target ID is preserved. They also prove the fixed state volume is never emptied
 on behalf of state this run does not own: a stale import marker sitting beside
 genuine but unreadable state is refused with the volume byte-for-byte intact, a
-stale marker beside a matching ID is cleared without touching that state, and a
-volume holding only an abandoned staging directory is the one case that is
-cleared and retried. The release test proves non-interactive adoption refuses
+stale marker beside a matching ID is treated as an interrupted import and
+reimported from the source rather than declared complete, a volume holding only
+an abandoned staging directory is cleared and retried, and a copy failure
+neither leaves half-imported content in a volume this run created nor empties a
+volume it does not own. The release test proves non-interactive adoption refuses
 to proceed without an explicit previous-writer shutdown assertion and that
 `--confirm-old-writer-stopped` advances only scripted adoption. It drives the
 interactive branch over a real pseudo-terminal through `tests/pty-run.py`:
