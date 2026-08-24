@@ -153,9 +153,10 @@ VCFDT writes absolute symlinks, so a depot created at another container path is
 not eligible for adoption as-is. Validation failure names the first
 incompatible path and starts no service against it.
 
-To read the source Software Depot ID, the installer copies the small state tree
-to a scratch volume it deletes afterwards and asks VCFDT for the ID there, so
-the tool never writes into the operator's source.
+To read a Software Depot ID, the installer copies the small state tree to a
+scratch volume it deletes afterwards and asks VCFDT for the ID there. Neither
+the operator's source nor a pre-existing fixed volume is ever written to while
+its ID is being identified.
 
 After both sources pass validation, the installer copies only the small VCFDT
 state into the fixed `vcf-services-vcfdt-state` volume, reads the imported
@@ -163,7 +164,8 @@ Software Depot ID back through VCFDT, and requires it to match the source. It
 does not copy or write depot content. The copy lands in a staging directory
 inside the fixed volume and is moved into place last, so an interrupted or
 failed import is cleared and retried on the next run instead of leaving a
-half-imported state behind. A rerun with the same imported ID skips the copy. If the fixed volume is non-empty and contains a different or
+half-imported state behind. That retry still identifies any ID already in the
+fixed volume first and refuses if it differs from the source. A rerun with the same imported ID skips the copy. If the fixed volume is non-empty and contains a different or
 unreadable ID, the installer refuses to overwrite it so an existing activation
 cannot be lost.
 
