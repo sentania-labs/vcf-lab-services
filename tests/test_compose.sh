@@ -8,7 +8,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 product_files=(docker-compose.yml compose.sh install.sh caddy/Caddyfile config/answers.example
 	config/settings.env.example Dockerfile.sync Dockerfile.sync-base Dockerfile.ui
-	sync/entrypoint.sh sync/sync.sh sync/targets/vkr.sh scripts/verify-byte-exact.sh
+	Dockerfile.sftp Dockerfile.sftp.dockerignore sftp/entrypoint.sh sftp/healthcheck.sh sftp/sshd_config
+	sftp/own-backup.sh sync/entrypoint.sh sync/sync.sh sync/targets/vkr.sh scripts/verify-byte-exact.sh
 	ui/app.py ui/requirements.txt ui/templates/index.html)
 
 # No Docker socket, Docker proxy, or Docker client dependency anywhere.
@@ -21,11 +22,11 @@ product_files=(docker-compose.yml compose.sh install.sh caddy/Caddyfile config/a
 ! grep -qi 'macvlan' -- "${product_files[@]}" || fail "a macvlan reference remains"
 [ ! -f compose.macvlan.yml ] || fail "compose.macvlan.yml still exists"
 
-# Published HTTPS is the only exposure: exactly one service publishes ports,
-# and it is depot-web on the configurable HTTPS port.
+# Only the operator-facing HTTPS and SFTP services publish ports.
 published_services="$(awk '/^  [A-Za-z0-9_-]+:$/ {service=$1} /^    ports:/ {print service}' docker-compose.yml)"
-[ "$published_services" = "depot-web:" ] || fail "unexpected published ports: $published_services"
+[ "$published_services" = $'depot-web:\nsftp-backup:' ] || fail "unexpected published ports: $published_services"
 grep -q 'HTTPS_PORT:-443' docker-compose.yml || fail "depot-web must default to published port 443"
+grep -q 'SFTP_PORT:-2222' docker-compose.yml || fail "SFTP must default to published port 2222"
 
 # Redis job bus: present, internal only, password protected, non-persistent.
 grep -q 'container_name: vcf-services-redis' docker-compose.yml || fail "redis service missing"
@@ -48,6 +49,35 @@ grep -q 'depot_store:/depot:rw' docker-compose.yml || fail "sync depot mount mus
 grep -q 'name: vcf-services-vcfdt-state' docker-compose.yml || fail "vcfdt state volume renamed"
 grep -A1 'name: vcf-services-vcfdt-state' docker-compose.yml | grep -q 'external: true' \
 	|| fail "vcfdt state volume must stay external"
+
+# SFTP backup contracts proven necessary by live VCF components.
+grep -q 'backup_store:/mnt/backup:rw' docker-compose.yml || fail "backup storage must be read-write at /mnt/backup"
+grep -q 'sftp_host_keys:/etc/ssh/keys:rw' docker-compose.yml || fail "SFTP host keys need a dedicated volume"
+grep -A1 'name: vcf-services-sftp-host-keys' docker-compose.yml | grep -q 'external: true' \
+	|| fail "SFTP host keys must survive Compose volume cleanup"
+for key_type in ed25519 rsa ecdsa; do
+	grep -q "ssh_host_${key_type}_key" sftp/entrypoint.sh || fail "$key_type host-key generation missing"
+	grep -q "ssh_host_${key_type}_key" sftp/sshd_config || fail "$key_type HostKey missing from sshd_config"
+done
+grep -q '^PasswordAuthentication yes$' sftp/sshd_config || fail "SFTP password authentication must be enabled"
+grep -q '^PermitRootLogin no$' sftp/sshd_config || fail "SFTP root login must be disabled"
+grep -q '^AllowUsers vcfbackup$' sftp/sshd_config || fail "SFTP must allow only the backup user"
+grep -q '^Subsystem sftp /usr/lib/openssh/sftp-server$' sftp/sshd_config \
+	|| fail "SFTP must use the external sftp-server subsystem"
+! grep -Eq 'ChrootDirectory|internal-sftp' sftp/sshd_config || fail "SFTP must not chroot or rewrite absolute paths"
+grep -q '^ForceCommand /usr/lib/openssh/sftp-server$' sftp/sshd_config \
+	|| fail "SFTP must force file transfer only, with no shell or remote command"
+grep -q 'sftp-own-backup.sh' sftp/entrypoint.sh || fail "SFTP must re-own the backup tree on a UID:GID change"
+grep -q 'sftp-own-backup.sh' install.sh || fail "installer and service must share one re-own implementation"
+grep -q 'backup-owner' sftp/own-backup.sh || fail "re-own needs a persistent marker"
+grep -q 'storage_id' sftp/own-backup.sh || fail "the re-own marker must be keyed to the backup storage"
+grep -q 'warn_identity' sftp/entrypoint.sh || fail "identity retry warnings must be deduplicated"
+grep -q -- '--min-backup-free-gb' install.sh || fail "installer must offer an opt-in backup free-space floor"
+! grep -q 'depot_local_path/backup' install.sh || fail "backup storage must not nest inside the depot tree"
+grep -q 'paths_are_disjoint "\$depot_local_path" "\$backup_local_path"' install.sh \
+	|| fail "installer must reject a backup directory inside the depot directory"
+grep -q 'host_tcp_port_is_bound' install.sh || fail "installer port collision check missing"
+! grep -q 'SFTP_PASSWORD=' docker-compose.yml || fail "SFTP password material belongs only in the secret file"
 
 # Manual startup reports install-created prerequisites before Compose can fail.
 work_dir="$(mktemp -d /tmp/vcf-services-compose-test.XXXXXX)"

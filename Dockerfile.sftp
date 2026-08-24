@@ -1,0 +1,32 @@
+FROM debian:bookworm-slim
+
+ARG VCF_SERVICES_VERSION=dev
+ARG VCF_SERVICES_REVISION=unknown
+ARG VCF_SERVICES_SOURCE=unknown
+
+LABEL org.opencontainers.image.title="VCF Services SFTP Backup" \
+      org.opencontainers.image.description="File-based backup target for VMware Cloud Foundation components" \
+      org.opencontainers.image.version="$VCF_SERVICES_VERSION" \
+      org.opencontainers.image.revision="$VCF_SERVICES_REVISION" \
+      org.opencontainers.image.source="$VCF_SERVICES_SOURCE" \
+      org.opencontainers.image.licenses="MIT"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    VCF_SERVICES_VERSION="$VCF_SERVICES_VERSION"
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-client openssh-server procps sshpass \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/sshd /etc/ssh/keys
+
+COPY sftp/sshd_config /etc/ssh/sshd_config
+COPY sftp/entrypoint.sh /usr/local/bin/sftp-entrypoint.sh
+COPY sftp/healthcheck.sh /usr/local/bin/sftp-healthcheck.sh
+COPY sftp/own-backup.sh /usr/local/bin/sftp-own-backup.sh
+RUN chmod 0755 /usr/local/bin/sftp-entrypoint.sh /usr/local/bin/sftp-healthcheck.sh \
+    /usr/local/bin/sftp-own-backup.sh
+
+EXPOSE 22
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=6 \
+  CMD ["/usr/local/bin/sftp-healthcheck.sh"]
+ENTRYPOINT ["/usr/local/bin/sftp-entrypoint.sh"]

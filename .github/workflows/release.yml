@@ -68,12 +68,20 @@ jobs:
             --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
             --file Dockerfile.sync-base \
             --tag "$image_root/sync-base:$version" .
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.sftp \
+            --tag "$image_root/sftp:$version" .
           ./scripts/verify-license-boundary.sh "$image_root/sync-base:$version"
           test "$(docker image inspect "$image_root/ui:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
           test "$(docker image inspect "$image_root/sync-base:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
+          test "$(docker image inspect "$image_root/sftp:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
           if [ "$PUBLISH_LATEST" = true ]; then
             docker tag "$image_root/ui:$version" "$image_root/ui:latest"
             docker tag "$image_root/sync-base:$version" "$image_root/sync-base:latest"
+            docker tag "$image_root/sftp:$version" "$image_root/sftp:latest"
           fi
 
       - name: Push product images
@@ -84,15 +92,17 @@ jobs:
           version="$GITHUB_REF_NAME"
           docker push "$image_root/ui:$version"
           docker push "$image_root/sync-base:$version"
+          docker push "$image_root/sftp:$version"
           if [ "$PUBLISH_LATEST" = true ]; then
             docker push "$image_root/ui:latest"
             docker push "$image_root/sync-base:latest"
+            docker push "$image_root/sftp:latest"
           else
             echo "Skipped the latest tags because a higher version is already published."
           fi
 
       # This product is public and its installer pulls without credentials, so
-      # both container packages are intentionally public. A package that GHCR
+      # all container packages are intentionally public. A package that GHCR
       # created as private on first publish blocks every operator install, so
       # public visibility is a hard gate before the release is created.
       - name: Publish and verify public package visibility
@@ -103,7 +113,7 @@ jobs:
           repo="${GITHUB_REPOSITORY#*/}"
           owner_type="$(gh api "/users/$owner" --jq .type)"
           failed=0
-          for component in ui sync-base; do
+          for component in ui sync-base sftp; do
             package="$repo/$component"
             encoded="${package//\//%2F}"
             if [ "$owner_type" = Organization ]; then
@@ -133,6 +143,7 @@ jobs:
           anonymous_config="$(mktemp -d)"
           DOCKER_CONFIG="$anonymous_config" docker pull "$image_root/ui:$version"
           DOCKER_CONFIG="$anonymous_config" docker pull "$image_root/sync-base:$version"
+          DOCKER_CONFIG="$anonymous_config" docker pull "$image_root/sftp:$version"
 
   release:
     name: Create GitHub release

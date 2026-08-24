@@ -6,13 +6,15 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `tests/make-stub-vcfdt.sh` for local and CI validation.
 - Run `tests/test_sync.sh`, `tests/test_scheduler.sh`,
   `tests/test_install_checks.sh`, `tests/test_compose.sh`,
-  `tests/test_release.sh`, the UI unit test documented in
+  `tests/test_release.sh`, `tests/test_sftp.sh`, the UI unit test documented in
   `docs/validation.md`, and the installer's live Range check before release.
 - Release tags are the product version authority. Follow `docs/releasing.md`
   and keep the published sync base free of licensed VCFDT content.
 - Preserve the storage contracts in `docker-compose.yml`: the depot is `/depot`
-  in both consumers, and `vcf-services-vcfdt-state` is an external volume so a
-  recreate cannot discard the registered Software Depot ID.
+  in both consumers, backup storage is separate and read-write at `/mnt/backup`,
+  and `vcf-services-vcfdt-state` plus `vcf-services-sftp-host-keys` are external
+  volumes so a recreate cannot discard the registered Software Depot ID or the
+  published SFTP host-key fingerprints.
 - The admin console and sync service exchange jobs only over the internal
   password-protected Redis bus defined in `docs/redis-contract.md`. No
   container mounts the Docker socket and macvlan networking is out of scope.

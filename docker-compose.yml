@@ -58,6 +58,30 @@ services:
       retries: 6
       start_period: 10s
 
+  sftp-backup:
+    container_name: vcf-services-sftp
+    image: ${VCF_SERVICES_SFTP_IMAGE:-vcf-services-sftp:local}
+    restart: unless-stopped
+    init: true
+    environment:
+      SETTINGS_FILE: /config/settings.env
+      SFTP_PASSWORD_FILE: /run/sftp-secrets/password
+    ports:
+      - "${SFTP_PORT:-2222}:22"
+    volumes:
+      - backup_store:/mnt/backup:rw
+      - sftp_host_keys:/etc/ssh/keys:rw
+      - ./config:/config:ro
+      - ./secrets/sftp:/run/sftp-secrets:ro
+    networks:
+      - control
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/sftp-healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
   admin-ui:
     container_name: vcf-services-ui
     image: ${VCF_SERVICES_UI_IMAGE:-vcf-services-ui:local}
@@ -79,6 +103,7 @@ services:
       - sync_state:/state:ro
       - ./config:/config
       - ./secrets/redis:/run/redis:ro
+      - ./secrets/sftp:/run/sftp-secrets
     networks:
       - control
     healthcheck:
@@ -116,6 +141,13 @@ volumes:
       type: ${DEPOT_VOLUME_TYPE:-none}
       o: ${DEPOT_VOLUME_OPTIONS:-bind}
       device: ${DEPOT_VOLUME_DEVICE:-/var/lib/vcf-services/depot}
+  backup_store:
+    name: ${BACKUP_VOLUME_NAME:-vcf-services-backup-store}
+    driver: local
+    driver_opts:
+      type: ${BACKUP_VOLUME_TYPE:-none}
+      o: ${BACKUP_VOLUME_OPTIONS:-bind}
+      device: ${BACKUP_VOLUME_DEVICE:-/var/lib/vcf-services/backup}
   vcfdt_state:
     name: vcf-services-vcfdt-state
     external: true
@@ -125,3 +157,6 @@ volumes:
     name: vcf-services-caddy-data
   caddy_config:
     name: vcf-services-caddy-config
+  sftp_host_keys:
+    name: vcf-services-sftp-host-keys
+    external: true
