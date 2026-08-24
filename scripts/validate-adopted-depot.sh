@@ -10,6 +10,9 @@ fail() {
 
 [ -d "$depot_root" ] || fail "$depot_root is not a directory"
 [ -d "$depot_root/PROD/COMP" ] || fail "$depot_root/PROD/COMP is missing; this does not look like a VCFDT depot"
+if ! resolved_depot_root="$(readlink -f "$depot_root")"; then
+	fail "$depot_root could not be resolved"
+fi
 
 if ! content_entry="$(find "$depot_root/PROD/COMP" -mindepth 1 \( -type f -o -type l \) -print -quit)"; then
 	fail "$depot_root/PROD/COMP could not be read"
@@ -17,25 +20,29 @@ fi
 [ -n "$content_entry" ] || fail "$depot_root/PROD/COMP contains no files or symlinks; this does not look like a populated VCFDT depot"
 
 if ! symlink_errors="$(find "$depot_root" -type l -exec sh -c '
+	resolved_depot_root="$1"
+	shift
 	for link do
 		target="$(readlink "$link")" || {
 			printf "%s cannot be read\n" "$link"
 			continue
 		}
-		case "$target" in
-			/*)
-				case "$target" in
-					/depot|/depot/*) ;;
-					*)
-						printf "%s points to %s; VCFDT absolute symlinks must stay under /depot\n" "$link" "$target"
-						continue
-						;;
-				esac
+		if [ ! -e "$link" ]; then
+			printf "%s points to %s, which does not resolve with the depot mounted at /depot\n" "$link" "$target"
+			continue
+		fi
+		resolved_target="$(readlink -f "$link")" || {
+			printf "%s points to %s, which does not resolve with the depot mounted at /depot\n" "$link" "$target"
+			continue
+		}
+		case "$resolved_target" in
+			"$resolved_depot_root"|"$resolved_depot_root"/*) ;;
+			*)
+				printf "%s points to %s, which resolves outside /depot as %s\n" "$link" "$target" "$resolved_target"
 				;;
 		esac
-		[ -e "$link" ] || printf "%s points to %s, which does not resolve with the depot mounted at /depot\n" "$link" "$target"
 	done
-' sh {} +)"; then
+' sh "$resolved_depot_root" {} +)"; then
 	fail "$depot_root could not be scanned for symlinks"
 fi
 

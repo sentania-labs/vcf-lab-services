@@ -29,11 +29,11 @@ provided-TLS validation including hostname coverage, key match, and expiry. It
 also covers SFTP port and UID:GID validation plus bound-port detection. The
 installer checks also mount valid-looking and invalid depot fixtures at
 `/depot` and prove that adoption rejects missing VCFDT structure, absolute
-symlinks rooted somewhere other than `/depot`, and dangling symlinks. The same
-test imports state from a directory and a Docker volume, verifies the Software
-Depot ID after copying, proves a rerun is idempotent, and proves that a
-conflicting target ID is preserved. The UI
-test covers next-run calculation in the configured timezone and the backup
+symlinks rooted somewhere other than `/depot`, normalized absolute and relative
+escapes, and dangling symlinks. The same test imports state from a directory
+and a Docker volume, verifies the Software Depot ID after copying, proves a
+rerun is idempotent, and proves that a conflicting target ID is preserved. The
+UI test covers next-run calculation in the configured timezone and the backup
 settings API: safe defaults that never return the password, refusal to enable
 backup without one, atomic settings and password writes, UID:GID and port
 validation, rejection of a backup path inside the depot or a `..` segment,

@@ -144,11 +144,29 @@ grep -q '/depot/PROD/COMP is missing' <<< "$invalid_error" \
 wrong_root_depot="$work_dir/wrong-root-depot"
 cp -a "$valid_depot" "$wrong_root_depot"
 rm "$wrong_root_depot/umds-patch-store"
-ln -s /old-vcfdt/depot/PROD/COMP/ESX_HOST/patch-store "$wrong_root_depot/umds-patch-store"
+ln -s /etc/passwd "$wrong_root_depot/umds-patch-store"
 wrong_root_error="$(validate_depot_fixture "$wrong_root_depot" 2>&1)" \
 	&& fail "adopted depot with an incompatible absolute symlink accepted"
-grep -q 'absolute symlinks must stay under /depot' <<< "$wrong_root_error" \
+grep -q 'resolves outside /depot' <<< "$wrong_root_error" \
 	|| fail "wrong-root symlink error did not explain the /depot constraint"
+
+absolute_escape_depot="$work_dir/absolute-escape-depot"
+cp -a "$valid_depot" "$absolute_escape_depot"
+rm "$absolute_escape_depot/umds-patch-store"
+ln -s /depot/../etc/passwd "$absolute_escape_depot/umds-patch-store"
+absolute_escape_error="$(validate_depot_fixture "$absolute_escape_depot" 2>&1)" \
+	&& fail "adopted depot with an absolute dot-dot symlink escape accepted"
+grep -q 'resolves outside /depot as /etc/passwd' <<< "$absolute_escape_error" \
+	|| fail "absolute dot-dot escape error did not name the resolved path"
+
+relative_escape_depot="$work_dir/relative-escape-depot"
+cp -a "$valid_depot" "$relative_escape_depot"
+rm "$relative_escape_depot/umds-patch-store"
+ln -s ../../etc/passwd "$relative_escape_depot/umds-patch-store"
+relative_escape_error="$(validate_depot_fixture "$relative_escape_depot" 2>&1)" \
+	&& fail "adopted depot with a relative symlink escape accepted"
+grep -q 'resolves outside /depot as /etc/passwd' <<< "$relative_escape_error" \
+	|| fail "relative escape error did not name the resolved path"
 
 dangling_depot="$work_dir/dangling-depot"
 cp -a "$valid_depot" "$dangling_depot"

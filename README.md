@@ -285,11 +285,12 @@ skips its free-space floor in adopt mode. `--min-free-gb` is not needed for an
 existing depot that is already close to full.
 
 The installer mounts both sources read-only for validation. A depot must have a
-populated `PROD/COMP` tree. Every symlink must resolve when the tree is mounted
-at `/depot`, and every absolute symlink must point to `/depot` or below it.
-VCFDT writes absolute symlinks, so a depot created at another container path is
-not eligible for adoption as-is. Validation failure names the first
-incompatible path and starts no service against it.
+populated `PROD/COMP` tree. Every absolute or relative symlink must resolve to
+`/depot` or below it when the tree is mounted there. Normalized targets that
+escape through `..` are rejected. VCFDT writes absolute symlinks, so a depot
+created at another container path is not eligible for adoption as-is.
+Validation failure names the first incompatible path and starts no service
+against it.
 
 To read a Software Depot ID, the installer copies the small state tree to a
 scratch volume it deletes afterwards and asks VCFDT for the ID there. Neither
