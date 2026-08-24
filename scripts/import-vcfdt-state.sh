@@ -9,6 +9,7 @@ target_volume="${4:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET
 state_dir=/root/.local/share/vmware/vdt
 staging_dir_name=.vcf-services-import-staging
 scratch_volume=""
+scratch_serial=0
 
 cleanup() {
 	if [ -n "$scratch_volume" ]; then
@@ -45,7 +46,8 @@ read_volume_machine_id() {
 
 reset_scratch_volume() {
 	cleanup
-	local name="vcf-services-vcfdt-state-probe-$$"
+	scratch_serial=$((scratch_serial + 1))
+	local name="vcf-services-vcfdt-state-probe-$$-$scratch_serial"
 	docker volume rm -f "$name" >/dev/null 2>&1 || true
 	docker volume create "$name" >/dev/null
 	scratch_volume="$name"
@@ -57,7 +59,14 @@ copy_state_to_scratch() {
 	docker run --rm --entrypoint /bin/sh \
 		--mount "$source_mount" \
 		--mount "type=volume,src=$scratch_volume,dst=/scratch" \
-		"$image" -c 'set -eu; cp -a "$1/." /scratch/' sh "$state_dir"
+		"$image" -c '
+			set -eu
+			if [ -n "$(find /scratch -mindepth 1 -print -quit)" ]; then
+				echo "ERROR: the VCFDT state inspection scratch volume was not empty" >&2
+				exit 1
+			fi
+			cp -a "$1/." /scratch/
+		' sh "$state_dir"
 }
 
 probe_machine_id() {
@@ -152,7 +161,18 @@ if [ "$source_probe_status" -ne 0 ]; then
 fi
 
 if docker volume inspect "$target_volume" >/dev/null 2>&1; then
-	target_status="$(volume_state_status "$target_volume")"
+	if ! target_status="$(volume_state_status "$target_volume")"; then
+		echo "ERROR: refusing to touch $target_volume because its contents could not be inspected." >&2
+		echo "       Confirm the Docker daemon is healthy and the volume is readable, then retry." >&2
+		exit 1
+	fi
+	case "$target_status" in
+		empty|partial|populated) ;;
+		*)
+			echo "ERROR: refusing to touch $target_volume because its state could not be classified." >&2
+			exit 1
+			;;
+	esac
 	if [ "$target_status" != empty ]; then
 		target_probe_status=0
 		target_machine_id="$(probe_machine_id volume "$target_volume")" || target_probe_status=$?
