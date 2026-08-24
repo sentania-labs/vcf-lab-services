@@ -166,9 +166,13 @@ by default.
 
 The admin console includes SFTP backup controls for enablement, password,
 UID:GID, port, and the shared local or NFS storage selection. Enablement,
-password, and UID:GID changes reload within five seconds. Port and storage
-changes are saved as desired settings but require rerunning `install.sh`, which
-performs the host port collision and mount checks before recreating services.
+password, and UID:GID changes reload within five seconds. Disabling the backup
+target stops the listener and terminates sessions that already authenticated,
+so an active transfer loses access rather than running to completion. If saving
+a settings change fails, the stored password is left unchanged, so the console
+and the running service cannot diverge. Port and storage changes are saved as
+desired settings but require rerunning `install.sh`, which performs the host
+port collision and mount checks before recreating services.
 
 ## TLS trust
 

@@ -30,8 +30,9 @@ also covers SFTP port and UID:GID validation plus bound-port detection. The UI
 test covers next-run calculation in the configured timezone and the backup
 settings API: safe defaults that never return the password, refusal to enable
 backup without one, atomic settings and password writes, UID:GID and port
-validation, rejection of a backup path inside the depot or a `..` segment, and
-preservation of the unused storage mode's paths. The compose test statically
+validation, rejection of a backup path inside the depot or a `..` segment,
+preservation of the unused storage mode's paths, and preservation of the stored
+SFTP password when a settings write fails. The compose test statically
 enforces the captain decisions: no Docker socket mount, no Docker client
 dependency, no macvlan, a non-published password-protected Redis service, only
 the configured HTTPS and alternate SFTP ports published, and directory-based
@@ -50,8 +51,9 @@ password-authenticated SFTP to an absolute `/mnt/backup/vcenter` path, rejects
 an incorrect password, verifies all three host-key types and logged
 fingerprints, proves the account cannot run a shell or a remote command, proves
 a UID:GID change re-owns the existing backup tree and records the persistent
-re-own marker, and proves those keys remain unchanged across container
-recreation.
+re-own marker, proves that disabling the service stops the listener and every
+already-authenticated session and that re-enabling brings the listener back,
+and proves those keys remain unchanged across container recreation.
 
 The release test dry-runs the versioned installation bundle, verifies its
 checksum and required entry points, and proves that the bundle consumes the
