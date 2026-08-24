@@ -157,11 +157,12 @@ reach; the sync service consumes those requests and runs `sync.sh` locally.
 No container mounts the Docker socket and the console has no Docker client.
 The bus contract is documented in [docs/redis-contract.md](docs/redis-contract.md).
 
-Sync settings hot-reload without recreating containers. The sync scheduler re-reads
-`config/settings.env` every cycle, so schedule changes take effect within a
-minute, and each run re-reads all sync settings. The only rebuild exception is
-a VCFDT self-upgrade, which is performed by rerunning `install.sh`, never by
-the GUI. HTTPS is served on a published host port, 443 by default.
+Sync settings hot-reload without recreating containers. The sync scheduler
+re-reads `config/settings.env` every cycle, so schedule changes take effect
+within a minute, and each run re-reads all sync settings. The only rebuild
+exception is a VCFDT self-upgrade, which is performed by rerunning
+`install.sh`, never by the GUI. HTTPS is served on a published host port, 443
+by default.
 
 The admin console includes SFTP backup controls for enablement, password,
 UID:GID, port, and the shared local or NFS storage selection. Enablement,
@@ -260,10 +261,9 @@ mirrored there and in the generated `.env` file.
 ## Scope
 
 This slice does not include a dedicated-IP or macvlan mode for SFTP, guided
-Supervisor or VKr content injection, VCFDT self-upgrade, or stack upgrade. Those
-features are
-planned without changing the depot persistence and config contracts
-established here.
+Supervisor or VKr content injection, VCFDT self-upgrade, or stack upgrade.
+Those features are planned without changing the depot persistence and config
+contracts established here.
 
 Release packaging, image names, and version authority are documented in
 [docs/releasing.md](docs/releasing.md).

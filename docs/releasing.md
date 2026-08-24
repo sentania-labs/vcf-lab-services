@@ -47,7 +47,7 @@ All container packages are intentionally public. This product is public and
 its installer pulls without any registry credentials, so a private package
 breaks every operator install. GHCR can create a package as private on its
 first publish, so the release workflow sets every package public through the
-GitHub API, hard-fails if either is not public, and proves a credential-free
+GitHub API, hard-fails if any of them is not public, and proves a credential-free
 pull before the GitHub release is created. The installer never carries registry
 credentials. If the workflow's token cannot change package visibility, add a
 `GHCR_VISIBILITY_TOKEN` repository secret with `admin:packages`, or set the
