@@ -10,7 +10,9 @@ The licensed VCF Download Tool is never included, downloaded, or redistributed
 by this project. You provide the archive obtained from the Broadcom support
 portal during installation.
 
-Run `./install.sh` for the first installation: `docker compose up` alone cannot work because the installer layers your operator-supplied licensed tool into a local image and creates its protected state volume.
+Run `./install.sh` for the first installation. `docker compose up` alone cannot
+work because the installer layers your operator-supplied licensed tool into a
+local image and creates its protected state volume.
 
 ## Requirements
 
