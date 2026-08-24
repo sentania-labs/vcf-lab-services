@@ -5,6 +5,14 @@ settings_file="${SETTINGS_FILE:-/config/settings.env}"
 password_file="${SFTP_PASSWORD_FILE:-/run/sftp-secrets/password}"
 backup_user=vcfbackup
 sshd_pid=""
+last_identity_warning=""
+
+warn_identity() {
+	if [ "$1" != "$last_identity_warning" ]; then
+		echo "WARNING: $1" >&2
+		last_identity_warning="$1"
+	fi
+}
 
 setting() {
 	key="$1"
@@ -26,7 +34,7 @@ validate_uid_gid() {
 apply_identity() {
 	uid_gid="$(setting SFTP_UID_GID 1003:1003)"
 	validate_uid_gid "$uid_gid" || {
-		echo "WARNING: SFTP_UID_GID must contain a non-root numeric UID:GID. Keeping the running identity." >&2
+		warn_identity "SFTP_UID_GID must contain a non-root numeric UID:GID. Keeping the running identity."
 		return 1
 	}
 	uid="${uid_gid%%:*}"
@@ -36,17 +44,17 @@ apply_identity() {
 		current_gid="$(getent group "$backup_user" | cut -d: -f3)"
 		if [ "$current_gid" != "$gid" ]; then
 			groupmod -g "$gid" "$backup_user" || {
-				echo "WARNING: could not move $backup_user to GID $gid. Retrying shortly." >&2
+				warn_identity "could not move $backup_user to GID $gid. Retrying every five seconds."
 				return 1
 			}
 		fi
 	else
 		if getent group "$gid" >/dev/null 2>&1; then
-			echo "WARNING: configured SFTP GID $gid is already assigned in the container" >&2
+			warn_identity "configured SFTP GID $gid is already assigned in the container"
 			return 1
 		fi
 		groupadd -g "$gid" "$backup_user" || {
-			echo "WARNING: could not create the $backup_user group with GID $gid. Retrying shortly." >&2
+			warn_identity "could not create the $backup_user group with GID $gid. Retrying every five seconds."
 			return 1
 		}
 	fi
@@ -55,26 +63,27 @@ apply_identity() {
 		current_uid="$(id -u "$backup_user")"
 		if [ "$current_uid" != "$uid" ]; then
 			usermod -u "$uid" "$backup_user" || {
-				echo "WARNING: could not move $backup_user to UID $uid, usually because a transfer is still running. Retrying shortly." >&2
+				warn_identity "could not move $backup_user to UID $uid, usually because a transfer is still running. Retrying every five seconds."
 				return 1
 			}
 		fi
 		usermod -g "$gid" -d /mnt/backup -s /bin/sh "$backup_user" || {
-			echo "WARNING: could not update the $backup_user account. Retrying shortly." >&2
+			warn_identity "could not update the $backup_user account. Retrying every five seconds."
 			return 1
 		}
 	else
 		if getent passwd "$uid" >/dev/null 2>&1; then
-			echo "WARNING: configured SFTP UID $uid is already assigned in the container" >&2
+			warn_identity "configured SFTP UID $uid is already assigned in the container"
 			return 1
 		fi
 		useradd -M -u "$uid" -g "$gid" -d /mnt/backup -s /bin/sh "$backup_user" || {
-			echo "WARNING: could not create the $backup_user account. Retrying shortly." >&2
+			warn_identity "could not create the $backup_user account. Retrying every five seconds."
 			return 1
 		}
 	fi
 	/usr/local/bin/sftp-own-backup.sh "$uid" "$gid" || true
 	last_uid_gid="$uid_gid"
+	last_identity_warning=""
 	return 0
 }
 

@@ -69,7 +69,9 @@ grep -q '^ForceCommand /usr/lib/openssh/sftp-server$' sftp/sshd_config \
 	|| fail "SFTP must force file transfer only, with no shell or remote command"
 grep -q 'sftp-own-backup.sh' sftp/entrypoint.sh || fail "SFTP must re-own the backup tree on a UID:GID change"
 grep -q 'sftp-own-backup.sh' install.sh || fail "installer and service must share one re-own implementation"
-grep -q 'backup-owner' sftp/own-backup.sh || fail "re-own must be keyed on a persistent marker, not the mount root owner"
+grep -q 'backup-owner' sftp/own-backup.sh || fail "re-own needs a persistent marker"
+grep -q 'storage_id' sftp/own-backup.sh || fail "the re-own marker must be keyed to the backup storage"
+grep -q 'warn_identity' sftp/entrypoint.sh || fail "identity retry warnings must be deduplicated"
 grep -q -- '--min-backup-free-gb' install.sh || fail "installer must offer an opt-in backup free-space floor"
 ! grep -q 'depot_local_path/backup' install.sh || fail "backup storage must not nest inside the depot tree"
 grep -q 'paths_are_disjoint "\$depot_local_path" "\$backup_local_path"' install.sh \

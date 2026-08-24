@@ -19,16 +19,22 @@ esac
 }
 
 desired="$uid:$gid"
-attempted=""
-outcome=""
+storage_id="$(stat -c '%d:%i' "$backup_root")"
+current_owner="$(stat -c '%u:%g' "$backup_root")"
+
+marker_storage=""
+marker_identity=""
+marker_outcome=""
 if [ -r "$marker_file" ]; then
-	attempted="$(head -n 1 "$marker_file" 2>/dev/null | cut -d' ' -f1 || true)"
-	outcome="$(head -n 1 "$marker_file" 2>/dev/null | cut -d' ' -f2 || true)"
+	marker_line="$(head -n 1 "$marker_file" 2>/dev/null || true)"
+	marker_storage="$(printf '%s' "$marker_line" | cut -d' ' -f1)"
+	marker_identity="$(printf '%s' "$marker_line" | cut -d' ' -f2)"
+	marker_outcome="$(printf '%s' "$marker_line" | cut -d' ' -f3)"
 fi
 
 record_attempt() {
 	mkdir -p "$(dirname "$marker_file")" 2>/dev/null || return 0
-	printf '%s %s\n' "$desired" "$1" > "$marker_file" 2>/dev/null || return 0
+	printf '%s %s %s\n' "$storage_id" "$desired" "$1" > "$marker_file" 2>/dev/null || return 0
 	chmod 0644 "$marker_file" 2>/dev/null || true
 }
 
@@ -38,12 +44,16 @@ warn_unownable() {
 	echo "         then restart the sftp-backup service." >&2
 }
 
-if [ "$attempted" = "$desired" ]; then
-	if [ "$outcome" = failed ]; then
-		warn_unownable
-		exit 1
-	fi
+if [ "$current_owner" = "$desired" ]; then
+	record_attempt ok
 	exit 0
+fi
+
+if [ "$marker_storage" = "$storage_id" ] \
+	&& [ "$marker_identity" = "$desired" ] \
+	&& [ "$marker_outcome" = failed ]; then
+	warn_unownable
+	exit 1
 fi
 
 if chown -R "$desired" "$backup_root" 2>/dev/null; then

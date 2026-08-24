@@ -16,6 +16,7 @@ cleanup() {
 	fi
 	docker rm -f "$container" >/dev/null 2>&1 || true
 	docker volume rm "$backup_volume" "$key_volume" >/dev/null 2>&1 || true
+	docker volume rm "vcf-services-sftp-test-backup2-$suffix" >/dev/null 2>&1 || true
 	docker image rm "$image" >/dev/null 2>&1 || true
 	rm -rf "$work_dir"
 }
@@ -109,7 +110,22 @@ done
 [ "$owner" = "1005:1005" ] || fail "changed UID:GID did not re-own the existing backup tree (saw $owner)"
 marker="$(docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:ro" "$image" \
 	-c 'cat /keys/backup-owner')"
-[ "$marker" = "1005:1005 ok" ] || fail "re-own marker was not recorded (saw $marker)"
+case "$marker" in
+	*' 1005:1005 ok') ;;
+	*) fail "re-own marker was not recorded against the backup storage (saw $marker)" ;;
+esac
+
+relocated_volume="vcf-services-sftp-test-backup2-$suffix"
+docker volume create "$relocated_volume" >/dev/null
+docker run --rm --entrypoint /usr/local/bin/sftp-own-backup.sh \
+	-v "$relocated_volume:/mnt/backup:rw" -v "$key_volume:/etc/ssh/keys:rw" \
+	"$image" 1005 1005 >/dev/null \
+	|| fail "a relocated backup store was not re-owned"
+relocated_owner="$(docker run --rm --entrypoint /bin/sh -v "$relocated_volume:/mnt/backup:ro" "$image" \
+	-c 'stat -c "%u:%g" /mnt/backup')"
+docker volume rm "$relocated_volume" >/dev/null
+[ "$relocated_owner" = "1005:1005" ] \
+	|| fail "stale marker blocked the re-own of a new backup location (saw $relocated_owner)"
 SSHPASS=sftp-test-password docker run --rm --network host --entrypoint /bin/sh \
 	-e SSHPASS -e "SFTP_PORT=$host_port" -v "$work_dir:/work:ro" "$image" \
 	-c 'printf "put /work/payload.txt /mnt/backup/vcenter/reowned.txt\nbye\n" | \

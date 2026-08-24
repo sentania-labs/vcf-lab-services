@@ -106,12 +106,15 @@ the external OpenSSH `sftp-server` subsystem and password authentication, and
 `ForceCommand` restricts the account to file transfer, so the password grants no
 shell or remote command execution. The installer prepares the component
 directories using the configured numeric identity, default `1003:1003`. The
-installer and the service share one re-own implementation keyed on a persistent
-marker in the host-keys volume, so a UID:GID change from the admin console
-re-owns the backup tree once and a restart never rewalks it. Where the storage
-refuses an ownership change, such as an NFS export with `root_squash`, the
-service logs the required owner instead and the change is not retried until the
-setting changes again.
+installer and the service share one re-own implementation: it compares the
+backup root's actual owner first, and consults a marker keyed to both the
+storage and the identity only to avoid rewalking a tree whose ownership the
+storage already refused. A UID:GID change from the admin console re-owns the
+tree once, a restart never rewalks it, and pointing the installer at a new
+backup location re-owns that location. Where the storage refuses an ownership
+change, such as an NFS export with `root_squash`, the service logs the required
+owner; once that owner is set on the storage side the next start clears the
+warning on its own.
 
 ECDSA, Ed25519, and RSA host keys are generated once in the external
 `vcf-services-sftp-host-keys` volume. Every container start prints all three
