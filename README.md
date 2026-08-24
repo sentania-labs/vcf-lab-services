@@ -145,14 +145,21 @@ install -m 0644 /tmp/vcf-services-depot.pem \
 
 Repeat the `install` command for each root and intermediate file when using a
 supplied certificate. Verify the trust from the UMDS host against the
-unauthenticated health route, without an insecure TLS option:
+unauthenticated health route, without an insecure TLS option. Use
+`https://<PRODUCT_FQDN>/healthz` when HTTPS uses port 443, and
+`https://<PRODUCT_FQDN>:<HTTPS_PORT>/healthz` for any other configured port:
 
 ```bash
+# HTTPS on the default port 443
 curl --fail --show-error https://vcf-services.example.com/healthz
+
+# HTTPS on a nonstandard port, for example 8443
+curl --fail --show-error https://vcf-services.example.com:8443/healthz
 ```
 
 An `ok` response means UMDS will accept the depot certificate. A TLS error means
-the trust store still lacks the certificate.
+the trust store still lacks the certificate. A connection refused or timeout
+means the URL is using the wrong port, not that the certificate is untrusted.
 
 Then configure UMDS with the patch-store base URL.
 The URL is `https://<PRODUCT_FQDN>/umds-patch-store/` when HTTPS uses port 443.
