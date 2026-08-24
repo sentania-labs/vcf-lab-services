@@ -405,12 +405,16 @@ if [ "$storage_mode" = local ]; then
 	if [ "$adopt_mode" = false ]; then
 		mkdir -p "$depot_local_path"
 	fi
-	available_kb="$(df -Pk "$depot_local_path" | awk 'NR==2 {print $4}')"
-	minimum_kb=$((minimum_free_gb * 1024 * 1024))
-	[ "$available_kb" -ge "$minimum_kb" ] || {
-		echo "ERROR: depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
-		exit 1
-	}
+	if [ "$adopt_mode" = true ]; then
+		echo "Adoption reuses existing depot content; skipping the ${minimum_free_gb} GB free-space floor"
+	else
+		available_kb="$(df -Pk "$depot_local_path" | awk 'NR==2 {print $4}')"
+		minimum_kb=$((minimum_free_gb * 1024 * 1024))
+		[ "$available_kb" -ge "$minimum_kb" ] || {
+			echo "ERROR: depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
+			exit 1
+		}
+	fi
 else
 	preflight_volume="vcf-services-nfs-preflight-$$"
 	docker volume create --driver local --opt type=nfs \
@@ -422,12 +426,16 @@ else
 		echo "ERROR: NFS export could not be mounted" >&2
 		exit 1
 	fi
-	minimum_kb=$((minimum_free_gb * 1024 * 1024))
-	[ "$available_kb" -ge "$minimum_kb" ] || {
-		docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
-		echo "ERROR: NFS depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
-		exit 1
-	}
+	if [ "$adopt_mode" = true ]; then
+		echo "Adoption reuses existing depot content; skipping the ${minimum_free_gb} GB free-space floor"
+	else
+		minimum_kb=$((minimum_free_gb * 1024 * 1024))
+		[ "$available_kb" -ge "$minimum_kb" ] || {
+			docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
+			echo "ERROR: NFS depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
+			exit 1
+		}
+	fi
 fi
 
 if [ "$adopt_mode" = true ]; then

@@ -140,11 +140,41 @@ state_test_volumes+=("$volume_source" "$volume_target")
 docker volume create "$volume_source" >/dev/null
 docker run --rm --entrypoint /bin/sh \
 	--mount "type=volume,src=$volume_source,dst=/state" \
-	"$state_test_image" -c "printf '%s\\n' '22222222-2222-4222-8222-222222222222' > /state/machine_id"
+	"$state_test_image" -c "printf '%s\\n' '22222222-2222-4222-8222-222222222222' > /state/machine_id
+printf 'source remains read-only\\n' > /state/source-marker"
+volume_source_digest() {
+	docker run --rm --entrypoint /bin/sh \
+		--mount "type=volume,src=$volume_source,dst=/state,readonly" \
+		"$state_test_image" -c 'cd /state && find . | sort | sha256sum && cat ./machine_id ./source-marker'
+}
+volume_source_state="$(volume_source_digest)"
 volume_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
 	"$state_test_image" volume "$volume_source" "$volume_target" 2>/dev/null)"
 [ "$volume_id" = '22222222-2222-4222-8222-222222222222' ] \
 	|| fail "Docker volume state import returned the wrong Software Depot ID"
+[ "$(volume_source_digest)" = "$volume_source_state" ] \
+	|| fail "Docker volume state source changed during import"
+imported_marker="$(docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$volume_target,dst=/state,readonly" \
+	"$state_test_image" -c 'cat /state/source-marker; find /state -mindepth 1 -name ".vcf-services-import-staging"')"
+[ "$imported_marker" = 'source remains read-only' ] \
+	|| fail "Docker volume state import did not land a complete staged tree"
+
+partial_target="vcf-services-state-import-partial-$$"
+state_test_volumes+=("$partial_target")
+docker volume create "$partial_target" >/dev/null
+docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$partial_target,dst=/state" \
+	"$state_test_image" -c "mkdir -p /state/.vcf-services-import-staging
+printf '%s\\n' '22222222-2222-4222-8222-222222222222' > /state/machine_id"
+partial_id="$("$project_dir/scripts/import-vcfdt-state.sh" \
+	"$state_test_image" volume "$volume_source" "$partial_target" 2>/dev/null)"
+[ "$partial_id" = '22222222-2222-4222-8222-222222222222' ] \
+	|| fail "rerun after an incomplete state import did not recover"
+partial_leftover="$(docker run --rm --entrypoint /bin/sh \
+	--mount "type=volume,src=$partial_target,dst=/state,readonly" \
+	"$state_test_image" -c 'find /state -mindepth 1 -name ".vcf-services-import-staging"')"
+[ -z "$partial_leftover" ] || fail "incomplete state import staging directory survived a rerun"
 
 conflict_source="$work_dir/conflict-state"
 mkdir -p "$conflict_source"

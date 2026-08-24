@@ -142,6 +142,10 @@ existing depot root. For NFS, set `STORAGE_MODE=nfs`, `NFS_SERVER`,
 volume must contain the contents normally mounted at
 `/root/.local/share/vmware/vdt`, not its parent directory.
 
+Adoption reuses depot content that is already downloaded, so the installer
+skips its free-space floor in adopt mode. `--min-free-gb` is not needed for an
+existing depot that is already close to full.
+
 The installer mounts both sources read-only for validation. A depot must have a
 populated `PROD/COMP` tree. Every symlink must resolve when the tree is mounted
 at `/depot`, and every absolute symlink must point to `/depot` or below it.
@@ -149,11 +153,17 @@ VCFDT writes absolute symlinks, so a depot created at another container path is
 not eligible for adoption as-is. Validation failure names the first
 incompatible path and starts no service against it.
 
+To read the source Software Depot ID, the installer copies the small state tree
+to a scratch volume it deletes afterwards and asks VCFDT for the ID there, so
+the tool never writes into the operator's source.
+
 After both sources pass validation, the installer copies only the small VCFDT
 state into the fixed `vcf-services-vcfdt-state` volume, reads the imported
 Software Depot ID back through VCFDT, and requires it to match the source. It
-does not copy or write depot content. A rerun with the same imported ID skips
-the copy. If the fixed volume is non-empty and contains a different or
+does not copy or write depot content. The copy lands in a staging directory
+inside the fixed volume and is moved into place last, so an interrupted or
+failed import is cleared and retried on the next run instead of leaving a
+half-imported state behind. A rerun with the same imported ID skips the copy. If the fixed volume is non-empty and contains a different or
 unreadable ID, the installer refuses to overwrite it so an existing activation
 cannot be lost.
 

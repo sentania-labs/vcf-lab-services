@@ -6,31 +6,84 @@ source_kind="${2:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET_V
 source_value="${3:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET_VOLUME}"
 target_volume="${4:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET_VOLUME}"
 
+state_dir=/root/.local/share/vmware/vdt
+staging_dir_name=.vcf-services-import-staging
+scratch_volume=""
+
+cleanup() {
+	if [ -n "$scratch_volume" ]; then
+		docker volume rm -f "$scratch_volume" >/dev/null 2>&1 || true
+		scratch_volume=""
+	fi
+}
+trap cleanup EXIT
+
 state_mount_spec() {
-	local state_kind="$1" state_source="$2"
+	local state_kind="$1" state_source="$2" access="${3:-readonly}" suffix=""
+	[ "$access" = readonly ] && suffix=',readonly'
 	case "$state_kind" in
-		directory) printf 'type=bind,src=%s,dst=/root/.local/share/vmware/vdt,readonly' "$state_source" ;;
-		volume) printf 'type=volume,src=%s,dst=/root/.local/share/vmware/vdt,readonly' "$state_source" ;;
+		directory) printf 'type=bind,src=%s,dst=%s%s' "$state_source" "$state_dir" "$suffix" ;;
+		volume) printf 'type=volume,src=%s,dst=%s%s' "$state_source" "$state_dir" "$suffix" ;;
 		*) echo "ERROR: unsupported VCFDT state source type: $state_kind" >&2; return 1 ;;
 	esac
 }
 
-read_state_machine_id() {
-	local state_kind="$1" state_source="$2" mount_spec output machine_id
-	mount_spec="$(state_mount_spec "$state_kind" "$state_source")" || return 1
-	output="$(docker run --rm \
-		--entrypoint /opt/vcfdt/bin/vcf-download-tool \
-		--mount "$mount_spec" \
-		"$image" configuration get --machineId)" || return 1
-	machine_id="$(printf '%s\n' "$output" | tr -d '\r' | sed -n '/[^[:space:]]/h; ${x;p;}')"
-	[ -n "$machine_id" ] || return 1
-	printf '%s\n' "$machine_id"
+read_volume_machine_id() {
+	local state_volume="$1" access output machine_id
+	for access in readonly writable; do
+		output="$(docker run --rm \
+			--entrypoint /opt/vcfdt/bin/vcf-download-tool \
+			--mount "$(state_mount_spec volume "$state_volume" "$access")" \
+			"$image" configuration get --machineId)" || continue
+		machine_id="$(printf '%s\n' "$output" | tr -d '\r' | sed -n '/[^[:space:]]/h; ${x;p;}')"
+		[ -n "$machine_id" ] || continue
+		printf '%s\n' "$machine_id"
+		return 0
+	done
+	return 1
 }
 
-state_volume_empty() {
+copy_state_into_volume() {
+	local state_kind="$1" state_source="$2" destination_volume="$3" source_mount
+	source_mount="$(state_mount_spec "$state_kind" "$state_source" readonly)" || return 1
+	docker run --rm --entrypoint /bin/sh \
+		--mount "$source_mount" \
+		--mount "type=volume,src=$destination_volume,dst=/imported-state" \
+		"$image" -c '
+			set -eu
+			rm -rf "/imported-state/$1"
+			[ -z "$(find /imported-state -mindepth 1 -print -quit)" ]
+			mkdir "/imported-state/$1"
+			cp -a "$2/." "/imported-state/$1/"
+			cd "/imported-state/$1"
+			for entry in * .[!.]* ..?*; do
+				[ -e "$entry" ] || [ -L "$entry" ] || continue
+				mv -- "$entry" /imported-state/
+			done
+			cd /
+			rmdir "/imported-state/$1"
+		' sh "$staging_dir_name" "$state_dir"
+}
+
+volume_state_status() {
 	docker run --rm --entrypoint /bin/sh \
 		--mount "type=volume,src=$1,dst=/state,readonly" \
-		"$image" -c '[ -z "$(find /state -mindepth 1 -print -quit)" ]'
+		"$image" -c '
+			set -eu
+			if [ -e "/state/$1" ]; then
+				echo partial
+			elif [ -z "$(find /state -mindepth 1 -print -quit)" ]; then
+				echo empty
+			else
+				echo populated
+			fi
+		' sh "$staging_dir_name"
+}
+
+empty_volume() {
+	docker run --rm --entrypoint /bin/sh \
+		--mount "type=volume,src=$1,dst=/state" \
+		"$image" -c 'set -eu; find /state -mindepth 1 -delete'
 }
 
 [[ "$target_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]+$ ]] || {
@@ -43,17 +96,28 @@ if [ "$source_kind" = volume ] && [ "$source_value" = "$target_volume" ]; then
 fi
 
 echo "Validating the existing VCFDT state read-only" >&2
-if ! source_machine_id="$(read_state_machine_id "$source_kind" "$source_value" 2>/dev/null)"; then
+scratch_volume="vcf-services-vcfdt-state-probe-$$"
+docker volume rm -f "$scratch_volume" >/dev/null 2>&1 || true
+docker volume create "$scratch_volume" >/dev/null
+if ! copy_state_into_volume "$source_kind" "$source_value" "$scratch_volume" >/dev/null 2>&1 \
+	|| ! source_machine_id="$(read_volume_machine_id "$scratch_volume" 2>/dev/null)"; then
 	echo "ERROR: the VCFDT state source does not contain readable machine-ID state." >&2
-	echo "       Point at the directory or volume mounted at /root/.local/share/vmware/vdt" >&2
+	echo "       Point at the directory or volume mounted at $state_dir" >&2
 	echo "       in the existing deployment. The source was mounted read-only and was not changed." >&2
 	exit 1
 fi
+cleanup
 
 if docker volume inspect "$target_volume" >/dev/null 2>&1; then
-	if state_volume_empty "$target_volume"; then
+	target_status="$(volume_state_status "$target_volume")"
+	if [ "$target_status" = partial ]; then
+		echo "Clearing an incomplete earlier VCFDT state import from $target_volume" >&2
+		empty_volume "$target_volume"
+		target_status=empty
+	fi
+	if [ "$target_status" = empty ]; then
 		:
-	elif target_machine_id="$(read_state_machine_id volume "$target_volume" 2>/dev/null)"; then
+	elif target_machine_id="$(read_volume_machine_id "$target_volume" 2>/dev/null)"; then
 		if [ "$target_machine_id" = "$source_machine_id" ]; then
 			echo "The target VCFDT state volume already contains the adopted Software Depot ID; no copy is needed." >&2
 			printf '%s\n' "$target_machine_id"
@@ -73,22 +137,20 @@ else
 	docker volume create "$target_volume" >/dev/null
 fi
 
-source_mount="$(state_mount_spec "$source_kind" "$source_value")"
 echo "Importing the verified VCFDT state into $target_volume" >&2
-if ! docker run --rm --entrypoint /bin/sh \
-	--mount "$source_mount" \
-	--mount "type=volume,src=$target_volume,dst=/imported-state" \
-	"$image" -c \
-	'set -eu; [ -z "$(find /imported-state -mindepth 1 -print -quit)" ]; cp -a /root/.local/share/vmware/vdt/. /imported-state/'; then
+if ! copy_state_into_volume "$source_kind" "$source_value" "$target_volume"; then
+	empty_volume "$target_volume" >/dev/null 2>&1 || true
 	echo "ERROR: VCFDT state import failed. No service has been started against the target volume." >&2
 	exit 1
 fi
 
-if ! target_machine_id="$(read_state_machine_id volume "$target_volume" 2>/dev/null)"; then
+if ! target_machine_id="$(read_volume_machine_id "$target_volume" 2>/dev/null)"; then
+	empty_volume "$target_volume" >/dev/null 2>&1 || true
 	echo "ERROR: imported VCFDT state failed machine-ID verification. No service has been started." >&2
 	exit 1
 fi
 if [ "$target_machine_id" != "$source_machine_id" ]; then
+	empty_volume "$target_volume" >/dev/null 2>&1 || true
 	echo "ERROR: imported Software Depot ID does not match the source. No service has been started." >&2
 	exit 1
 fi
