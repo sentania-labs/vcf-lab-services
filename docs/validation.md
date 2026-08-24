@@ -28,13 +28,14 @@ The UI test covers next-run calculation in the configured timezone. The compose 
 decisions: no Docker socket mount, no Docker client dependency, no macvlan, a
 non-published password-protected Redis service, published-HTTPS-port-only
 networking, and directory-based config mounts compatible with atomic settings
-replacement. It also drives `compose.sh` against a stubbed `docker` to prove the
-startup preflight names each missing install-created prerequisite, points the
-operator at `install.sh`, blames a stopped daemon separately, and still passes
-day-to-day commands straight through. Live Redis authentication and
-non-exposure are also hard gates in `install.sh`. The stub is test-only and is not copied into a
-product image unless an operator explicitly supplies its generated archive to
-the installer.
+replacement. It also drives `compose.sh` against a stubbed `docker` to prove
+the startup preflight names each missing install-created prerequisite, points
+the operator at `install.sh`, blames a stopped daemon separately, still
+preflights when Compose global options precede the `up` command, and passes
+day-to-day commands and all original arguments straight through. Live Redis
+authentication and non-exposure are also hard gates in `install.sh`. The stub
+is test-only and is not copied into a product image unless an operator
+explicitly supplies its generated archive to the installer.
 
 The release test dry-runs the versioned installation bundle, verifies its
 checksum and required entry points, and proves that the bundle consumes the

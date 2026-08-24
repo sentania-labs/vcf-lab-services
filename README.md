@@ -79,9 +79,10 @@ credential configured by the installer.
 ## Operations
 
 If you need to start the stack manually after installation, use
-`./compose.sh up -d`. It checks the install-created state volume and local sync
-image before invoking Compose. The normal day-to-day commands remain direct
-Compose commands:
+`./compose.sh up -d`. It checks that the Docker daemon is reachable and that
+the install-created state volume and local sync image exist before invoking
+Compose with your original arguments. The normal day-to-day commands remain
+direct Compose commands:
 
 ```bash
 docker compose ps
