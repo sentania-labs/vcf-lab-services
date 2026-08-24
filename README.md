@@ -288,9 +288,13 @@ The installer mounts both sources read-only for validation. A depot must have a
 populated `PROD/COMP` tree. Every absolute or relative symlink must resolve to
 `/depot` or below it when the tree is mounted there. Normalized targets that
 escape through `..` are rejected. VCFDT writes absolute symlinks, so a depot
-created at another container path is not eligible for adoption as-is.
-Validation failure names the first incompatible path and starts no service
-against it.
+created at another container path is not eligible for adoption as-is. A broken
+symlink whose normalized target still stays inside `/depot` is reported as a
+warning and adoption continues, because it is incomplete depot data rather than
+a containment breach. The installer scans the whole tree in one pass and lists
+every offending path, grouped so escaping links are separate from broken
+internal links, and starts no service against a depot that has any escaping or
+unreadable link.
 
 To read a Software Depot ID, the installer copies the small state tree to a
 scratch volume it deletes afterwards and asks VCFDT for the ID there. Neither

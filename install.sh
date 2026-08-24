@@ -325,6 +325,12 @@ if [ "$storage_mode" = local ]; then
 			exit 2
 		}
 		depot_local_path="$(realpath -e "$depot_local_path")"
+		case "$depot_local_path" in
+			*,*|*=*)
+				echo "ERROR: adopted local depot path may not contain ',' or '=' because Docker's mount syntax cannot parse it: $depot_local_path" >&2
+				exit 2
+				;;
+		esac
 	else
 		depot_local_path="$(realpath -m "$depot_local_path")"
 	fi
@@ -506,6 +512,30 @@ if [ -n "$sftp_password" ]; then
 	sftp_password=""
 fi
 
+stage_dir=""
+transient_volumes=()
+cleanup_transient() {
+	local volume
+	for volume in ${transient_volumes[@]+"${transient_volumes[@]}"}; do
+		docker volume rm "$volume" >/dev/null 2>&1 || true
+	done
+	transient_volumes=()
+	[ -z "$stage_dir" ] || rm -rf "$stage_dir"
+}
+trap cleanup_transient EXIT
+
+track_transient_volume() {
+	transient_volumes+=("$1")
+}
+
+drop_transient_volume() {
+	local kept=() volume
+	for volume in ${transient_volumes[@]+"${transient_volumes[@]}"}; do
+		[ "$volume" = "$1" ] || kept+=("$volume")
+	done
+	transient_volumes=(${kept[@]+"${kept[@]}"})
+}
+
 if [ "$storage_mode" = local ]; then
 	mkdir -p "$backup_local_path"
 	if [ "$adopt_mode" = false ]; then
@@ -529,9 +559,9 @@ else
 	docker volume create --driver local --opt type=nfs \
 		--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$nfs_export" \
 		"$preflight_volume" >/dev/null
+	track_transient_volume "$preflight_volume"
 	if ! available_kb="$(docker run --rm -v "$preflight_volume:/depot:ro" alpine:3.20 \
 		sh -c "df -Pk /depot | awk 'NR==2 {print \$4}'")"; then
-		docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
 		echo "ERROR: NFS export could not be mounted" >&2
 		exit 1
 	fi
@@ -539,15 +569,16 @@ else
 	docker volume create --driver local --opt type=nfs \
 		--opt "o=addr=$nfs_server,$nfs_options" --opt "device=:$backup_nfs_export" \
 		"$backup_preflight_volume" >/dev/null
+	track_transient_volume "$backup_preflight_volume"
 	if ! backup_available_kb="$(docker run --rm --user "$sftp_uid:$sftp_gid" \
 		-v "$backup_preflight_volume:/storage:rw" alpine:3.20 \
 		sh -c "test -w /storage && df -Pk /storage | awk 'NR==2 {print \$4}'")"; then
-		docker volume rm "$backup_preflight_volume" >/dev/null 2>&1 || true
 		echo "ERROR: SFTP UID:GID $sftp_uid_gid cannot write $backup_nfs_export." >&2
 		echo "       Confirm the backup NFS export ownership and that it permits the Docker host." >&2
 		exit 1
 	fi
 	docker volume rm "$backup_preflight_volume" >/dev/null
+	drop_transient_volume "$backup_preflight_volume"
 	check_backup_free_space "$backup_available_kb" "$backup_nfs_export" \
 		"$backup_minimum_free_gb" "$backup_advisory_free_gb" || exit 1
 	if [ "$adopt_mode" = true ]; then
@@ -555,7 +586,6 @@ else
 	else
 		minimum_kb=$((minimum_free_gb * 1024 * 1024))
 		[ "$available_kb" -ge "$minimum_kb" ] || {
-			docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
 			echo "ERROR: NFS depot has less than ${minimum_free_gb} GB free. Override only after reviewing capacity." >&2
 			exit 1
 		}
@@ -564,29 +594,30 @@ fi
 
 if [ "$adopt_mode" = true ]; then
 	echo "Validating the existing depot read-only at /depot"
+	case "$project_dir" in
+		*,*|*=*)
+			echo "ERROR: install directory may not contain ',' or '=' because Docker's mount syntax cannot parse it: $project_dir" >&2
+			exit 2
+			;;
+	esac
 	validator_mount="type=bind,src=$project_dir/scripts/validate-adopted-depot.sh,dst=/validate-adopted-depot.sh,readonly"
 	if [ "$storage_mode" = local ]; then
 		depot_validation_mount="type=bind,src=$depot_local_path,dst=/depot,readonly"
-		if ! docker run --rm --mount "$depot_validation_mount" --mount "$validator_mount" \
-			alpine:3.20 sh /validate-adopted-depot.sh /depot; then
-			exit 1
-		fi
 	else
 		depot_validation_mount="type=volume,src=$preflight_volume,dst=/depot,readonly"
-		if ! docker run --rm --mount "$depot_validation_mount" --mount "$validator_mount" \
-			alpine:3.20 sh /validate-adopted-depot.sh /depot; then
-			docker volume rm "$preflight_volume" >/dev/null 2>&1 || true
-			exit 1
-		fi
+	fi
+	if ! docker run --rm --mount "$depot_validation_mount" --mount "$validator_mount" \
+		alpine:3.20 sh /validate-adopted-depot.sh /depot; then
+		exit 1
 	fi
 fi
 if [ "$storage_mode" = nfs ]; then
 	docker volume rm "$preflight_volume" >/dev/null
+	drop_transient_volume "$preflight_volume"
 fi
 
 echo "Staging the licensed VCF Download Tool locally"
 stage_dir="$(mktemp -d /tmp/vcf-services-vcfdt.XXXXXX)"
-trap 'rm -rf "$stage_dir"' EXIT
 case "$vcfdt_archive" in
 	*.tar.gz|*.tgz) tar -xzf "$vcfdt_archive" -C "$stage_dir" ;;
 	*.zip) unzip -q "$vcfdt_archive" -d "$stage_dir" ;;

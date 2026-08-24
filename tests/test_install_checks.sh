@@ -172,10 +172,34 @@ dangling_depot="$work_dir/dangling-depot"
 cp -a "$valid_depot" "$dangling_depot"
 rm "$dangling_depot/umds-patch-store"
 ln -s /depot/PROD/COMP/missing "$dangling_depot/umds-patch-store"
-dangling_error="$(validate_depot_fixture "$dangling_depot" 2>&1)" \
-	&& fail "adopted depot with a dangling /depot symlink accepted"
-grep -q 'does not resolve with the depot mounted at /depot' <<< "$dangling_error" \
-	|| fail "dangling symlink error did not explain the resolution failure"
+ln -s ../missing-relative "$dangling_depot/PROD/COMP/dangling-relative"
+dangling_output="$(validate_depot_fixture "$dangling_depot" 2>&1)" \
+	|| fail "dangling but contained symlinks must warn, not fail adoption"
+grep -q '^WARNING' <<< "$dangling_output" \
+	|| fail "dangling contained symlink did not warn"
+grep -q '/depot/umds-patch-store points to /depot/PROD/COMP/missing' <<< "$dangling_output" \
+	|| fail "dangling absolute symlink was not reported"
+grep -q '/depot/PROD/COMP/dangling-relative points to ../missing-relative' <<< "$dangling_output" \
+	|| fail "dangling relative symlink was not reported"
+grep -q 'Adopted depot validation passed' <<< "$dangling_output" \
+	|| fail "adoption did not proceed past dangling but contained symlinks"
+
+multi_escape_depot="$work_dir/multi-escape-depot"
+cp -a "$valid_depot" "$multi_escape_depot"
+rm "$multi_escape_depot/umds-patch-store"
+ln -s /depot/../etc/passwd "$multi_escape_depot/umds-patch-store"
+ln -s ../../../etc/hostname "$multi_escape_depot/PROD/COMP/second-escape"
+ln -s /depot/PROD/COMP/missing "$multi_escape_depot/PROD/COMP/inside-dangling"
+multi_escape_error="$(validate_depot_fixture "$multi_escape_depot" 2>&1)" \
+	&& fail "adopted depot with multiple symlink escapes accepted"
+grep -q '/depot/umds-patch-store points to /depot/../etc/passwd' <<< "$multi_escape_error" \
+	|| fail "first escaping symlink missing from the report"
+grep -q '/depot/PROD/COMP/second-escape points to ../../../etc/hostname' <<< "$multi_escape_error" \
+	|| fail "second escaping symlink missing from the report; validation stopped early"
+grep -q '2 symlink(s) resolve outside /depot' <<< "$multi_escape_error" \
+	|| fail "escaping symlinks were not counted as a group"
+grep -q 'inside-dangling' <<< "$multi_escape_error" \
+	|| fail "dangling internal symlink missing from the grouped report"
 echo "adopted depot validation tests passed"
 
 docker build -q -t "$state_test_image" "$project_dir/tests/fixtures/vcfdt-state-tool" >/dev/null
