@@ -17,6 +17,11 @@ docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:local \
   python tests/test_ui.py
 ```
 
+These shell tests need a working Docker daemon and a host `python3`: the
+install checks exercise depot and state adoption in real containers, and the
+release test drives the interactive adoption prompt over a pseudo-terminal
+through `tests/pty-run.py`.
+
 The repository stub covers installer archive validation, persistent machine-ID
 storage, dormant operation, per-target sequencing after a failure, state JSON,
 log retention, version parsing, HTTPS authentication, the open UMDS route, and
@@ -44,15 +49,15 @@ reimported from the source rather than declared complete, a volume holding only
 an abandoned staging directory is cleared and retried, a copy failure leaves no
 half-imported content in a volume this run created, and a target holding a
 different ID is refused before any copy is attempted, with its contents
-untouched. The release test proves non-interactive adoption refuses
-to proceed without an explicit previous-writer shutdown assertion and that
+untouched. The release test proves non-interactive adoption refuses to proceed
+without an explicit previous-writer shutdown assertion and that
 `--confirm-old-writer-stopped` advances only scripted adoption. It drives the
 interactive branch over a real pseudo-terminal through `tests/pty-run.py`:
 each reply is typed only once the confirmation prompt itself has appeared, so
 typing exactly `STOPPED` proceeds, while a case-mismatched reply, an unrelated
 reply, an empty reply, end of input, and an interrupt all refuse before either
-source is read. The
-UI test covers next-run calculation in the configured timezone and the backup
+source is read. The UI
+test covers next-run calculation in the configured timezone and the backup
 settings API: safe defaults that never return the password, refusal to enable
 backup without one, atomic settings and password writes, UID:GID and port
 validation, rejection of a backup path inside the depot or a `..` segment,
