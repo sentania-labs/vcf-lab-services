@@ -96,7 +96,14 @@ if [ ! -x "$tool" ]; then
 	log "VCF Download Tool is not installed; upload it in the admin console"
 	exit 1
 fi
-exec 7<"$VCFDT_TOOL_STORE/.update.lock"
+tool_lock="$VCFDT_TOOL_STORE/.update.lock"
+if [ ! -e "$tool_lock" ]; then
+	write_state '. + {running:false, currentTarget:null}'
+	log "ERROR: the tool volume has no $tool_lock update lock; the tool store is incomplete"
+	log "Re-upload the VCF Download Tool in the admin console to repair the tool volume."
+	exit 1
+fi
+exec 7<"$tool_lock"
 flock -s 7
 
 run_log="$STATE_DIR/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"

@@ -102,6 +102,7 @@ def _extract_zip(archive_path, destination):
                 raise ToolArchiveError("the archive contains too many files")
             extracted_bytes = 0
             seen = set()
+            file_modes = []
             for member in members:
                 path = _safe_archive_path(member.filename.rstrip("/"))
                 if path in seen:
@@ -112,7 +113,12 @@ def _extract_zip(archive_path, destination):
                 extracted_bytes += max(member.file_size, 0)
                 if extracted_bytes > MAX_EXTRACTED_BYTES:
                     raise ToolArchiveError("the expanded archive is too large")
+                if not member.is_dir():
+                    file_modes.append((path, (member.external_attr >> 16) & 0o777))
             archive.extractall(destination)
+            for path, mode in file_modes:
+                if mode:
+                    os.chmod(destination / path, mode)
     except (zipfile.BadZipFile, OSError) as exc:
         raise ToolArchiveError("the uploaded file is not a readable zip archive") from exc
 

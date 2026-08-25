@@ -155,6 +155,32 @@ class UiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.get_json()["version"], "vcf-download-tool 2.0")
 
+    def test_zip_upload_preserves_safe_member_permissions(self):
+        self.write_state()
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            tool = zipfile.ZipInfo("vcf-download-tool/bin/vcf-download-tool")
+            tool.external_attr = 0o100755 << 16
+            archive.writestr(tool, b"#!/bin/sh\necho 'vcf-download-tool 3.0'\n")
+            helper = zipfile.ZipInfo("vcf-download-tool/jre/bin/java")
+            helper.external_attr = 0o100755 << 16
+            archive.writestr(helper, b"#!/bin/sh\nexit 0\n")
+            secret = zipfile.ZipInfo("vcf-download-tool/conf/token.txt")
+            secret.external_attr = 0o104600 << 16
+            archive.writestr(secret, b"token\n")
+        stream.seek(0)
+        response = self.client.post(
+            "/api/vcfdt",
+            data={"archive": (stream, "vcf-download-tool-3.0.zip")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        current = self.tool_store / "current"
+        helper_mode = (current / "jre" / "bin" / "java").stat().st_mode & 0o7777
+        self.assertEqual(helper_mode, 0o755)
+        secret_mode = (current / "conf" / "token.txt").stat().st_mode & 0o7777
+        self.assertEqual(secret_mode, 0o600)
+
     def test_tool_upload_is_refused_while_sync_runs(self):
         self.write_state(running=True, armed=True)
         response = self.client.post(

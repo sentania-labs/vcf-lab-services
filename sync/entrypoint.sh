@@ -116,7 +116,15 @@ refresh_versions() {
 		exec 8>&-
 		return 0
 	fi
-	exec 7<"${VCFDT_TOOL_STORE:-$TOOL_ROOT}/.update.lock"
+	local tool_lock="${VCFDT_TOOL_STORE:-$TOOL_ROOT}/.update.lock"
+	if [ ! -e "$tool_lock" ]; then
+		jq -n --arg t "$(date -u +%FT%TZ)" \
+			'{error:"the tool volume has no update lock; re-upload the VCF Download Tool in the admin console to repair it", fetchedAt:$t}' \
+			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
+		exec 8>&-
+		return 0
+	fi
+	exec 7<"$tool_lock"
 	flock -s 7
 	output="$("$tool" binaries list "--vcf-version=${VCF_VERSION:-9.1.0}" --type=UPGRADE \
 		"--depot-download-activation-code-file=$AUTH_FILE" "--ceip=${CEIP:-DISABLE}" 2>&1)" || rc=$?

@@ -81,4 +81,14 @@ run_sync patches > "$work_dir/after-kill9.log"
 ! grep -q 'another sync is already running' "$work_dir/after-kill9.log"
 grep -q 'sync finished overall rc=0' "$work_dir/after-kill9.log"
 
+mv "$work_dir/tool/.update.lock" "$work_dir/tool/update.lock.saved"
+set +e
+run_sync esx > "$work_dir/missing-lock.log" 2>&1
+missing_lock_rc=$?
+set -e
+[ "$missing_lock_rc" -eq 1 ]
+grep -q 'Re-upload the VCF Download Tool in the admin console' "$work_dir/missing-lock.log"
+jq -e '.running == false' "$work_dir/state/state.json" >/dev/null
+mv "$work_dir/tool/update.lock.saved" "$work_dir/tool/.update.lock"
+
 echo "sync behavior tests passed"
