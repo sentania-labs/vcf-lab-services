@@ -68,6 +68,14 @@ named volumes. The most important small volumes are:
 The `vcf-services-vcfdt-tool` volume is disposable. Restore it by uploading the
 licensed archive again.
 
+The config volume carries the product version that created it. If an unmarked
+or differently marked config volume is found, the console stays reachable but
+setup, sync, and SFTP operations remain blocked. The console reports both
+versions and directs the operator to preserve needed data, then use a new
+config volume or restore one created by the running version. This prevents a
+failed mixed-version first boot from silently presenting contaminated setup
+state as complete.
+
 ## Network and credentials
 
 HTTPS is fixed on host port 443 for the prototype. SFTP is fixed on port 2222.
@@ -136,7 +144,8 @@ Deferred work is explicit:
 The repository stub validates the setup workflow, but the following need the
 captain's licensed archive and lab before they can be claimed as working:
 
-- Machine ID and version output from the real licensed tool.
+- Machine ID output from the real licensed tool. Version output parsing is
+  already confirmed against captured licensed output.
 - Registration with a real activation code and an actual Broadcom download.
 - A completed sync serving real depot content to VCF consumers.
 - Consumer trust of the first-boot CA, and live VCF component SFTP behavior.

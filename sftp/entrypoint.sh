@@ -3,6 +3,7 @@ set -eu
 
 settings_file="${SETTINGS_FILE:-/config/settings.env}"
 password_file="${SFTP_PASSWORD_FILE:-/run/sftp-secrets/password}"
+version_status_file="${VERSION_STATUS_FILE:-/config/.vcf-services-version-status.json}"
 backup_user=vcf
 sshd_pid=""
 last_identity_warning=""
@@ -148,6 +149,17 @@ shutdown() {
 }
 trap shutdown INT TERM
 
+last_uid_gid=""
+last_password_hash=""
+touch /run/sftp-supervisor-ready
+
+while [ -s "$version_status_file" ]; do
+	stop_sshd
+	echo "ERROR: SFTP is disabled because the config volume version check failed." >&2
+	sleep 30 &
+	wait $!
+done
+
 generate_host_key ed25519 ""
 generate_host_key rsa 3072
 generate_host_key ecdsa 256
@@ -159,11 +171,14 @@ for public_key in /etc/ssh/keys/ssh_host_ed25519_key.pub \
 	ssh-keygen -lf "$public_key"
 done
 
-last_uid_gid=""
-last_password_hash=""
-touch /run/sftp-supervisor-ready
-
 while :; do
+	if [ -s "$version_status_file" ]; then
+		stop_sshd
+		echo "ERROR: SFTP is disabled because the config volume version check failed." >&2
+		sleep 30 &
+		wait $!
+		continue
+	fi
 	enabled="$(setting BACKUP_ENABLED false)"
 	uid_gid="$(setting SFTP_UID_GID 1003:1003)"
 	case "$enabled" in

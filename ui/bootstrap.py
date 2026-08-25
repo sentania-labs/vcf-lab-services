@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Initialize the file-backed appliance state before services start."""
+"""Initialize and verify file-backed appliance state before services start."""
 
+import json
 import os
 import secrets
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/config"))
 SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/secrets"))
 SETTINGS = CONFIG_DIR / "settings.env"
+VERSION_MARKER = CONFIG_DIR / ".vcf-services-version"
+VERSION_STATUS = CONFIG_DIR / ".vcf-services-version-status.json"
+CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 
 DEFAULT_SETTINGS = {
     "AUTH_USERNAME": "vcf",
@@ -41,8 +47,66 @@ def write_once(path, content, mode=0o600):
         os.fsync(stream.fileno())
 
 
+def write_atomic(path, content, mode=0o600):
+    handle, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(handle, mode)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def verify_config_version(config_was_empty):
+    found = None
+    try:
+        found = VERSION_MARKER.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        pass
+
+    if found == CURRENT_VERSION:
+        VERSION_STATUS.unlink(missing_ok=True)
+        return True
+    if found is None and config_was_empty:
+        write_once(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
+        VERSION_STATUS.unlink(missing_ok=True)
+        return True
+
+    found_label = found or "unversioned state"
+    message = (
+        f"Startup is blocked because the config volume contains {found_label}, "
+        f"but this appliance is {CURRENT_VERSION}. Existing settings, secrets, and "
+        "service identity were not trusted or changed; only this diagnostic block "
+        "record was added so the console can explain the problem. Stop the stack, "
+        f"preserve any data you need, then start {CURRENT_VERSION} with a new config "
+        f"volume or restore a config volume marked for {CURRENT_VERSION}."
+    )
+    status = {
+        "blocked": True,
+        "expectedVersion": CURRENT_VERSION,
+        "foundVersion": found,
+        "message": message,
+        "detectedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    write_atomic(VERSION_STATUS, json.dumps(status) + "\n", 0o640)
+    print(f"ERROR: {message}")
+    return False
+
+
 def main():
+    config_existed = CONFIG_DIR.exists()
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config_was_empty = not config_existed or not any(CONFIG_DIR.iterdir())
+    if not verify_config_version(config_was_empty):
+        return
+
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CONFIG_DIR, 0o750)
     os.chmod(SECRETS_DIR, 0o700)

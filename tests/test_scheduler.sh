@@ -128,6 +128,31 @@ chmod 0755 "$work_dir/tool/bin/vcf-download-tool"
 touch "$work_dir/tool/.update.lock"
 printf 'stub-code\n' > "$work_dir/activation-code.txt"
 
+blocked_state="$work_dir/state-blocked"
+mkdir -p "$blocked_state"
+blocked_status="$work_dir/version-status.json"
+printf '%s\n' '{"blocked":true,"message":"config volume version mismatch"}' > "$blocked_status"
+set +e
+PATH="$stub_bin:$PATH" \
+SETTINGS_FILE="$settings" \
+STATE_DIR="$blocked_state" \
+AUTH_FILE="$work_dir/activation-code.txt" \
+TOOL_ROOT="$work_dir/tool" \
+SYNC_COMMAND="$stub_bin/fake-sync.sh" \
+REDIS_HOST=stub \
+VERSION_STATUS_FILE="$blocked_status" \
+POLL_SECONDS=1 \
+timeout 3 bash "$project_dir/sync/entrypoint.sh" > "$work_dir/blocked.log" 2>&1
+blocked_rc=$?
+set -e
+[ "$blocked_rc" -eq 124 ]
+jq -e '.running == false and .armed == false and .startupBlocked == true
+  and .startupError == "config volume version mismatch"' \
+	"$blocked_state/state.json" >/dev/null
+grep -q 'Sync dispatch is disabled' "$work_dir/blocked.log"
+[ ! -s "$dispatch_log" ]
+echo "version mismatch safe-stop tests passed"
+
 refresh_set_log="$work_dir/refresh-set.log"
 touch "$refresh_set_log"
 (

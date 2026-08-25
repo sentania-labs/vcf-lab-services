@@ -31,6 +31,7 @@ jobs:
       - name: Validate release tag
         run: |
           [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          ./scripts/verify-compose-version.sh "$GITHUB_REF_NAME"
 
       - name: Decide whether this tag owns the latest tags
         id: latest
@@ -145,6 +146,9 @@ jobs:
           DOCKER_CONFIG="$anonymous_config" docker pull "$image_root/sync-base:$version"
           DOCKER_CONFIG="$anonymous_config" docker pull "$image_root/sftp:$version"
 
+      - name: Prove the published README quickstart and API path
+        run: ./scripts/verify-published-quickstart.sh "$GITHUB_REF_NAME"
+
   release:
     name: Create GitHub release
     needs: publish
@@ -159,6 +163,7 @@ jobs:
       - name: Validate release tag
         run: |
           [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          ./scripts/verify-compose-version.sh "$GITHUB_REF_NAME"
 
       - name: Package installer entry point
         run: |

@@ -11,10 +11,36 @@ The sync image contains the scheduler and runtime dependencies, never the
 licensed VCF Download Tool. The operator supplies that archive through the
 console, which stores it on a mounted disposable volume.
 
-The highest semantic release also owns the `latest` image tags. A source
-checkout therefore starts the newest release with plain `docker compose up`.
-Each GitHub release bundle includes a `.env` that pins Compose to the exact
-release tags, so the same command from an extracted bundle is deterministic.
+The highest semantic release also owns the `latest` image tags for operators
+who deliberately select them. The Compose defaults are pinned to the concrete
+release version, so a source checkout and its default images remain the tested
+pair even when publication is delayed or fails. Each GitHub release bundle
+also includes a `.env` that pins Compose to the same exact release tags.
+
+Preparing a release starts by changing all product image defaults in
+`docker-compose.yml` to the intended tag. That change lands before the tag is
+pushed, so the tag names images the workflow is about to build. The release
+workflow runs `scripts/verify-compose-version.sh` before building or packaging
+and fails when any Compose default differs from the pushed tag. For the next
+release, repeat the same version bump before tagging.
+
+After publishing and anonymously pulling the tagged images, the workflow runs
+`scripts/verify-published-quickstart.sh` on clean named volumes. This executes
+the README `docker compose up -d` command with no image overrides, then proves
+claim, tool upload, registration, a partial settings update, and an
+authenticated HTTPS Range response over the live API. The GitHub release is
+not created unless this published-image proof passes.
+
+Tool upload validation is structural: the archive must contain the expected
+binary layout, but the `--version` shape check is deliberately advisory. The
+version parser is confirmed against licensed VCF Download Tool output for
+`9.1.0.0.25371089`: it scans past the banner, prefers the labelled `Version:`
+line, and accepts the bare dotted version as a fallback. The probe remains
+advisory by design so a future output-format change does not reject a valid
+upload. An unexpected or failed version probe still installs the archive and
+marks its version as unverified in the console. A failed or implausible
+Software Depot ID probe never blocks the upload and never replaces the last
+verified saved ID; the registration screen reports the probe failure.
 
 The release bundle contains only the Compose definition, Caddy configuration,
 thin optional bootstrap helper, operational documentation, license, and Range

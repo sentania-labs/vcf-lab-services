@@ -14,6 +14,7 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 	echo "ERROR: image repository must be a lowercase GHCR repository path" >&2
 	exit 2
 }
+"$project_dir/scripts/verify-compose-version.sh" "$version" "$project_dir/docker-compose.yml"
 
 release_name="vcf-lab-services-$version"
 stage_dir="$(mktemp -d /tmp/vcf-services-release.XXXXXX)"

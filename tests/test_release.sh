@@ -5,8 +5,21 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 work_dir="$(mktemp -d /tmp/vcf-services-release-test.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
 
-version=v0.0.0
+version=v0.2.1
 repository=ghcr.io/example/vcf-lab-services
+if "$project_dir/scripts/verify-compose-version.sh" v0.2.0 \
+	"$project_dir/docker-compose.yml" > /dev/null 2>&1; then
+	echo "release validation accepted a tag that differs from Compose" >&2
+	exit 1
+fi
+"$project_dir/scripts/verify-compose-version.sh" "$version" \
+	"$project_dir/docker-compose.yml" >/dev/null
+grep -q 'verify-published-quickstart.sh.*GITHUB_REF_NAME' \
+	"$project_dir/.github/workflows/release.yml"
+grep -q '^docker compose up -d$' \
+	"$project_dir/scripts/verify-published-quickstart.sh"
+! grep -Eq 'VCF_SERVICES_(UI|SYNC|SFTP)_IMAGE=' \
+	"$project_dir/scripts/verify-published-quickstart.sh"
 "$project_dir/scripts/package-release.sh" "$version" "$work_dir" "$repository" >/dev/null
 
 archive="$work_dir/vcf-lab-services-$version.tar.gz"
