@@ -22,8 +22,8 @@ install checks exercise depot and state adoption in real containers, and the
 release test drives the interactive adoption prompt over a pseudo-terminal
 through `tests/pty-run.py`.
 
-The repository stub covers installer archive validation, persistent machine-ID
-storage, dormant operation, per-target sequencing after a failure, state JSON,
+The repository stub covers console archive validation and safe replacement,
+persistent machine-ID storage, dormant operation, per-target sequencing after a failure, state JSON,
 log retention, version parsing, HTTPS authentication, the open UMDS route, and
 byte-exact Range responses. The scheduler test covers cron matching, dynamic
 schedule reload, duplicate-dispatch prevention, Redis request dispatch through
@@ -73,8 +73,8 @@ blames a stopped daemon separately, still preflights when Compose global
 options precede the `up` command, and passes day-to-day commands and all
 original arguments straight through. Live Redis authentication and
 non-exposure are also hard gates in `install.sh`. The stub
-is test-only and is not copied into a product image unless an operator
-explicitly supplies its generated archive to the installer.
+is test-only and is mounted only by tests. It is never copied into a product
+image.
 
 The SFTP runtime test builds and starts the real backup image, uploads through
 password-authenticated SFTP to an absolute `/mnt/backup/vcenter` path, rejects
@@ -87,13 +87,11 @@ and proves those keys remain unchanged across container recreation.
 
 The release test dry-runs the versioned installation bundle, verifies its
 checksum and required entry points, and proves that the bundle consumes the
-published UI, sync base, and SFTP images. The license-boundary check locks the
+published UI, sync base, and SFTP images without a host-side product build. The license-boundary check locks the
 sync base to an allowlisted build context and inspects the built filesystem for
-vendor binary or archive names. CI stages a stub vendor tool into the build
-context first, so the license-safe images are built and inspected while
-vendor-shaped content is present, then builds the local licensed sync layer
-against that verified base and runs the tool out of it. CI runs the same checks
-before any image can be published.
+vendor binary or archive names. CI runs the stub through the mounted-tool
+runtime contract after inspecting the license-safe image. CI runs the same
+checks before any image can be published.
 
 The following items require captain UAT and are not claimed as verified:
 

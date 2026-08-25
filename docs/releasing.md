@@ -20,12 +20,11 @@ environment value. Future installer upgrade and GUI release-check work must
 compare against that exact tag value rather than maintaining a separate
 version file.
 
-The sync base is intentionally incomplete. It contains the scheduler, sync
-scripts, and runtime dependencies, but never the licensed VCF Download Tool.
-The installer pulls that base and layers the operator's portal-downloaded
-archive into `vcf-services-sync:local`. Only that local image contains the
-vendor tool. CI enforces the boundary with an allowlisted Docker build context
-and an inspection of the built base image before publication.
+The sync image contains the scheduler, sync scripts, and runtime dependencies,
+but never the licensed VCF Download Tool. The console stages the operator's
+portal-downloaded archive in the dedicated `vcf-services-vcfdt-tool` volume,
+then atomically selects the validated release. CI inspects the published sync
+image and exercises the runtime with a mounted test stub.
 
 Each GitHub release carries three operator-facing assets:
 

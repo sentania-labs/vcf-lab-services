@@ -5,6 +5,7 @@ settings_file="${SETTINGS_FILE:-/etc/vcf-services/settings.env}"
 STATE_DIR="${STATE_DIR:-/state}"
 AUTH_FILE="${AUTH_FILE:-/run/secrets/activation-code.txt}"
 TOOL_ROOT="${TOOL_ROOT:-/opt/vcfdt}"
+VCFDT_TOOL_STORE="${VCFDT_TOOL_STORE:-}"
 SYNC_COMMAND="${SYNC_COMMAND:-/usr/local/bin/sync.sh}"
 POLL_SECONDS="${POLL_SECONDS:-10}"
 REDIS_HOST="${REDIS_HOST:-}"
@@ -106,12 +107,23 @@ refresh_versions() {
 		exec 8>&-
 		return 0
 	fi
+	exec 7>"${VCFDT_TOOL_STORE:-$TOOL_ROOT}/.update.lock"
+	flock -s 7
 	local output rc=0
+	if [ ! -x "$tool" ]; then
+		jq -n --arg t "$(date -u +%FT%TZ)" \
+			'{error:"VCF Download Tool is not installed; upload it in the admin console", fetchedAt:$t}' \
+			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
+		exec 7>&-
+		exec 8>&-
+		return 0
+	fi
 	output="$("$tool" binaries list "--vcf-version=${VCF_VERSION:-9.1.0}" --type=UPGRADE \
 		"--depot-download-activation-code-file=$AUTH_FILE" "--ceip=${CEIP:-DISABLE}" 2>&1)" || rc=$?
 	jq -n --arg out "$output" --arg t "$(date -u +%FT%TZ)" --argjson rc "$rc" \
 		'{output:$out, fetchedAt:$t, exitCode:$rc}' \
 		| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
+	exec 7>&-
 	exec 8>&-
 }
 

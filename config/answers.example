@@ -1,6 +1,5 @@
 # Copy this file outside the repository, fill in the required values, and run:
 # ./install.sh --answers-file /path/to/answers.env
-VCFDT_ARCHIVE=/path/to/vcf-download-tool-version.tar.gz
 PRODUCT_FQDN=vcf-services.example.com
 TZ=UTC
 STORAGE_MODE=local

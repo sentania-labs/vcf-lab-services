@@ -5,6 +5,13 @@ image="${1:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET_VOLUME}
 source_kind="${2:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET_VOLUME}"
 source_value="${3:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET_VOLUME}"
 target_volume="${4:?usage: import-vcfdt-state.sh IMAGE SOURCE_KIND SOURCE TARGET_VOLUME}"
+tool_volume="${5:-}"
+tool_entrypoint=/opt/vcfdt/bin/vcf-download-tool
+tool_mount=()
+if [ -n "$tool_volume" ]; then
+	tool_entrypoint=/opt/vcfdt/current/bin/vcf-download-tool
+	tool_mount=(--mount "type=volume,src=$tool_volume,dst=/opt/vcfdt,readonly")
+fi
 
 state_dir=/root/.local/share/vmware/vdt
 staging_dir_name=.vcf-services-import-staging
@@ -59,7 +66,8 @@ read_volume_machine_id() {
 	local state_volume="$1" access output machine_id
 	for access in readonly writable; do
 		output="$(docker run --rm \
-			--entrypoint /opt/vcfdt/bin/vcf-download-tool \
+			--entrypoint "$tool_entrypoint" \
+			"${tool_mount[@]}" \
 			--mount "$(state_mount_spec volume "$state_volume" "$access")" \
 			"$image" configuration get --machineId)" || continue
 		machine_id="$(printf '%s\n' "$output" | tr -d '\r' | sed -n '/[^[:space:]]/h; ${x;p;}')"

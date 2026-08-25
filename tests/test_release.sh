@@ -41,20 +41,17 @@ tar -xzf "$archive" -C "$work_dir"
 [ -x "$work_dir/vcf-lab-services-$version/compose.sh" ]
 grep -qx "VCF_SERVICES_VERSION=$version" "$work_dir/vcf-lab-services-$version/.release.env"
 grep -qx "VCF_SERVICES_IMAGE_REPOSITORY=$repository" "$work_dir/vcf-lab-services-$version/.release.env"
-"$project_dir/tests/make-stub-vcfdt.sh" "$work_dir/vcf-download-tool-0.0.0-stub.tar.gz" >/dev/null
-"$work_dir/vcf-lab-services-$version/install.sh" \
-	--validate-archive "$work_dir/vcf-download-tool-0.0.0-stub.tar.gz" >/dev/null
-
 grep -q 'pull_product_image "$ui_image"' "$project_dir/install.sh"
 grep -q 'pull_product_image "$sync_base_image"' "$project_dir/install.sh"
 grep -q 'pull_product_image "$sftp_image"' "$project_dir/install.sh"
 grep -q 'docker pull "$image"' "$project_dir/install.sh"
 grep -q 'could not pull \$image' "$project_dir/install.sh"
-! grep -q 'Dockerfile.sync-base' "$project_dir/install.sh"
-grep -q 'SYNC_BASE_IMAGE=$sync_base_image' "$project_dir/install.sh"
+! grep -q 'docker build' "$project_dir/install.sh"
+grep -q 'VCF_SERVICES_SYNC_IMAGE' "$project_dir/install.sh"
 grep -q 'VCF_SERVICES_UI_IMAGE' "$project_dir/docker-compose.yml"
+grep -q 'VCF_SERVICES_SYNC_IMAGE' "$project_dir/docker-compose.yml"
 grep -q 'VCF_SERVICES_SFTP_IMAGE' "$project_dir/docker-compose.yml"
-grep -qx '!build/vcfdt/\*\*' "$project_dir/Dockerfile.sync.dockerignore"
+! grep -q 'build/vcfdt' "$project_dir/Dockerfile.sync" "$project_dir/Dockerfile.sync.dockerignore"
 
 bundle_dir="$work_dir/vcf-lab-services-$version"
 source_dir="$work_dir/source-checkout"
@@ -82,9 +79,9 @@ expect_failure 1 '--image-repository REPOSITORY' "$source_dir/install.sh"
 
 # An explicit image repository restores installation from a source checkout:
 # metadata resolution succeeds and the run reaches the first answer prompt.
-expect_failure 2 'VCFDT_ARCHIVE is missing' \
+expect_failure 2 'PRODUCT_FQDN is missing' \
 	"$source_dir/install.sh" --image-repository ghcr.io/example/vcf-lab-services
-expect_failure 2 'VCFDT_ARCHIVE is missing' \
+expect_failure 2 'PRODUCT_FQDN is missing' \
 	"$source_dir/install.sh" --image-repository ghcr.io/example/vcf-lab-services --version v9.9.9
 
 # Overrides are still validated.
@@ -105,14 +102,14 @@ expect_failure 2 'apply only to a source checkout' \
 # at a prominent confirmation prompt.
 expect_failure 2 'adoption requires confirmation that the previous writer is stopped' \
 	"$bundle_dir/install.sh" --adopt-state-dir /tmp
-expect_failure 2 'VCFDT_ARCHIVE is missing' \
+expect_failure 2 'PRODUCT_FQDN is missing' \
 	"$bundle_dir/install.sh" --adopt-state-dir /tmp --confirm-old-writer-stopped
 expect_failure 2 'requires --adopt-state-dir or --adopt-state-volume' \
 	"$bundle_dir/install.sh" --confirm-old-writer-stopped
 
 # The interactive half of the same contract, driven over a real terminal.
 adopt_answers="$work_dir/adopt-answers.env"
-printf 'VCFDT_ARCHIVE=%s/missing-vcf-download-tool.tar.gz\n' "$work_dir" > "$adopt_answers"
+printf 'PRODUCT_FQDN=invalid name\n' > "$adopt_answers"
 
 writer_prompt='Type STOPPED to confirm'
 
@@ -132,7 +129,7 @@ pty_expect() {
 	}
 }
 
-pty_expect 'typing STOPPED proceeds' 1 'VCFDT archive not found' 'STOPPED\n' \
+pty_expect 'typing STOPPED proceeds' 2 'invalid FQDN' 'STOPPED\n' \
 	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp
 pty_expect 'a lowercase reply refuses' 2 'adoption cancelled because writer shutdown was not confirmed' 'stopped\n' \
 	"$bundle_dir/install.sh" --answers-file "$adopt_answers" --adopt-state-dir /tmp
@@ -162,7 +159,7 @@ grep -q "$writer_prompt" <<< "$interrupt_output" || {
 	printf '%s\n' "$interrupt_output" >&2
 	exit 1
 }
-if grep -q 'VCFDT archive not found' <<< "$interrupt_output"; then
+if grep -q 'invalid FQDN' <<< "$interrupt_output"; then
 	echo "an interrupted writer confirmation continued into adoption" >&2
 	exit 1
 fi
