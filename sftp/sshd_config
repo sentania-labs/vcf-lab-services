@@ -12,7 +12,7 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication no
 PermitEmptyPasswords no
 PermitRootLogin no
-AllowUsers vcfbackup
+AllowUsers vcf
 
 AllowAgentForwarding no
 AllowTcpForwarding no

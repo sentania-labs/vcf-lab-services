@@ -1,19 +1,30 @@
 name: vcf-services
 
 services:
+  bootstrap:
+    container_name: vcf-services-bootstrap
+    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:latest}
+    restart: "no"
+    command: ["python", "/app/bootstrap.py"]
+    environment:
+      CONFIG_DIR: /config
+      SECRETS_DIR: /secrets
+    volumes:
+      - config_state:/config:rw
+      - secrets_state:/secrets:rw
+    networks:
+      - control
+
   depot-web:
     container_name: vcf-services-depot-web
     image: caddy:2.10.0-alpine
     restart: unless-stopped
     init: true
-    env_file:
-      - secrets/caddy.env
     ports:
-      - "${HTTPS_PORT:-443}:443"
+      - "443:443"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - depot_store:/depot:ro
-      - ./secrets/tls:/certs:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
@@ -30,7 +41,7 @@ services:
 
   depot-sync:
     container_name: vcf-services-sync
-    image: ${VCF_SERVICES_SYNC_IMAGE:-vcf-services-sync-base:local}
+    image: ${VCF_SERVICES_SYNC_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest}
     restart: unless-stopped
     environment:
       SETTINGS_FILE: /etc/vcf-services/settings.env
@@ -39,7 +50,7 @@ services:
       AUTH_FILE: /run/secrets/activation-code.txt
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      REDIS_PASSWORD_FILE: /run/secrets/redis/password
+      REDIS_PASSWORD_FILE: /run/secrets/redis-password
       TOOL_ROOT: /opt/vcfdt/current
       VCFDT_TOOL_STORE: /opt/vcfdt
     volumes:
@@ -47,8 +58,8 @@ services:
       - vcfdt_tool:/opt/vcfdt:ro
       - vcfdt_state:/root/.local/share/vmware/vdt
       - sync_state:/state:rw
-      - ./config:/etc/vcf-services:ro
-      - ./secrets:/run/secrets:ro
+      - config_state:/etc/vcf-services:ro
+      - secrets_state:/run/secrets:ro
     networks:
       - control
     depends_on:
@@ -63,21 +74,24 @@ services:
 
   sftp-backup:
     container_name: vcf-services-sftp
-    image: ${VCF_SERVICES_SFTP_IMAGE:-vcf-services-sftp:local}
+    image: ${VCF_SERVICES_SFTP_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sftp:latest}
     restart: unless-stopped
     init: true
     environment:
       SETTINGS_FILE: /config/settings.env
-      SFTP_PASSWORD_FILE: /run/sftp-secrets/password
+      SFTP_PASSWORD_FILE: /run/secrets/sftp-password
     ports:
-      - "${SFTP_PORT:-2222}:22"
+      - "2222:22"
     volumes:
       - backup_store:/mnt/backup:rw
       - sftp_host_keys:/etc/ssh/keys:rw
-      - ./config:/config:ro
-      - ./secrets/sftp:/run/sftp-secrets:ro
+      - config_state:/config:ro
+      - secrets_state:/run/secrets:ro
     networks:
       - control
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/usr/local/bin/sftp-healthcheck.sh"]
       interval: 10s
@@ -87,7 +101,7 @@ services:
 
   admin-ui:
     container_name: vcf-services-ui
-    image: ${VCF_SERVICES_UI_IMAGE:-vcf-services-ui:local}
+    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:latest}
     restart: unless-stopped
     depends_on:
       redis:
@@ -100,15 +114,20 @@ services:
       SETTINGS_FILE: /config/settings.env
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      REDIS_PASSWORD_FILE: /run/redis/password
+      REDIS_PASSWORD_FILE: /run/secrets/redis-password
       VCFDT_STORE: /opt/vcfdt
+      AUTH_FILE: /run/secrets/auth.json
+      ACTIVATION_CODE_FILE: /run/secrets/activation-code.txt
+      FLASK_SECRET_FILE: /run/secrets/flask-secret
     volumes:
       - depot_store:/depot:ro
+      - backup_store:/mnt/backup:ro
+      - caddy_data:/caddy-data:ro
       - vcfdt_tool:/opt/vcfdt:rw
+      - vcfdt_state:/root/.local/share/vmware/vdt:rw
       - sync_state:/state:ro
-      - ./config:/config
-      - ./secrets/redis:/run/redis:ro
-      - ./secrets/sftp:/run/sftp-secrets
+      - config_state:/config:rw
+      - secrets_state:/run/secrets:rw
     networks:
       - control
     healthcheck:
@@ -124,11 +143,14 @@ services:
     restart: unless-stopped
     command: ["sh", "-c", "exec redis-server /etc/redis/redis.conf"]
     volumes:
-      - ./secrets/redis:/etc/redis:ro
+      - secrets_state:/etc/redis:ro
     networks:
       - control
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /etc/redis/password)\" redis-cli ping | grep -q PONG"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /etc/redis/redis-password)\" redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -141,21 +163,10 @@ networks:
 volumes:
   depot_store:
     name: ${DEPOT_VOLUME_NAME:-vcf-services-depot-store}
-    driver: local
-    driver_opts:
-      type: ${DEPOT_VOLUME_TYPE:-none}
-      o: ${DEPOT_VOLUME_OPTIONS:-bind}
-      device: ${DEPOT_VOLUME_DEVICE:-/var/lib/vcf-services/depot}
   backup_store:
     name: ${BACKUP_VOLUME_NAME:-vcf-services-backup-store}
-    driver: local
-    driver_opts:
-      type: ${BACKUP_VOLUME_TYPE:-none}
-      o: ${BACKUP_VOLUME_OPTIONS:-bind}
-      device: ${BACKUP_VOLUME_DEVICE:-/var/lib/vcf-services/backup}
   vcfdt_state:
     name: vcf-services-vcfdt-state
-    external: true
   vcfdt_tool:
     name: vcf-services-vcfdt-tool
   sync_state:
@@ -166,4 +177,7 @@ volumes:
     name: vcf-services-caddy-config
   sftp_host_keys:
     name: vcf-services-sftp-host-keys
-    external: true
+  config_state:
+    name: vcf-services-config
+  secrets_state:
+    name: vcf-services-secrets

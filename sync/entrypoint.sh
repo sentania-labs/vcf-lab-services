@@ -175,7 +175,19 @@ init_state() {
 	mv "$tmp_state" "$STATE_DIR/state.json"
 	if [ "$armed" = false ]; then
 		echo "[scheduler] not armed: activation code missing"
-		echo "[scheduler] Register the Software Depot ID in the Broadcom download tool registration flow, then rerun install.sh."
+		echo "[scheduler] Register the Software Depot ID and save the activation code in the admin console."
+	fi
+}
+
+refresh_armed_state() {
+	local armed=false tmp_state
+	if [ -s "$AUTH_FILE" ]; then armed=true; fi
+	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
+	if jq --argjson armed "$armed" '.armed=$armed' "$STATE_DIR/state.json" > "$tmp_state" 2>/dev/null; then
+		mv "$tmp_state" "$STATE_DIR/state.json"
+		redis_cmd -x SET "$STATUS_KEY" < "$STATE_DIR/state.json" >/dev/null || true
+	else
+		rm -f "$tmp_state"
 	fi
 }
 
@@ -198,6 +210,7 @@ main() {
 	local last_dispatched_minute="" now_minute payload
 	while true; do
 		load_settings
+		refresh_armed_state
 		now_minute="$(date +%Y%m%d%H%M)"
 		if [ "$now_minute" != "$last_dispatched_minute" ] \
 			&& cron_matches "$CRON_SCHEDULE" "$(date +%-M)" "$(date +%-H)" \

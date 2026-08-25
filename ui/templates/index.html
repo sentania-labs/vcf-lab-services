@@ -5,313 +5,358 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VCF Services</title>
 <style>
-  :root { --bg:#0f1419; --panel:#1a2027; --line:#2b3540; --fg:#d8e0e8; --muted:#8a97a5;
-          --accent:#4a9eff; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  :root { --bg:#0b1015; --panel:#151d25; --panel2:#1c2732; --line:#2c3946;
+    --fg:#e4ebf1; --muted:#91a0af; --accent:#4f9cff; --ok:#43bf70;
+    --warn:#e0a431; --err:#ff625a; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex;
-           align-items:baseline; gap:12px; }
-  header h1 { font-size:18px; margin:0; }
-  header .sub { color:var(--muted); font-size:13px; }
-  main { max-width:1100px; margin:0 auto; padding:20px 24px; display:grid; gap:18px; }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
-  .panel h2 { margin:0 0 12px; font-size:14px; text-transform:uppercase;
-              letter-spacing:.05em; color:var(--muted); }
-  .row { display:flex; flex-wrap:wrap; gap:14px; align-items:center; }
-  label.tgt { display:inline-flex; align-items:center; gap:6px; background:#222c36;
-              border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
-  button { background:var(--accent); color:#fff; border:0; border-radius:6px;
-           padding:9px 18px; font-weight:600; cursor:pointer; }
-  button:disabled { background:#39434e; color:var(--muted); cursor:not-allowed; }
-  button.secondary { background:#2b3540; }
-  input,select { width:100%; background:#111820; color:var(--fg); border:1px solid var(--line);
-                 border-radius:6px; padding:8px 10px; }
-  input[type="checkbox"] { width:auto; }
-  .formgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
-  .field { min-width:0; }
-  .field label { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; }
-  .field.full { grid-column:1 / -1; }
-  .help { color:var(--muted); font-size:12px; margin:8px 0 0; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
-  .stat { background:#222c36; border-radius:6px; padding:10px 12px; min-width:0; }
-  .stat .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
-  .stat .v { font-size:15px; margin-top:2px; overflow-wrap:anywhere; }
-  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:600; }
-  .pill.ok { background:rgba(63,185,80,.15); color:var(--ok); }
-  .pill.run { background:rgba(74,158,255,.15); color:var(--accent); }
-  .pill.err { background:rgba(248,81,73,.15); color:var(--err); }
-  .pill.idle { background:#2b3540; color:var(--muted); }
-  .notice { border:1px solid var(--warn); color:#f2cc60; background:rgba(210,153,34,.1);
-            border-radius:6px; padding:12px; margin-bottom:14px; }
-  pre#log { background:#0b0f14; border:1px solid var(--line); border-radius:6px;
-            padding:12px; height:280px; overflow:auto; margin:0; white-space:pre-wrap;
-            font-size:12.5px; color:#b9c4cf; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
-  th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--panel); }
-  td.ver { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; }
-  .tablewrap { max-height:420px; overflow:auto; }
-  .upd { color:var(--warn); font-weight:600; }
-  .has { color:var(--ok); }
-  .muted { color:var(--muted); }
-  #flash { min-height:18px; font-size:13px; }
+  body { margin:0; background:linear-gradient(145deg,#0b1015,#101923 60%,#0b1015);
+    color:var(--fg); font:14px/1.5 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  button,input,select { font:inherit; }
+  header { height:64px; padding:0 28px; border-bottom:1px solid var(--line); display:flex;
+    align-items:center; justify-content:space-between; background:rgba(11,16,21,.88); position:sticky;
+    top:0; z-index:5; backdrop-filter:blur(10px); }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .mark { width:32px; height:32px; border-radius:9px; background:linear-gradient(135deg,#65b1ff,#2b6eff);
+    display:grid; place-items:center; font-weight:800; }
+  h1 { margin:0; font-size:17px; } h2 { margin:0 0 6px; font-size:18px; }
+  h3 { margin:0 0 12px; font-size:14px; } p { margin:6px 0; }
+  main { max-width:1180px; padding:24px; margin:0 auto; display:grid; gap:18px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px;
+    min-width:0; box-shadow:0 14px 38px rgba(0,0,0,.12); }
+  .auth { max-width:460px; margin:8vh auto; }
+  .hero { padding:26px; background:linear-gradient(135deg,rgba(79,156,255,.12),rgba(21,29,37,.9)); }
+  .eyebrow { color:var(--accent); font-size:11px; font-weight:800; letter-spacing:.11em; text-transform:uppercase; }
+  .muted,.help { color:var(--muted); } .help { font-size:12px; }
+  .notice { border:1px solid var(--warn); background:rgba(224,164,49,.09); color:#f0c76c;
+    border-radius:8px; padding:11px 13px; }
+  .success { border-color:var(--ok); background:rgba(67,191,112,.08); color:#81dda0; }
+  .error { color:#ff8d86; min-height:21px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:12px; }
+  .two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; }
+  .formgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; }
+  .field { min-width:0; } .field.full { grid-column:1/-1; }
+  .field > label { display:block; color:var(--muted); font-size:12px; margin-bottom:5px; }
+  input,select { width:100%; min-width:0; color:var(--fg); background:#0d141b; border:1px solid var(--line);
+    border-radius:7px; padding:9px 10px; }
+  input:focus,select:focus { outline:2px solid rgba(79,156,255,.35); border-color:var(--accent); }
+  input[type=checkbox] { width:auto; }
+  button { border:0; border-radius:7px; padding:9px 16px; background:var(--accent); color:white;
+    cursor:pointer; font-weight:700; }
+  button.secondary { background:#2b3946; } button.ghost { background:transparent; border:1px solid var(--line); }
+  .button-link { display:inline-block; border-radius:7px; padding:9px 16px; background:#2b3946;
+    color:white; text-decoration:none; font-weight:700; }
+  button:disabled { background:#34404b; color:#82909d; cursor:not-allowed; }
+  .row { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+  .targets { display:flex; flex-wrap:wrap; gap:8px; }
+  .choice { display:inline-flex; gap:7px; align-items:center; background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; padding:7px 10px; }
+  .steps { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; margin:18px 0; }
+  .step { border-top:3px solid var(--line); padding-top:7px; color:var(--muted); font-size:12px; min-width:0; }
+  .step.done { border-color:var(--ok); color:var(--fg); } .step.active { border-color:var(--accent); color:var(--fg); }
+  .setup-card { background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:15px; margin-top:12px; }
+  .stat { background:var(--panel2); border-radius:9px; padding:11px 12px; min-width:0; }
+  .stat .key { color:var(--muted); text-transform:uppercase; letter-spacing:.05em; font-size:10px; }
+  .stat .value { margin-top:3px; overflow-wrap:anywhere; }
+  .pill { display:inline-block; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:800; }
+  .pill.ok { color:#83dda2; background:rgba(67,191,112,.14); }
+  .pill.bad { color:#ff8d86; background:rgba(255,98,90,.13); }
+  .pill.run { color:#83bcff; background:rgba(79,156,255,.14); }
+  pre { height:260px; margin:0; padding:12px; overflow:auto; white-space:pre-wrap; background:#080c10;
+    border:1px solid var(--line); border-radius:8px; color:#bdc8d2; font:12px/1.5 ui-monospace,monospace; }
+  table { width:100%; border-collapse:collapse; } th,td { padding:7px; border-bottom:1px solid var(--line); text-align:left; }
+  th { color:var(--muted); font-size:12px; } .tablewrap { overflow:auto; max-height:390px; }
+  [hidden] { display:none !important; }
+  @media (max-width:760px) { .two { grid-template-columns:1fr; } .steps { grid-template-columns:1fr; }
+    .step { border-top:0; border-left:3px solid var(--line); padding:4px 0 4px 9px; } header { padding:0 16px; } main { padding:16px; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>VCF Services</h1>
-  <span class="sub">Depot and backup administration</span>
+  <div class="brand"><div class="mark">V</div><div><h1>VCF Services</h1><div class="muted">Depot control plane</div></div></div>
+  <div class="row"><span id="signed-in" class="muted"></span><button id="logout" class="ghost" hidden>Sign out</button></div>
 </header>
-<main>
-  <section class="panel">
-    <h2>VCF Download Tool</h2>
-    <div class="formgrid">
-      <div class="field full">
-        <label for="vcfdt-archive">Licensed tool archive</label>
-        <input id="vcfdt-archive" type="file" accept=".tar.gz,.tgz,.zip">
-      </div>
-    </div>
-    <p class="help">Upload the archive downloaded from the Broadcom portal. The console validates a complete replacement before switching the sync service to it. The Software Depot ID is stored in a separate protected volume.</p>
-    <div class="row" style="margin-top:12px">
-      <button id="vcfdt-upload">Upload or replace tool</button>
-      <span id="vcfdt-flash" class="muted"></span>
-    </div>
-  </section>
 
-  <section class="panel">
-    <div id="arming" class="notice" hidden></div>
-    <h2>Sync now</h2>
-    <div class="row" style="margin-bottom:12px">
-      {% for target in targets %}
-      <label class="tgt"><input type="checkbox" class="tgt-cb" value="{{target}}"> {{target}}</label>
-      {% endfor %}
+<main id="auth-shell">
+  <section class="panel auth hero">
+    <div class="eyebrow" id="auth-eyebrow">First run</div>
+    <h2 id="auth-title">Claim this appliance</h2>
+    <p id="auth-copy" class="muted">The first person to set the owner password controls the console and depot credentials.</p>
+    <div class="formgrid" style="margin-top:18px">
+      <div class="field"><label for="auth-user">Username</label><input id="auth-user" value="vcf" readonly></div>
+      <div class="field"><label for="auth-password">Password</label><input id="auth-password" type="password" autocomplete="current-password"></div>
+      <div class="field full" id="confirm-wrap"><label for="auth-confirm">Confirm password</label><input id="auth-confirm" type="password" autocomplete="new-password"></div>
     </div>
-    <div class="row">
-      <button id="syncBtn">Sync selected</button>
-      <button id="refreshRemote" class="secondary">Check available versions</button>
-      <span id="flash" class="muted"></span>
-    </div>
-  </section>
-
-  <section class="panel">
-    <h2>Status</h2>
-    <div class="grid">
-      <div class="stat"><div class="k">State</div><div class="v" id="st-state">...</div></div>
-      <div class="stat"><div class="k">Current target</div><div class="v" id="st-current">...</div></div>
-      <div class="stat"><div class="k">Started</div><div class="v" id="st-started">...</div></div>
-      <div class="stat"><div class="k">Schedule</div><div class="v" id="st-cron">...</div></div>
-      <div class="stat"><div class="k">Next run</div><div class="v" id="st-next">...</div></div>
-      <div class="stat"><div class="k">VCF version filter</div><div class="v" id="st-ver">...</div></div>
-      <div class="stat"><div class="k">VCFDT version</div><div class="v" id="st-tool">...</div></div>
-    </div>
-    <h2 style="margin-top:16px">Per-target last sync</h2>
-    <div class="grid" id="lastruns"></div>
-  </section>
-
-  <section class="panel">
-    <h2>SFTP backup settings</h2>
-    <div class="formgrid">
-      <div class="field"><label>Service</label><label class="tgt"><input id="bk-enabled" type="checkbox"> Enabled</label></div>
-      <div class="field"><label for="bk-port">Published port</label><input id="bk-port" type="number" min="1" max="65535"></div>
-      <div class="field"><label for="bk-user">Allowed user</label><input id="bk-user" value="vcfbackup" readonly></div>
-      <div class="field"><label for="bk-uidgid">UID:GID</label><input id="bk-uidgid" placeholder="1003:1003"></div>
-      <div class="field full"><label for="bk-password">Password</label><input id="bk-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep the current secret"></div>
-      <div class="field"><label for="bk-storage">Shared depot and backup storage mode</label>
-        <select id="bk-storage"><option value="local">Local</option><option value="nfs">NFS</option></select></div>
-      <div class="field bk-local" id="bk-local-wrap"><label for="bk-local">Local depot root</label><input id="bk-local" placeholder="/srv/vcf-services/depot"></div>
-      <div class="field bk-local"><label for="bk-backup-local">Local backup root</label><input id="bk-backup-local" placeholder="/srv/vcf-services/backup"></div>
-      <div class="field bk-nfs"><label for="bk-nfs-server">NFS server</label><input id="bk-nfs-server"></div>
-      <div class="field bk-nfs"><label for="bk-nfs-export">Depot NFS export</label><input id="bk-nfs-export"></div>
-      <div class="field bk-nfs"><label for="bk-backup-nfs-export">Backup NFS export</label><input id="bk-backup-nfs-export"></div>
-      <div class="field bk-nfs"><label for="bk-nfs-options">NFS options</label><input id="bk-nfs-options"></div>
-      <div class="field full"><div class="stat"><div class="k">Backup root in use</div><div class="v" id="bk-path">...</div></div></div>
-    </div>
-    <p class="help">Enable, password, and UID:GID changes reload within five seconds. Port and shared storage changes are staged safely and require an installer rerun because they change host mounts or published ports.</p>
-    <div class="row" style="margin-top:12px"><button id="bk-save">Save backup settings</button><span id="bk-flash" class="muted"></span></div>
-  </section>
-
-  <section class="panel">
-    <h2>Live log</h2>
-    <pre id="log">(no run log yet)</pre>
-  </section>
-
-  <section class="panel">
-    <h2>Versions <span class="muted" id="rem-meta"></span></h2>
-    <div class="tablewrap">
-      <table>
-        <thead><tr><th>Component</th><th>Available</th><th>Type</th><th>Date</th><th>Size</th><th>In depot?</th></tr></thead>
-        <tbody id="vers"><tr><td colspan="6" class="muted">Check available versions when the sync engine is armed.</td></tr></tbody>
-      </table>
-    </div>
+    <p class="help" id="claim-risk">Trust on first use: claim the appliance from a trusted network before exposing it more broadly.</p>
+    <div class="row" style="margin-top:14px"><button id="auth-submit">Claim and continue</button><span id="auth-flash" class="error"></span></div>
   </section>
 </main>
+
+<main id="app-shell" hidden>
+  <section id="setup" class="panel hero">
+    <div class="eyebrow">Setup and settings</div>
+    <h2>Bring the depot online</h2>
+    <p class="muted">Complete these once. Every setting remains editable here afterward.</p>
+    <div class="steps">
+      <div id="progress-owner" class="step done">1. Owner</div>
+      <div id="progress-tool" class="step">2. Licensed tool</div>
+      <div id="progress-register" class="step">3. Registration</div>
+      <div id="progress-storage" class="step">4. Storage</div>
+      <div id="progress-settings" class="step">5. Sync settings</div>
+    </div>
+
+    <div class="setup-card">
+      <h3>Licensed VCF Download Tool</h3>
+      <div class="formgrid"><div class="field full"><label for="vcfdt-archive">Portal-downloaded archive</label>
+        <input id="vcfdt-archive" type="file" accept=".tar.gz,.tgz,.zip"></div></div>
+      <p class="help">The archive is validated on the mounted tool volume. It is never added to an image or repository.</p>
+      <div class="row"><button id="vcfdt-upload">Upload or replace tool</button><span id="vcfdt-flash" class="muted"></span></div>
+    </div>
+
+    <div class="setup-card">
+      <h3>Register the Software Depot ID</h3>
+      <div class="stat"><div class="key">Software Depot ID</div><div id="machine-id" class="value">Upload the tool first</div></div>
+      <p class="help">Register this ID in Broadcom's VCF Download Tool registration flow, then paste the activation code below.</p>
+      <div class="formgrid"><div class="field full"><label for="activation-code">Activation code</label>
+        <input id="activation-code" type="password" autocomplete="off" placeholder="Stored only in the protected secrets volume"></div></div>
+      <div class="row" style="margin-top:10px"><button id="save-activation">Save activation code</button><span id="activation-flash" class="muted"></span></div>
+    </div>
+
+    <div class="setup-card">
+      <h3>Platform-provided storage</h3>
+      <p class="muted">VCF Services consumes the mounted paths below. Configure the Docker volume, bind mount, Kubernetes PV, or NFS backing outside the appliance.</p>
+      <div class="grid" style="margin-top:10px">
+        <div class="stat"><div class="key">Depot writer</div><div id="depot-storage" class="value">Checking /depot</div></div>
+        <div class="stat"><div class="key">Backup target</div><div id="backup-storage" class="value">Checking /mnt/backup</div></div>
+      </div>
+      <label class="choice" style="margin-top:12px"><input id="storage-confirmed" type="checkbox"> I confirm these mounted paths have the intended durable backing.</label>
+    </div>
+
+    <div class="setup-card">
+      <h3>Sync and endpoint settings</h3>
+      <div class="formgrid">
+        <div class="field"><label for="vcf-version">VCF version filter</label><input id="vcf-version" placeholder="9.1.0"></div>
+        <div class="field"><label for="sku">SKU</label><select id="sku"><option>VCF</option><option>VVF</option></select></div>
+        <div class="field"><label for="cron">Recurring schedule</label><input id="cron" placeholder="0 3 * * 0"></div>
+        <div class="field"><label for="timezone">Timezone</label><input id="timezone" placeholder="UTC"></div>
+        <div class="field"><label for="ceip">CEIP</label><select id="ceip"><option>DISABLE</option><option>ENABLE</option></select></div>
+        <div class="field"><label for="backup-enabled">Backup service</label><label class="choice"><input id="backup-enabled" type="checkbox"> Enable SFTP on port 2222</label></div>
+        <div class="field"><label for="uidgid">SFTP UID:GID</label><input id="uidgid" placeholder="1003:1003"></div>
+        <div class="field"><label for="esx-mode">ESX target mode</label><select id="esx-mode"><option value="download">download</option><option value="metadata">metadata</option></select></div>
+        <div class="field"><label for="log-retention">Run logs to retain</label><input id="log-retention" type="number" min="1" max="1000"></div>
+        <div class="field full"><label>Scheduled targets</label><div id="settings-targets" class="targets">
+          {% for target in targets %}<label class="choice"><input type="checkbox" class="settings-target" value="{{target}}"> {{target}}</label>{% endfor %}
+        </div></div>
+        <div class="field"><label for="depot-endpoint">Advanced download endpoint</label><input id="depot-endpoint"></div>
+        <div class="field"><label for="token-url">Token URL</label><input id="token-url"></div>
+        <div class="field"><label for="vkr-match">VKr release pins</label><input id="vkr-match" placeholder="Optional"></div>
+        <div class="field"><label for="vkr-os">VKr OS filter</label><input id="vkr-os" placeholder="Optional"></div>
+      </div>
+      <p class="help">The sync scheduler reloads these file-backed settings automatically. Endpoint changes also update the mounted tool.</p>
+      <div class="row" style="margin-top:12px"><button id="save-settings">Save settings</button><span id="settings-flash" class="muted"></span></div>
+    </div>
+
+    <div class="row" style="margin-top:16px"><button id="finish-setup">Finish setup</button><span id="finish-flash" class="error"></span></div>
+  </section>
+
+  <section id="ready" class="notice success" hidden>Setup is complete. The console remains the source of truth for operator settings.</section>
+
+  <section class="panel">
+    <h2>TLS trust</h2>
+    <p class="muted">Download the first-boot root CA and add it to each VCF consumer trust store before configuring depot URLs.</p>
+    <a class="button-link" href="api/tls/ca" download>Download root CA</a>
+  </section>
+
+  <div class="two">
+    <section class="panel">
+      <h2>Sync now</h2>
+      <div class="targets" id="run-targets">
+        {% for target in targets %}<label class="choice"><input type="checkbox" class="run-target" value="{{target}}"> {{target}}</label>{% endfor %}
+      </div>
+      <div class="row" style="margin-top:14px"><button id="sync-btn">Sync selected</button><button id="refresh-remote" class="secondary">Check versions</button><span id="sync-flash" class="muted"></span></div>
+    </section>
+    <section class="panel">
+      <h2>Current state</h2>
+      <div class="grid">
+        <div class="stat"><div class="key">Sync engine</div><div class="value" id="st-state">Loading</div></div>
+        <div class="stat"><div class="key">Current target</div><div class="value" id="st-current">None</div></div>
+        <div class="stat"><div class="key">Next run</div><div class="value" id="st-next">Loading</div></div>
+        <div class="stat"><div class="key">Tool version</div><div class="value" id="st-tool">Loading</div></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel"><h2>Per-target last sync</h2><div id="last-runs" class="grid"></div></section>
+  <section class="panel"><h2>Live log</h2><pre id="log">No sync log yet.</pre></section>
+  <section class="panel">
+    <h2>Available versions <span id="version-meta" class="muted"></span></h2>
+    <div class="tablewrap"><table><thead><tr><th>Component</th><th>Version</th><th>Type</th><th>Date</th><th>Size</th><th>Depot</th></tr></thead><tbody id="versions"><tr><td colspan="6" class="muted">Check versions after registration.</td></tr></tbody></table></div>
+  </section>
+  <section class="panel">
+    <h2>Shared credential</h2>
+    <p class="muted">One password protects the console, depot, and SFTP service. A change requires updating every configured consumer.</p>
+    <div class="formgrid">
+      <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password"></div>
+      <div class="field"><label for="new-password">New password</label><input id="new-password" type="password"></div>
+    </div>
+    <div class="row" style="margin-top:12px"><button id="save-password">Change shared password</button><span id="password-flash" class="muted"></span></div>
+  </section>
+</main>
+
 <script>
-const byId = id => document.getElementById(id);
-const escapeHtml = text => { const node = document.createElement('div'); node.textContent = text ?? ''; return node.innerHTML; };
+const $ = id => document.getElementById(id);
+const esc = value => { const node=document.createElement('div'); node.textContent=value ?? ''; return node.innerHTML; };
 const fmt = value => value ? new Date(value).toLocaleString() : 'not available';
+let bootstrap = null;
 
-function toggleBackupStorage() {
-  const nfs = byId('bk-storage').value === 'nfs';
-  document.querySelectorAll('.bk-local').forEach(field => field.hidden = nfs);
-  document.querySelectorAll('.bk-nfs').forEach(field => field.hidden = !nfs);
+async function api(path, options={}) {
+  const response = await fetch(path, options);
+  let body = {};
+  try { body = await response.json(); } catch (_error) { body = {error:`Request failed (${response.status})`}; }
+  if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+  return body;
 }
 
-async function loadBackupSettings() {
-  try {
-    const response = await fetch('api/settings/backup');
-    const settings = await response.json();
-    if (!response.ok) throw new Error(settings.error || 'Settings unavailable');
-    byId('bk-enabled').checked = settings.enabled;
-    byId('bk-port').value = settings.port;
-    byId('bk-user').value = settings.user;
-    byId('bk-uidgid').value = settings.uidGid;
-    byId('bk-storage').value = settings.storageMode;
-    byId('bk-local').value = settings.localPath;
-    byId('bk-backup-local').value = settings.backupLocalPath;
-    byId('bk-nfs-server').value = settings.nfsServer;
-    byId('bk-nfs-export').value = settings.nfsExport;
-    byId('bk-backup-nfs-export').value = settings.backupNfsExport;
-    byId('bk-nfs-options').value = settings.nfsOptions;
-    byId('bk-path').textContent = settings.backupPath || 'created during installation';
-    byId('bk-password').placeholder = settings.passwordConfigured
-      ? 'Configured, leave blank to keep it' : 'Required before enabling backup';
-    toggleBackupStorage();
-  } catch (error) {
-    byId('bk-flash').textContent = error.message;
-  }
+function bytes(value) {
+  if (!Number.isFinite(value)) return 'unavailable';
+  const units=['B','KiB','MiB','GiB','TiB']; let amount=value, index=0;
+  while (amount >= 1024 && index < units.length-1) { amount/=1024; index++; }
+  return `${amount.toFixed(index > 2 ? 1 : 0)} ${units[index]}`;
 }
 
-async function poll() {
-  try {
-    const status = await (await fetch('api/status')).json();
-    const running = status.running;
-    const armed = status.armed;
-    byId('st-state').innerHTML = running
-      ? '<span class="pill run">running</span>'
-      : armed ? '<span class="pill ok">armed, idle</span>' : '<span class="pill err">not armed</span>';
-    byId('st-current').textContent = status.currentTarget || 'none';
-    byId('st-started').textContent = fmt(status.startedAt);
-    byId('st-cron').textContent = status.cron || 'not configured';
-    byId('st-next').textContent = fmt(status.nextRun);
-    byId('st-ver').textContent = status.vcfVersion || 'not configured';
-    byId('st-tool').textContent = status.vcfdtVersion || 'unknown';
-    byId('vcfdt-upload').disabled = running;
-    byId('arming').hidden = armed;
-    byId('arming').textContent = armed ? '' : `Not armed: activation code missing. ${status.armingInstructions}`;
-    const lastRun = status.lastRun || {};
-    byId('lastruns').innerHTML = status.targets.map(target => {
-      const result = lastRun[target];
-      const pill = !result ? '<span class="pill idle">never</span>'
-        : result.status === 'OK' ? '<span class="pill ok">ok</span>'
-        : `<span class="pill err">${escapeHtml(result.status)}</span>`;
-      return `<div class="stat"><div class="k">${escapeHtml(target)}</div><div class="v">${pill}<br>
-              <span class="muted" style="font-size:12px">${result ? fmt(result.finishedAt) : ''}</span></div></div>`;
-    }).join('');
-    byId('syncBtn').disabled = running || !armed;
-    byId('refreshRemote').disabled = running || !armed;
-    byId('syncBtn').textContent = running ? 'Sync running' : 'Sync selected';
-    const log = await (await fetch('api/log')).json();
-    if (log.log) {
-      const element = byId('log');
-      const atBottom = element.scrollTop + element.clientHeight >= element.scrollHeight - 30;
-      element.textContent = log.log;
-      if (atBottom) element.scrollTop = element.scrollHeight;
-    }
-  } catch (_error) {
-    byId('flash').textContent = 'Status temporarily unavailable';
-  }
+function storageText(item) {
+  if (!item?.mounted) return `${item?.path || 'path'} is not mounted`;
+  if (!item.readable) return `${item.path} cannot be inspected`;
+  return `${item.path}, ${bytes(item.freeBytes)} free of ${bytes(item.totalBytes)}`;
 }
 
-async function loadRemote(refresh) {
-  byId('rem-meta').textContent = 'loading';
-  try {
-    const response = await fetch('api/versions/remote' + (refresh ? '?refresh=1' : ''));
-    const result = await response.json();
-    if (result.error) { byId('rem-meta').textContent = result.error; return; }
-    if (result.pending) { byId('rem-meta').textContent = 'Refresh requested, check again shortly'; return; }
-    const rows = (result.components || []).sort((left, right) => left.component.localeCompare(right.component));
-    byId('vers').innerHTML = rows.length ? rows.map(component => `
-      <tr><td>${escapeHtml(component.name || component.component)}</td>
-          <td class="ver">${escapeHtml(component.version)}</td>
-          <td>${escapeHtml(component.type)}</td><td>${escapeHtml(component.date)}</td><td>${escapeHtml(component.size)}</td>
-          <td>${component.present ? '<span class="has">present</span>' : '<span class="upd">available</span>'}</td>
-      </tr>`).join('') : '<tr><td colspan="6" class="muted">No bundles returned</td></tr>';
-    const missing = rows.filter(component => !component.present).length;
-    byId('rem-meta').textContent = `${rows.length} bundles, ${missing} not in depot, fetched ${fmt(new Date(result.fetchedAt * 1000))}`;
-  } catch (_error) {
-    byId('rem-meta').textContent = 'Lookup failed';
-  }
+function setTargets(selector, selected) {
+  document.querySelectorAll(selector).forEach(box => { box.checked = selected.includes(box.value); });
 }
 
-byId('syncBtn').onclick = async () => {
-  const targets = [...document.querySelectorAll('.tgt-cb:checked')].map(box => box.value);
-  if (!targets.length) { byId('flash').textContent = 'Select at least one target'; return; }
-  byId('flash').textContent = 'Starting';
-  const response = await fetch('api/sync', {method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({targets})});
-  const result = await response.json();
-  byId('flash').textContent = response.ok ? `Started: ${targets.join(', ')}` : (result.error || 'Failed');
-  poll();
-};
-byId('refreshRemote').onclick = () => loadRemote(true);
-byId('vcfdt-upload').onclick = async () => {
-  const archive = byId('vcfdt-archive').files[0];
-  if (!archive) { byId('vcfdt-flash').textContent = 'Choose an archive first'; return; }
-  byId('vcfdt-upload').disabled = true;
-  byId('vcfdt-flash').textContent = 'Uploading and validating';
-  const payload = new FormData();
-  payload.append('archive', archive);
+function showAuth(claimed) {
+  $('auth-shell').hidden=false; $('app-shell').hidden=true;
+  $('auth-eyebrow').textContent=claimed ? 'Owner access' : 'First run';
+  $('auth-title').textContent=claimed ? 'Sign in' : 'Claim this appliance';
+  $('auth-copy').textContent=claimed ? 'Use the shared VCF Services credential.' : 'The first person to set the owner password controls the console and depot credentials.';
+  $('confirm-wrap').hidden=claimed; $('claim-risk').hidden=claimed;
+  $('auth-submit').textContent=claimed ? 'Sign in' : 'Claim and continue';
+  $('auth-password').autocomplete=claimed ? 'current-password' : 'new-password';
+}
+
+function populateSetup(data) {
+  bootstrap=data;
+  const settings=data.settings;
+  $('signed-in').textContent=`Signed in as ${settings.username}`; $('logout').hidden=false;
+  $('setup').hidden=false; $('ready').hidden=!data.setupComplete; $('finish-setup').hidden=data.setupComplete;
+  $('machine-id').textContent=data.machineId || data.machineIdError || 'Upload the tool first';
+  $('vcfdt-flash').textContent=data.tool.installed ? `${data.tool.version} is ready` : 'Not installed';
+  $('activation-flash').textContent=data.activationConfigured ? 'Activation code saved' : '';
+  $('depot-storage').textContent=storageText(data.storage.depot);
+  $('backup-storage').textContent=storageText(data.storage.backup);
+  $('storage-confirmed').checked=settings.storageConfirmed;
+  $('vcf-version').value=settings.vcfVersion; $('sku').value=settings.sku;
+  $('cron').value=settings.cronSchedule; $('timezone').value=settings.timezone;
+  $('ceip').value=settings.ceip; $('backup-enabled').checked=settings.backupEnabled;
+  $('uidgid').value=settings.uidGid; $('depot-endpoint').value=settings.depotEndpoint;
+  $('token-url').value=settings.tokenUrl; $('esx-mode').value=settings.esxMode;
+  $('log-retention').value=settings.logRetention; $('vkr-match').value=settings.vkrMatch;
+  $('vkr-os').value=settings.vkrOs; setTargets('.settings-target',settings.syncTargets);
+  setTargets('.run-target',settings.syncTargets);
+  $('progress-tool').className=`step ${data.tool.installed ? 'done' : 'active'}`;
+  $('progress-register').className=`step ${data.activationConfigured ? 'done' : data.tool.installed ? 'active' : ''}`;
+  $('progress-storage').className=`step ${settings.storageConfirmed ? 'done' : data.activationConfigured ? 'active' : ''}`;
+  $('progress-settings').className=`step ${data.setupComplete ? 'done' : settings.storageConfirmed ? 'active' : ''}`;
+}
+
+async function boot() {
   try {
-    const response = await fetch('api/vcfdt', {method:'POST', body:payload});
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || 'Upload failed');
-    byId('vcfdt-archive').value = '';
-    byId('vcfdt-flash').textContent = `Tool ${result.version || 'unknown'} is ready`;
+    const data=await api('api/bootstrap');
+    if (!data.claimed || !data.authenticated) { showAuth(data.claimed); return; }
+    $('auth-shell').hidden=true; $('app-shell').hidden=false; populateSetup(data);
     await poll();
-  } catch (error) {
-    byId('vcfdt-flash').textContent = error.message;
-  } finally {
-    byId('vcfdt-upload').disabled = false;
-  }
-};
-byId('bk-storage').onchange = toggleBackupStorage;
-byId('bk-save').onclick = async () => {
-  byId('bk-save').disabled = true;
-  byId('bk-flash').textContent = 'Saving';
-  const payload = {
-    enabled: byId('bk-enabled').checked,
-    port: byId('bk-port').value,
-    uidGid: byId('bk-uidgid').value,
-    password: byId('bk-password').value || null,
-    storageMode: byId('bk-storage').value,
-    localPath: byId('bk-local').value,
-    backupLocalPath: byId('bk-backup-local').value,
-    nfsServer: byId('bk-nfs-server').value,
-    nfsExport: byId('bk-nfs-export').value,
-    backupNfsExport: byId('bk-backup-nfs-export').value,
-    nfsOptions: byId('bk-nfs-options').value
-  };
+  } catch (error) { showAuth(false); $('auth-flash').textContent=error.message; }
+}
+
+$('auth-submit').onclick=async()=>{
+  $('auth-flash').textContent='';
+  const claimed=$('confirm-wrap').hidden;
+  const password=$('auth-password').value;
+  if (!claimed && password !== $('auth-confirm').value) { $('auth-flash').textContent='Passwords do not match'; return; }
   try {
-    const response = await fetch('api/settings/backup', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(payload)});
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || 'Save failed');
-    byId('bk-password').value = '';
-    byId('bk-flash').textContent = result.installerRerunRequired
-      ? 'Saved. Rerun install.sh to apply the port or storage change.'
-      : 'Saved. The SFTP service will reload within five seconds.';
-    await loadBackupSettings();
-  } catch (error) {
-    byId('bk-flash').textContent = error.message;
-  } finally {
-    byId('bk-save').disabled = false;
-  }
+    await api(claimed ? 'api/login' : 'api/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('auth-user').value,password})});
+    $('auth-password').value=''; $('auth-confirm').value=''; await boot();
+  } catch(error) { $('auth-flash').textContent=error.message; }
 };
 
-poll();
-loadBackupSettings();
-setInterval(poll, 5000);
+$('logout').onclick=async()=>{ await api('api/logout',{method:'POST'}); location.reload(); };
+
+$('vcfdt-upload').onclick=async()=>{
+  const file=$('vcfdt-archive').files[0]; if(!file){$('vcfdt-flash').textContent='Choose an archive';return;}
+  $('vcfdt-upload').disabled=true; $('vcfdt-flash').textContent='Uploading and validating';
+  const payload=new FormData(); payload.append('archive',file);
+  try { await api('api/vcfdt',{method:'POST',body:payload}); $('vcfdt-archive').value=''; populateSetup(await api('api/bootstrap')); }
+  catch(error){$('vcfdt-flash').textContent=error.message;} finally{$('vcfdt-upload').disabled=false;}
+};
+
+$('save-activation').onclick=async()=>{
+  $('activation-flash').textContent='Saving';
+  try { await api('api/registration',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({activationCode:$('activation-code').value})}); $('activation-code').value=''; populateSetup(await api('api/bootstrap')); }
+  catch(error){$('activation-flash').textContent=error.message;}
+};
+
+function settingsPayload(){ return {
+  vcfVersion:$('vcf-version').value, sku:$('sku').value, cronSchedule:$('cron').value,
+  timezone:$('timezone').value, ceip:$('ceip').value, backupEnabled:$('backup-enabled').checked,
+  uidGid:$('uidgid').value, depotEndpoint:$('depot-endpoint').value, tokenUrl:$('token-url').value,
+  esxMode:$('esx-mode').value, logRetention:$('log-retention').value,
+  vkrMatch:$('vkr-match').value, vkrOs:$('vkr-os').value,
+  storageConfirmed:$('storage-confirmed').checked,
+  syncTargets:[...document.querySelectorAll('.settings-target:checked')].map(box=>box.value)
+}; }
+
+$('save-settings').onclick=async()=>{
+  $('settings-flash').textContent='Saving';
+  try { await api('api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(settingsPayload())}); $('settings-flash').textContent='Saved and active'; populateSetup(await api('api/bootstrap')); }
+  catch(error){$('settings-flash').textContent=error.message;}
+};
+
+$('finish-setup').onclick=async()=>{
+  $('finish-flash').textContent='';
+  try { await api('api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(settingsPayload())}); await api('api/setup/complete',{method:'POST'}); populateSetup(await api('api/bootstrap')); }
+  catch(error){$('finish-flash').textContent=error.message;}
+};
+
+async function poll(){
+  try {
+    const status=await api('api/status'); const running=status.running, armed=status.armed;
+    $('st-state').innerHTML=running?'<span class="pill run">running</span>':armed?'<span class="pill ok">armed, idle</span>':'<span class="pill bad">not armed</span>';
+    $('st-current').textContent=status.currentTarget||'none'; $('st-next').textContent=fmt(status.nextRun); $('st-tool').textContent=status.vcfdtVersion;
+    $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}</span></div></div>`;}).join('');
+    $('sync-btn').disabled=running||!armed; $('refresh-remote').disabled=running||!armed; $('vcfdt-upload').disabled=running;
+    const log=await api('api/log'); if(log.log){const node=$('log');const bottom=node.scrollTop+node.clientHeight>=node.scrollHeight-30;node.textContent=log.log;if(bottom)node.scrollTop=node.scrollHeight;}
+  } catch(error){$('sync-flash').textContent=error.message;}
+}
+
+$('sync-btn').onclick=async()=>{
+  const targets=[...document.querySelectorAll('.run-target:checked')].map(box=>box.value);
+  if(!targets.length){$('sync-flash').textContent='Select at least one target';return;}
+  try{await api('api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets})});$('sync-flash').textContent=`Requested: ${targets.join(', ')}`;await poll();}
+  catch(error){$('sync-flash').textContent=error.message;}
+};
+
+$('refresh-remote').onclick=async()=>{
+  $('version-meta').textContent='loading';
+  try{const result=await api('api/versions/remote?refresh=1');if(result.pending){$('version-meta').textContent='refresh requested';return;}const rows=result.components||[];$('versions').innerHTML=rows.length?rows.map(item=>`<tr><td>${esc(item.name||item.component)}</td><td>${esc(item.version)}</td><td>${esc(item.type)}</td><td>${esc(item.date)}</td><td>${esc(item.size)}</td><td>${item.present?'present':'available'}</td></tr>`).join(''):'<tr><td colspan="6">No bundles returned</td></tr>';$('version-meta').textContent=`${rows.length} bundles`;}
+  catch(error){$('version-meta').textContent=error.message;}
+};
+
+$('save-password').onclick=async()=>{
+  $('password-flash').textContent='Saving';
+  try{await api('api/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({currentPassword:$('current-password').value,newPassword:$('new-password').value})});$('current-password').value='';$('new-password').value='';$('password-flash').textContent='Saved. Update all depot and backup consumers.';}
+  catch(error){$('password-flash').textContent=error.message;}
+};
+
+boot(); setInterval(()=>{if(!$('app-shell').hidden)poll();},5000);
 </script>
 </body>
 </html>

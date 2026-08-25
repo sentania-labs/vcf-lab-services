@@ -3,7 +3,7 @@ set -eu
 
 settings_file="${SETTINGS_FILE:-/config/settings.env}"
 password_file="${SFTP_PASSWORD_FILE:-/run/sftp-secrets/password}"
-backup_user=vcfbackup
+backup_user=vcf
 sshd_pid=""
 last_identity_warning=""
 
@@ -164,7 +164,7 @@ last_password_hash=""
 touch /run/sftp-supervisor-ready
 
 while :; do
-	enabled="$(setting BACKUP_ENABLED true)"
+	enabled="$(setting BACKUP_ENABLED false)"
 	uid_gid="$(setting SFTP_UID_GID 1003:1003)"
 	case "$enabled" in
 		true|yes|1)

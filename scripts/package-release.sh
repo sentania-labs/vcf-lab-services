@@ -27,16 +27,9 @@ files=(
 	docker-compose.yml
 	compose.sh
 	install.sh
-	Dockerfile.sync
-	Dockerfile.sync.dockerignore
 	caddy/Caddyfile
-	config/answers.example
-	config/settings.env.example
 	docs/redis-contract.md
 	docs/releasing.md
-	scripts/install-checks.sh
-	scripts/import-vcfdt-state.sh
-	scripts/validate-adopted-depot.sh
 	scripts/verify-byte-exact.sh
 )
 for file in "${files[@]}"; do
@@ -48,6 +41,11 @@ done
 cat > "$bundle_root/.release.env" <<EOF
 VCF_SERVICES_VERSION=$version
 VCF_SERVICES_IMAGE_REPOSITORY=$image_repository
+EOF
+cat > "$bundle_root/.env" <<EOF
+VCF_SERVICES_UI_IMAGE=$image_repository/ui:$version
+VCF_SERVICES_SYNC_IMAGE=$image_repository/sync-base:$version
+VCF_SERVICES_SFTP_IMAGE=$image_repository/sftp:$version
 EOF
 
 archive="$output_dir/$release_name.tar.gz"

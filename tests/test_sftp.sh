@@ -77,7 +77,7 @@ SSHPASS=sftp-test-password docker run --rm --network host --entrypoint /bin/sh \
 	-e SSHPASS -e "SFTP_PORT=$host_port" -v "$work_dir:/work:ro" "$image" \
 	-c 'printf "put /work/payload.txt /mnt/backup/vcenter/payload.txt\nbye\n" | \
 		sshpass -e sftp -q -o BatchMode=no -o StrictHostKeyChecking=no \
-		-o UserKnownHostsFile=/dev/null -P "$SFTP_PORT" vcfbackup@127.0.0.1'
+		-o UserKnownHostsFile=/dev/null -P "$SFTP_PORT" vcf@127.0.0.1'
 
 uploaded="$(docker run --rm --entrypoint /bin/sh -v "$backup_volume:/mnt/backup:ro" "$image" \
 	-c 'cat /mnt/backup/vcenter/payload.txt')"
@@ -87,14 +87,14 @@ if SSHPASS=wrong-password timeout 15 docker run --rm --network host --entrypoint
 	-e SSHPASS -e "SFTP_PORT=$host_port" "$image" \
 	-c 'printf "ls /mnt/backup\nbye\n" | sshpass -e sftp -q -o BatchMode=no \
 		-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-		-P "$SFTP_PORT" vcfbackup@127.0.0.1' >/dev/null 2>&1; then
+		-P "$SFTP_PORT" vcf@127.0.0.1' >/dev/null 2>&1; then
 	fail "SFTP accepted the wrong password"
 fi
 
 remote_command_output="$(SSHPASS=sftp-test-password timeout 15 docker run --rm --network host \
 	--entrypoint /bin/sh -e SSHPASS -e "SFTP_PORT=$host_port" "$image" \
 	-c 'sshpass -e ssh -o BatchMode=no -o StrictHostKeyChecking=no \
-		-o UserKnownHostsFile=/dev/null -p "$SFTP_PORT" vcfbackup@127.0.0.1 id' 2>/dev/null \
+		-o UserKnownHostsFile=/dev/null -p "$SFTP_PORT" vcf@127.0.0.1 id' 2>/dev/null \
 	| tr -cd "[:print:]" || true)"
 case "$remote_command_output" in
 	*uid=*) fail "SFTP account was able to run a remote command" ;;
@@ -104,11 +104,11 @@ SSHPASS=sftp-test-password docker run -d --name "$client_container" --network ho
 	--entrypoint /bin/sh -e SSHPASS -e "SFTP_PORT=$host_port" "$image" \
 	-c 'while :; do printf "pwd\n"; sleep 1; done | sshpass -e sftp -q -o BatchMode=no \
 		-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-		-P "$SFTP_PORT" vcfbackup@127.0.0.1' >/dev/null
+		-P "$SFTP_PORT" vcf@127.0.0.1' >/dev/null
 deadline=$((SECONDS + 30))
 session_started=false
 while [ "$SECONDS" -lt "$deadline" ]; do
-	if docker exec "$container" pgrep -u vcfbackup >/dev/null 2>&1; then
+	if docker exec "$container" pgrep -u vcf >/dev/null 2>&1; then
 		session_started=true
 		break
 	fi
@@ -121,7 +121,7 @@ deadline=$((SECONDS + 30))
 session_stopped=false
 while [ "$SECONDS" -lt "$deadline" ]; do
 	server_sessions="$(docker exec "$container" sh -c \
-		'pgrep -x sshd >/dev/null || pgrep -u vcfbackup >/dev/null; printf "%s" "$?"' 2>/dev/null || true)"
+		'pgrep -x sshd >/dev/null || pgrep -u vcf >/dev/null; printf "%s" "$?"' 2>/dev/null || true)"
 	if [ "$server_sessions" = 1 ]; then
 		session_stopped=true
 		break
@@ -179,7 +179,7 @@ SSHPASS=sftp-test-password docker run --rm --network host --entrypoint /bin/sh \
 	-e SSHPASS -e "SFTP_PORT=$host_port" -v "$work_dir:/work:ro" "$image" \
 	-c 'printf "put /work/payload.txt /mnt/backup/vcenter/reowned.txt\nbye\n" | \
 		sshpass -e sftp -q -o BatchMode=no -o StrictHostKeyChecking=no \
-		-o UserKnownHostsFile=/dev/null -P "$SFTP_PORT" vcfbackup@127.0.0.1' \
+		-o UserKnownHostsFile=/dev/null -P "$SFTP_PORT" vcf@127.0.0.1' \
 	|| fail "upload failed after the UID:GID change"
 
 docker rm -f "$container" >/dev/null

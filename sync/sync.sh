@@ -70,7 +70,7 @@ write_state() {
 
 not_armed_message() {
 	log "not armed: activation code missing"
-	log "Run '$tool configuration get --machineId', register that Software Depot ID in the Broadcom download tool registration flow, then rerun install.sh with the activation code."
+	log "Register the Software Depot ID and save the activation code in the admin console."
 }
 
 if [ "${1:-}" = "--status" ]; then
@@ -78,7 +78,7 @@ if [ "${1:-}" = "--status" ]; then
 		echo "armed: activation code present"
 	else
 		echo "not armed: activation code missing"
-		echo "Register the Software Depot ID in the Broadcom download tool registration flow, then rerun install.sh."
+		echo "Register the Software Depot ID and save the activation code in the admin console."
 	fi
 	exit 0
 fi
