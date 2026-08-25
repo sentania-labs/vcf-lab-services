@@ -74,8 +74,7 @@ jobs:
             -C "$RUNNER_TEMP/vcfdt/current" --strip-components=1
           docker run --rm \
             -v "$RUNNER_TEMP/vcfdt:/opt/vcfdt:ro" \
-            --entrypoint /opt/vcfdt/current/bin/vcf-download-tool \
-            vcf-services-sync-base:ci --version | grep -q '^vcf-download-tool '
+            vcf-services-sync-base:ci --version | grep -q 'Welcome to VCF Download Tool'
 
       - name: Run UI unit tests in the built image
         run: docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:ci python tests/test_ui.py

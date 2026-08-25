@@ -17,7 +17,14 @@ if [ ! -s "$state_dir/machine_id" ]; then
 fi
 
 if [ "${1:-}" = "--version" ]; then
-	echo "vcf-download-tool 0.0.0-stub"
+	cat <<'VERSION'
+*********Welcome to VCF Download Tool***********
+
+Version: 0.0.0.0.stub
+0.0.0.0.stub
+
+Log file: /opt/vmware/vcfdt/log/vdt.log
+VERSION
 	exit 0
 fi
 if [ "${1:-}" = configuration ] && [ "${2:-}" = get ] && [ "${3:-}" = --machineId ]; then
