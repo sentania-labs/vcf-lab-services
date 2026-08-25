@@ -169,55 +169,7 @@ run_release_step() {
 	GIT_CALLS_LOG="$git_calls" \
 	GH_CALLS_LOG="$gh_calls" \
 	PATH="$stub_bin:$PATH" \
-	RUNNER_TEMP="$work_dir/runner_temp" \
-	GITHUB_REF_NAME="v1.2.3" \
-	bash -euo pipefail -c '
-		version="$GITHUB_REF_NAME"
-		git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null
-
-		assets=(
-			"$RUNNER_TEMP/release/install.sh#Installer entry point"
-			"$RUNNER_TEMP/release/vcf-lab-services-$version.tar.gz#Installation bundle"
-			"$RUNNER_TEMP/release/vcf-lab-services-$version.tar.gz.sha256#Installation bundle checksum"
-		)
-
-		if gh release view "$version" >/dev/null 2>&1; then
-			echo "Release $version already exists; inspecting existing release and assets."
-			is_draft="$(gh release view "$version" --json isDraft --jq .isDraft)"
-
-			existing_dir="$(mktemp -d)"
-			gh release download "$version" --dir "$existing_dir" >/dev/null 2>&1 || true
-
-			upload_assets=()
-			for asset_spec in "${assets[@]}"; do
-				asset_path="${asset_spec%%#*}"
-				asset_name="$(basename "$asset_path")"
-				if [ -f "$existing_dir/$asset_name" ] && cmp -s "$asset_path" "$existing_dir/$asset_name"; then
-					echo "Asset $asset_name already exists and matches; skipping upload."
-				else
-					echo "Asset $asset_name is missing or differs; queuing for upload."
-					upload_assets+=("$asset_spec")
-				fi
-			done
-			rm -rf "$existing_dir"
-
-			if [ "${#upload_assets[@]}" -gt 0 ]; then
-				gh release upload "$version" "${upload_assets[@]}" --clobber
-			fi
-
-			if [ "$is_draft" = "true" ]; then
-				echo "Release $version is a draft; publishing release."
-				gh release edit "$version" --draft=false
-			fi
-		else
-			echo "Release $version does not exist; creating release."
-			gh release create "$version" \
-				"${assets[@]}" \
-				--verify-tag \
-				--generate-notes \
-				--title "$version"
-		fi
-	'
+	bash "$project_dir/scripts/publish-release.sh" "v1.2.3" "$work_dir/runner_temp/release"
 }
 
 mkdir -p "$work_dir/runner_temp/release" "$work_dir/empty_existing"
