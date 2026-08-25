@@ -96,13 +96,21 @@ class UiApiTests(unittest.TestCase):
         return bus
 
     @staticmethod
-    def tar_tool(version="9.1.2", machine_id="11111111-1111-4111-8111-111111111111"):
+    def tar_tool(
+        version="9.1.2",
+        machine_id="11111111-1111-4111-8111-111111111111",
+        version_output=None,
+    ):
+        if version_output is None:
+            version_output = f"Version: {version}\n{version}"
         payload = (
             "#!/bin/sh\n"
             "if [ \"${1:-}\" = configuration ]; then\n"
             f"  echo 'Software Depot ID: {machine_id}'\n"
             "else\n"
-            f"  echo 'vcf-download-tool {version}'\n"
+            "  cat <<'VCFDT_VERSION_OUTPUT'\n"
+            f"{version_output.rstrip()}\n"
+            "VCFDT_VERSION_OUTPUT\n"
             "fi\n"
         ).encode()
         stream = io.BytesIO()
@@ -194,9 +202,29 @@ class UiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         current = self.tool_store / "current"
         self.assertTrue(current.is_symlink())
-        self.assertEqual(response.get_json()["version"], "vcf-download-tool 9.1.2")
+        self.assertEqual(response.get_json()["version"], "9.1.2")
         properties = (current / "conf" / "application-prodv2.properties").read_text()
         self.assertIn("lcm.depot.adapter.host=dl.broadcom.com", properties)
+
+    def test_real_tool_version_output_is_parsed(self):
+        self.claim()
+        self.write_state()
+        real_output = """*********Welcome to VCF Download Tool***********
+
+Version: 9.1.0.0.25371089
+9.1.0.0.25371089
+
+Log file: /opt/vmware/vcfdt/log/vdt.log
+"""
+        archive = self.tar_tool(version_output=real_output)
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (archive, "vcf-download-tool-real.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["version"], "9.1.0.0.25371089")
+        self.assertTrue(response.get_json()["versionVerified"])
 
     def test_invalid_replacement_preserves_live_tool(self):
         self.claim()

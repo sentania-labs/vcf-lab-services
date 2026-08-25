@@ -71,10 +71,12 @@ LOG_KEY = "vcf-services:sync:log"
 VERSIONS_KEY = "vcf-services:sync:versions"
 VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr"]
 BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
-TOOL_VERSION_RE = re.compile(
-    r"vcf-download-tool(?:\s+version)?(?:\s*[:=])?\s+"
-    r"v?[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?",
-    re.IGNORECASE,
+TOOL_VERSION_VALUE = (
+    r"v?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?"
+)
+TOOL_VERSION_RE = re.compile(rf"^{TOOL_VERSION_VALUE}$", re.IGNORECASE)
+TOOL_VERSION_LABEL_RE = re.compile(
+    rf"^Version\s*:\s*(?P<version>{TOOL_VERSION_VALUE})$", re.IGNORECASE
 )
 SOFTWARE_DEPOT_ID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -398,16 +400,19 @@ def _probe_tool_version(tool_root):
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    version = next(
-        (line.strip() for line in result.stdout.splitlines() if line.strip()), ""
-    )
-    if (
-        result.returncode != 0
-        or len(version) > 120
-        or TOOL_VERSION_RE.fullmatch(version) is None
-    ):
+    if result.returncode != 0:
         return None
-    return version
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    for line in lines:
+        if len(line) > 120:
+            continue
+        match = TOOL_VERSION_LABEL_RE.fullmatch(line)
+        if match is not None:
+            return match.group("version")
+    for line in lines:
+        if len(line) <= 120 and TOOL_VERSION_RE.fullmatch(line) is not None:
+            return line
+    return None
 
 
 def _probe_machine_id(tool_root):

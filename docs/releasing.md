@@ -33,12 +33,14 @@ not created unless this published-image proof passes.
 
 Tool upload validation is structural: the archive must contain the expected
 binary layout, but the `--version` shape check is deliberately advisory. The
-exact output of the licensed binary is unverified here, so an unexpected or
-failed version probe still installs the archive and marks its version as
-unverified in the console instead of rejecting the upload. A failed or
-implausible Software Depot ID probe never blocks the upload and never replaces
-the last verified saved ID; the registration screen reports the probe failure.
-The shape check can be tightened once the real output is known.
+version parser is confirmed against licensed VCF Download Tool output for
+`9.1.0.0.25371089`: it scans past the banner, prefers the labelled `Version:`
+line, and accepts the bare dotted version as a fallback. The probe remains
+advisory by design so a future output-format change does not reject a valid
+upload. An unexpected or failed version probe still installs the archive and
+marks its version as unverified in the console. A failed or implausible
+Software Depot ID probe never blocks the upload and never replaces the last
+verified saved ID; the registration screen reports the probe failure.
 
 The release bundle contains only the Compose definition, Caddy configuration,
 thin optional bootstrap helper, operational documentation, license, and Range
