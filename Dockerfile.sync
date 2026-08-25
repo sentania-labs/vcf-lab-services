@@ -1,6 +1,2 @@
 ARG SYNC_BASE_IMAGE=vcf-services-sync-base:local
 FROM ${SYNC_BASE_IMAGE}
-
-COPY build/vcfdt/ /opt/vcfdt/
-RUN test -f /opt/vcfdt/bin/vcf-download-tool \
- && chmod 0755 /opt/vcfdt/bin/vcf-download-tool

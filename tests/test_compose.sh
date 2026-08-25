@@ -49,6 +49,17 @@ grep -q 'depot_store:/depot:rw' docker-compose.yml || fail "sync depot mount mus
 grep -q 'name: vcf-services-vcfdt-state' docker-compose.yml || fail "vcfdt state volume renamed"
 grep -A1 'name: vcf-services-vcfdt-state' docker-compose.yml | grep -q 'external: true' \
 	|| fail "vcfdt state volume must stay external"
+grep -q 'name: vcf-services-vcfdt-tool' docker-compose.yml || fail "vcfdt tool volume missing"
+! grep -q 'docker volume create vcf-services-vcfdt-tool' install.sh \
+	|| fail "installer must let Compose create and own the disposable tool volume"
+grep -q 'vcfdt_tool:/opt/vcfdt:ro' docker-compose.yml || fail "sync tool mount must be read-only"
+grep -q 'vcfdt_tool:/opt/vcfdt:rw' docker-compose.yml || fail "console tool mount must be read-write"
+[ "$(grep -c 'vcfdt_tool:/opt/vcfdt:rw' docker-compose.yml)" -eq 1 ] \
+	|| fail "only the console may write the tool volume"
+! grep -q 'patch_tool_endpoint' sync/entrypoint.sh \
+	|| fail "sync entrypoint must not rewrite the mounted tool"
+! grep -q 'COPY build/vcfdt' Dockerfile.sync || fail "licensed tool is still baked into an image"
+grep -q 'VCF_SERVICES_SYNC_IMAGE' docker-compose.yml || fail "compose does not consume the license-safe sync image"
 
 # SFTP backup contracts proven necessary by live VCF components.
 grep -q 'backup_store:/mnt/backup:rw' docker-compose.yml || fail "backup storage must be read-write at /mnt/backup"
@@ -116,8 +127,6 @@ set -e
 [ "$preflight_status" -eq 1 ] || fail "compose preflight did not reject missing prerequisites"
 grep -q 'external volume vcf-services-vcfdt-state' <<< "$preflight_output" \
 	|| fail "compose preflight did not identify the missing external volume"
-grep -q 'local image vcf-services-sync:local' <<< "$preflight_output" \
-	|| fail "compose preflight did not identify the missing local image"
 grep -q 'Run ./install.sh instead' <<< "$preflight_output" \
 	|| fail "compose preflight did not direct the operator to install.sh"
 ! grep -q '^compose up' "$DOCKER_CALLS" || fail "Compose ran after a failed preflight"
@@ -132,21 +141,8 @@ set -e
 	|| fail "compose global options bypassed the installation preflight"
 grep -q 'external volume vcf-services-vcfdt-state' <<< "$option_preflight_output" \
 	|| fail "options-before-command preflight missed the external volume"
-grep -q 'local image vcf-services-sync:local' <<< "$option_preflight_output" \
-	|| fail "options-before-command preflight missed the local image"
 ! grep -q '^compose ' "$DOCKER_CALLS" \
 	|| fail "Compose ran after an options-before-command preflight failure"
-
-: > "$DOCKER_CALLS"
-set +e
-volume_only_output="$(MOCK_VOLUME_EXISTS=true PATH="$work_dir/bin:$PATH" ./compose.sh up -d 2>&1)"
-volume_only_status=$?
-set -e
-[ "$volume_only_status" -eq 1 ] || fail "compose preflight accepted a missing local image"
-grep -q 'local image vcf-services-sync:local' <<< "$volume_only_output" \
-	|| fail "compose preflight missed the absent local image"
-! grep -q 'external volume' <<< "$volume_only_output" \
-	|| fail "compose preflight reported a volume that exists"
 
 : > "$DOCKER_CALLS"
 set +e
@@ -160,11 +156,11 @@ grep -q 'external volume vcf-services-vcfdt-state' <<< "$image_only_output" \
 	|| fail "compose preflight reported an image that exists"
 
 : > "$DOCKER_CALLS"
-MOCK_VOLUME_EXISTS=true MOCK_IMAGE_EXISTS=true PATH="$work_dir/bin:$PATH" ./compose.sh up -d
+MOCK_VOLUME_EXISTS=true PATH="$work_dir/bin:$PATH" ./compose.sh up -d
 grep -qx 'compose up -d' "$DOCKER_CALLS" || fail "validated up command was not passed to Compose"
 
 : > "$DOCKER_CALLS"
-MOCK_VOLUME_EXISTS=true MOCK_IMAGE_EXISTS=true PATH="$work_dir/bin:$PATH" \
+MOCK_VOLUME_EXISTS=true PATH="$work_dir/bin:$PATH" \
 	./compose.sh --profile debug --ansi never up -d
 grep -qx 'compose --profile debug --ansi never up -d' "$DOCKER_CALLS" \
 	|| fail "Compose global options were not preserved after preflight"
@@ -175,7 +171,7 @@ grep -qx 'compose ps' "$DOCKER_CALLS" || fail "day-to-day Compose command was no
 
 # The wrapper acts on its own project no matter where the operator invokes it.
 : > "$DOCKER_CALLS"
-(cd "$work_dir" && MOCK_VOLUME_EXISTS=true MOCK_IMAGE_EXISTS=true \
+(cd "$work_dir" && MOCK_VOLUME_EXISTS=true \
 	PATH="$work_dir/bin:$PATH" "$project_dir/compose.sh" up -d)
 grep -qx 'compose up -d' "$DOCKER_CALLS" \
 	|| fail "compose wrapper failed when invoked from another directory"

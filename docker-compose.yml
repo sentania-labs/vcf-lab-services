@@ -30,7 +30,7 @@ services:
 
   depot-sync:
     container_name: vcf-services-sync
-    image: vcf-services-sync:local
+    image: ${VCF_SERVICES_SYNC_IMAGE:-vcf-services-sync-base:local}
     restart: unless-stopped
     environment:
       SETTINGS_FILE: /etc/vcf-services/settings.env
@@ -40,8 +40,11 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_PASSWORD_FILE: /run/secrets/redis/password
+      TOOL_ROOT: /opt/vcfdt/current
+      VCFDT_TOOL_STORE: /opt/vcfdt
     volumes:
       - depot_store:/depot:rw
+      - vcfdt_tool:/opt/vcfdt:ro
       - vcfdt_state:/root/.local/share/vmware/vdt
       - sync_state:/state:rw
       - ./config:/etc/vcf-services:ro
@@ -98,8 +101,10 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_PASSWORD_FILE: /run/redis/password
+      VCFDT_STORE: /opt/vcfdt
     volumes:
       - depot_store:/depot:ro
+      - vcfdt_tool:/opt/vcfdt:rw
       - sync_state:/state:ro
       - ./config:/config
       - ./secrets/redis:/run/redis:ro
@@ -151,6 +156,8 @@ volumes:
   vcfdt_state:
     name: vcf-services-vcfdt-state
     external: true
+  vcfdt_tool:
+    name: vcf-services-vcfdt-tool
   sync_state:
     name: vcf-services-sync-state
   caddy_data:

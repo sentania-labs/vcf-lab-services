@@ -46,14 +46,6 @@ jobs:
           SOURCE_URL: https://github.com/${{ github.repository }}
         run: |
           version="sha-${GITHUB_SHA::12}"
-          # Stage the stub vendor tool first so the license-safe images are
-          # built and verified with vendor-shaped content in the build context.
-          ./tests/make-stub-vcfdt.sh "$RUNNER_TEMP/vcf-download-tool-0.0.0-stub.tar.gz"
-          rm -rf build/vcfdt
-          mkdir -p build/vcfdt
-          tar -xzf "$RUNNER_TEMP/vcf-download-tool-0.0.0-stub.tar.gz" \
-            -C build/vcfdt --strip-components=1
-          test -f build/vcfdt/bin/vcf-download-tool
           docker build --pull \
             --build-arg "VCF_SERVICES_VERSION=$version" \
             --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
@@ -77,14 +69,16 @@ jobs:
           test "$(docker image inspect vcf-services-sftp:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
           ./scripts/verify-license-boundary.sh vcf-services-sync-base:ci
 
-      - name: Build and exercise the local licensed sync layer
+      - name: Exercise the mounted tool contract
         run: |
-          docker build \
-            --build-arg SYNC_BASE_IMAGE=vcf-services-sync-base:ci \
-            --file Dockerfile.sync \
-            --tag vcf-services-sync:ci .
-          docker run --rm --entrypoint /opt/vcfdt/bin/vcf-download-tool \
-            vcf-services-sync:ci --version | grep -q '^vcf-download-tool '
+          ./tests/make-stub-vcfdt.sh "$RUNNER_TEMP/vcf-download-tool-0.0.0-stub.tar.gz"
+          mkdir -p "$RUNNER_TEMP/vcfdt/current"
+          tar -xzf "$RUNNER_TEMP/vcf-download-tool-0.0.0-stub.tar.gz" \
+            -C "$RUNNER_TEMP/vcfdt/current" --strip-components=1
+          docker run --rm \
+            -v "$RUNNER_TEMP/vcfdt:/opt/vcfdt:ro" \
+            --entrypoint /opt/vcfdt/current/bin/vcf-download-tool \
+            vcf-services-sync-base:ci --version | grep -q '^vcf-download-tool '
 
       - name: Run UI unit tests in the built image
         run: docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:ci python tests/test_ui.py

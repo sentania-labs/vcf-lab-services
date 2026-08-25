@@ -12,9 +12,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   and keep the published sync base free of licensed VCFDT content.
 - Preserve the storage contracts in `docker-compose.yml`: the depot is `/depot`
   in both consumers, backup storage is separate and read-write at `/mnt/backup`,
-  and `vcf-services-vcfdt-state` plus `vcf-services-sftp-host-keys` are external
-  volumes so a recreate cannot discard the registered Software Depot ID or the
-  published SFTP host-key fingerprints.
+  `vcf-services-vcfdt-tool` is disposable and distinct from the protected
+  `vcf-services-vcfdt-state`, and the state plus SFTP host-key volumes are
+  external so a recreate cannot discard registered identity or fingerprints.
+  The console mounts the tool read-write and the sync service mounts it
+  read-only.
 - The admin console and sync service exchange jobs only over the internal
   password-protected Redis bus defined in `docs/redis-contract.md`. No
   container mounts the Docker socket and macvlan networking is out of scope.

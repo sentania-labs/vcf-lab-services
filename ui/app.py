@@ -7,14 +7,21 @@ protected Redis bus documented in docs/redis-contract.md. It never talks to
 the Docker daemon.
 """
 
+import fcntl
 import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
+import tarfile
 import tempfile
 import time
+import uuid
+import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
 
 import redis as redis_lib
@@ -24,6 +31,7 @@ from flask import Flask, jsonify, render_template, request
 DEPOT = Path(os.environ.get("DEPOT_DIR", "/depot"))
 STATE = Path(os.environ.get("STATE_DIR", "/state"))
 SETTINGS = Path(os.environ.get("SETTINGS_FILE", "/config/settings.env"))
+VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
 SFTP_SECRET_DIR = Path(os.environ.get("SFTP_SECRET_DIR", "/run/sftp-secrets"))
 SFTP_PASSWORD_FILE = SFTP_SECRET_DIR / "password"
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
@@ -41,7 +49,227 @@ ARMING_INSTRUCTIONS = (
 )
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 _local_cache = {"ts": 0.0, "builds": None}
+
+MAX_ARCHIVE_MEMBERS = 20000
+MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
+
+
+class ToolArchiveError(ValueError):
+    """An operator-supplied archive failed validation."""
+
+
+def _safe_archive_path(name):
+    normalized = str(name).replace("\\", "/")
+    if not normalized or "\x00" in normalized:
+        raise ToolArchiveError("the archive contains an unsafe path")
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ToolArchiveError("the archive contains an unsafe path")
+    if path.parts and path.parts[0].endswith(":"):
+        raise ToolArchiveError("the archive contains an unsafe path")
+    return path
+
+
+def _extract_tar(archive_path, destination):
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            members = []
+            extracted_bytes = 0
+            for member in archive:
+                members.append(member)
+                if len(members) > MAX_ARCHIVE_MEMBERS:
+                    raise ToolArchiveError("the archive contains too many files")
+                _safe_archive_path(member.name)
+                if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                    raise ToolArchiveError("the archive contains an unsupported file type")
+                if member.issym() or member.islnk():
+                    _safe_archive_path(member.linkname)
+                extracted_bytes += max(member.size, 0)
+                if extracted_bytes > MAX_EXTRACTED_BYTES:
+                    raise ToolArchiveError("the expanded archive is too large")
+            archive.extractall(destination, members=members, filter="data")
+    except (tarfile.TarError, OSError) as exc:
+        raise ToolArchiveError("the uploaded file is not a readable tar.gz archive") from exc
+
+
+def _extract_zip(archive_path, destination):
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            members = archive.infolist()
+            if len(members) > MAX_ARCHIVE_MEMBERS:
+                raise ToolArchiveError("the archive contains too many files")
+            extracted_bytes = 0
+            seen = set()
+            file_modes = []
+            for member in members:
+                path = _safe_archive_path(member.filename.rstrip("/"))
+                if path in seen:
+                    raise ToolArchiveError("the archive contains duplicate paths")
+                seen.add(path)
+                if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise ToolArchiveError("the archive contains an unsupported symbolic link")
+                extracted_bytes += max(member.file_size, 0)
+                if extracted_bytes > MAX_EXTRACTED_BYTES:
+                    raise ToolArchiveError("the expanded archive is too large")
+                if not member.is_dir():
+                    file_modes.append((path, (member.external_attr >> 16) & 0o777))
+            archive.extractall(destination)
+            for path, mode in file_modes:
+                if mode:
+                    os.chmod(destination / path, mode)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ToolArchiveError("the uploaded file is not a readable zip archive") from exc
+
+
+def _archive_kind(filename):
+    lowered = filename.lower()
+    if lowered.endswith((".tar.gz", ".tgz")):
+        return "tar"
+    if lowered.endswith(".zip"):
+        return "zip"
+    raise ToolArchiveError("choose a .tar.gz, .tgz, or .zip VCF Download Tool archive")
+
+
+def _patch_tool_endpoints(tool_root):
+    properties = tool_root / "conf" / "application-prodv2.properties"
+    if not properties.is_file():
+        return
+    settings = _settings()
+    replacements = {
+        "lcm.depot.adapter.host": settings.get("DEPOT_ENDPOINT", "dl.broadcom.com"),
+        "lcm.access_token.broadcom.authorization.server.url": settings.get(
+            "TOKEN_URL", "https://eapi.broadcom.com/vcf/generateToken"
+        ),
+    }
+    lines = properties.read_text().splitlines()
+    found = set()
+    updated = []
+    for line in lines:
+        key = line.split("=", 1)[0]
+        if key in replacements:
+            updated.append(f"{key}={replacements[key]}")
+            found.add(key)
+        else:
+            updated.append(line)
+    updated.extend(f"{key}={value}" for key, value in replacements.items() if key not in found)
+    properties.write_text("\n".join(updated) + "\n")
+
+
+def _find_tool_root(extracted):
+    candidates = [
+        path
+        for path in extracted.rglob("vcf-download-tool")
+        if path.parent.name == "bin" and path.is_file() and not path.is_symlink()
+    ]
+    if len(candidates) != 1 or candidates[0].stat().st_size == 0:
+        raise ToolArchiveError(
+            "the archive must contain exactly one non-empty bin/vcf-download-tool file"
+        )
+    tool = candidates[0]
+    tool.chmod(0o755)
+    return tool.parent.parent
+
+
+def _probe_tool_version(tool_root):
+    try:
+        result = subprocess.run(
+            [tool_root / "bin" / "vcf-download-tool", "--version"],
+            cwd=tool_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ToolArchiveError("bin/vcf-download-tool could not report its version") from exc
+    first_line = next(
+        (line.strip() for line in result.stdout.splitlines() if line.strip()), ""
+    )
+    version = re.sub(r"[^A-Za-z0-9._ +()-]", "", first_line)[:120].strip()
+    if result.returncode != 0 or not version:
+        raise ToolArchiveError("bin/vcf-download-tool could not report its version")
+    return version
+
+
+def _current_tool_info():
+    current = VCFDT_STORE / "current"
+    tool = current / "bin" / "vcf-download-tool"
+    if not current.is_dir() or not tool.is_file() or tool.is_symlink() or tool.stat().st_size == 0:
+        return {"installed": False, "version": "not installed"}
+    metadata = {}
+    try:
+        metadata = json.loads((current / ".vcf-services.json").read_text())
+    except (OSError, ValueError):
+        pass
+    return {
+        "installed": True,
+        "version": metadata.get("version", "unknown"),
+        "uploadedAt": metadata.get("uploadedAt"),
+    }
+
+
+@contextmanager
+def _tool_update_lock():
+    VCFDT_STORE.mkdir(parents=True, exist_ok=True)
+    lock_file = open(VCFDT_STORE / ".update.lock", "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        lock_file.close()
+
+
+def _install_tool(upload):
+    filename = Path(str(upload.filename or "").replace("\\", "/")).name
+    archive_kind = _archive_kind(filename)
+    release_id = uuid.uuid4().hex
+    incoming = VCFDT_STORE / ".incoming" / release_id
+    extracted = incoming / "extracted"
+    archive_path = incoming / "upload"
+    releases = VCFDT_STORE / "releases"
+    release_path = releases / release_id
+    next_link = VCFDT_STORE / f".current-{release_id}"
+    incoming.mkdir(parents=True)
+    extracted.mkdir()
+    releases.mkdir(exist_ok=True)
+    old_target = None
+    swapped = False
+    try:
+        upload.save(archive_path)
+        if archive_path.stat().st_size == 0:
+            raise ToolArchiveError("the uploaded archive is empty")
+        if archive_kind == "tar":
+            _extract_tar(archive_path, extracted)
+        else:
+            _extract_zip(archive_path, extracted)
+        tool_root = _find_tool_root(extracted)
+        _patch_tool_endpoints(tool_root)
+        metadata = {
+            "version": _probe_tool_version(tool_root),
+            "uploadedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        (tool_root / ".vcf-services.json").write_text(json.dumps(metadata) + "\n")
+        os.replace(tool_root, release_path)
+
+        current = VCFDT_STORE / "current"
+        if current.is_symlink():
+            old_target = (VCFDT_STORE / os.readlink(current)).resolve()
+        next_link.symlink_to(Path("releases") / release_id)
+        os.replace(next_link, current)
+        swapped = True
+        return metadata, old_target
+    finally:
+        if not swapped:
+            shutil.rmtree(release_path, ignore_errors=True)
+        next_link.unlink(missing_ok=True)
+        shutil.rmtree(incoming, ignore_errors=True)
+
+
+@app.errorhandler(413)
+def upload_too_large(_error):
+    return jsonify({"error": "the uploaded archive exceeds the 1 GiB limit"}), 413
 
 
 def _redis():
@@ -280,6 +508,7 @@ def index():
 def status():
     state = _state()
     settings = _settings()
+    tool_info = _current_tool_info()
     cron = settings.get("CRON_SCHEDULE", "0 3 * * 0")
     try:
         tzinfo = ZoneInfo(settings.get("TZ") or "UTC")
@@ -305,9 +534,37 @@ def status():
             "targets": VALID_TARGETS,
             "defaultTargets": settings.get("SYNC_TARGETS", "").split(),
             "vcfVersion": settings.get("VCF_VERSION", "9.1.0"),
-            "vcfdtVersion": settings.get("VCFDT_VERSION", "unknown"),
+            "vcfdtInstalled": tool_info["installed"],
+            "vcfdtVersion": tool_info["version"],
+            "vcfdtUploadedAt": tool_info.get("uploadedAt"),
         }
     )
+
+
+@app.get("/api/vcfdt")
+def vcfdt_status():
+    return jsonify(_current_tool_info())
+
+
+@app.post("/api/vcfdt")
+def upload_vcfdt():
+    upload = request.files.get("archive")
+    if upload is None or not upload.filename:
+        return jsonify({"error": "choose a VCF Download Tool archive"}), 400
+    try:
+        with _tool_update_lock():
+            if _state().get("running", False):
+                return jsonify({"error": "wait for the running sync to finish"}), 409
+            metadata, old_target = _install_tool(upload)
+            if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
+                shutil.rmtree(old_target, ignore_errors=True)
+    except BlockingIOError:
+        return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
+    except ToolArchiveError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError:
+        return jsonify({"error": "the tool could not be saved to its mounted volume"}), 500
+    return jsonify({"installed": True, **metadata}), 201
 
 
 @app.get("/api/log")

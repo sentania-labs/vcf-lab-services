@@ -67,6 +67,9 @@ when the key is absent, because the bus is not persistent.
 ```
 
 On failure the scheduler stores `{"error": "...", "fetchedAt": "..."}` instead:
-`not armed: activation code missing` when the sync engine is dormant, or
+`not armed: activation code missing` when the sync engine is dormant,
 `refresh skipped: a sync or refresh is already running, retry when it finishes`
-when the depot lock is held and no earlier versions value exists.
+when the depot lock is held and no earlier versions value exists,
+`VCF Download Tool is not installed; upload it in the admin console` when no
+executable tool is mounted, or a re-upload instruction when the mounted tool
+volume is missing its update lock.

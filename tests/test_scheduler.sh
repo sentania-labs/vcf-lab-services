@@ -96,6 +96,7 @@ echo invoked >> "$work_dir/tool-calls.log"
 echo "stub versions output"
 EOF
 chmod 0755 "$work_dir/tool/bin/vcf-download-tool"
+touch "$work_dir/tool/.update.lock"
 printf 'stub-code\n' > "$work_dir/activation-code.txt"
 
 refresh_set_log="$work_dir/refresh-set.log"

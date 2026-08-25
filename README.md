@@ -6,23 +6,23 @@ offline depot, a scheduled VCF Download Tool sync engine, an SFTP file backup
 target, and an admin console.
 
 The licensed VCF Download Tool is never included, downloaded, or redistributed
-by this project. You provide the archive obtained from the Broadcom support
-portal during installation.
+by this project. After startup, upload the archive obtained from the Broadcom
+support portal through the admin console.
 
-Run `./install.sh` for the first installation. `docker compose up` alone cannot
-work because the installer layers your operator-supplied licensed tool into a
-local image and creates its protected state volume.
+Run `./install.sh` for the first installation. It creates the protected state
+volume and starts the stack with the published, license-safe sync image. No
+local image build is required.
 
 ## Requirements
 
 - Linux on x86_64
 - Docker Engine and Docker Compose v2
-- OpenSSL, curl, tar, and at least 500 GB free for the depot by default
+- OpenSSL, curl, and at least 500 GB free for the depot by default
 - `ss` from the host's `iproute2` package for published-port collision checks
 - Outbound HTTPS access to the configured download endpoint, and to `ghcr.io`
   so the installer can pull the product images without registry credentials
-- A VCF Download Tool `.tar.gz` or `.zip` containing
-  `bin/vcf-download-tool`
+- A VCF Download Tool `.tar.gz`, `.tgz`, or `.zip` containing
+  `bin/vcf-download-tool`, ready to upload in the console
 - `nfs-common` or the equivalent NFS client package when using NFS storage
 
 Plan for roughly 0.5 to 1 TB for one VCF release train. The full VKr library is
@@ -45,13 +45,11 @@ the pre-release proof: run `./install.sh` in the checkout, optionally with
 `--version` and `--image-repository`. See
 [docs/releasing.md](docs/releasing.md).
 
-Every prompt shows its default. The installer validates the host and vendor
-archive, pulls the release's admin UI and license-safe sync base images, layers
-your VCF Download Tool archive into a local sync image, preserves the Software
-Depot ID in a dedicated Docker volume, configures storage and TLS, generates
-the Redis job bus password, starts the five services (depot web, sync, SFTP
-backup, admin console, Redis), and performs live HTTPS and SFTP checks plus a
-Redis exposure check.
+Every prompt shows its default. The installer validates the host, pulls the
+release's license-safe images, preserves the Software Depot ID in a dedicated
+Docker volume, configures storage and TLS, generates the Redis job bus password,
+starts the five services (depot web, sync, SFTP backup, admin console, Redis),
+and performs live HTTPS and SFTP checks plus a Redis exposure check.
 Use `./install.sh --answers-file answers.env`
 for an unattended run. See [config/answers.example](config/answers.example) for
 the supported keys. Keep completed answer files outside the repository with
@@ -60,6 +58,14 @@ mode `0600` because they contain the installation password.
 Installation is safe to rerun. Existing depot data and the Software Depot ID
 volume are retained. No password ships with the product, and installation
 requires one.
+
+Sign in at `/admin/`, select the VCF Download Tool archive, and choose
+**Upload or replace tool**. The console extracts into staging, rejects unsafe
+or incomplete archives, and switches the live tool only after validation. Use
+the same control for later tool replacements. A replacement is refused while
+a sync is running. Until the guided registration console slice lands, rerun
+`./install.sh` once after the first upload to display the Software Depot ID and
+save its activation code.
 
 If you skip the activation code, the stack remains healthy but sync is dormant.
 The CLI and GUI report `not armed: activation code missing` and show the
@@ -131,9 +137,9 @@ container does not change them.
 
 If you need to start the stack manually after installation, use
 `./compose.sh up -d`. It checks that the Docker daemon is reachable and that
-the install-created state volume and local sync image exist before invoking
-Compose with your original arguments. The normal day-to-day commands remain
-direct Compose commands:
+the install-created state volume exists before invoking Compose with your
+original arguments. The normal day-to-day commands remain direct Compose
+commands:
 
 ```bash
 docker compose ps
@@ -159,10 +165,9 @@ The bus contract is documented in [docs/redis-contract.md](docs/redis-contract.m
 
 Sync settings hot-reload without recreating containers. The sync scheduler
 re-reads `config/settings.env` every cycle, so schedule changes take effect
-within a minute, and each run re-reads all sync settings. The only rebuild
-exception is a VCFDT self-upgrade, which is performed by rerunning
-`install.sh`, never by the GUI. HTTPS is served on a published host port, 443
-by default.
+within a minute, and each run re-reads all sync settings. VCFDT replacement is
+performed in the console and does not rebuild or recreate a container. HTTPS
+is served on a published host port, 443 by default.
 
 The admin console includes SFTP backup controls for enablement, password,
 UID:GID, port, and the shared local or NFS storage selection. Enablement,
@@ -242,6 +247,12 @@ The installer creates it before Compose starts, and Compose will not remove it.
 Back up this small volume and `secrets/`; losing the ID invalidates the
 activation code. The depot itself can be downloaded again. A plain copy of the
 depot tree preserves its portable layout.
+
+The separate `vcf-services-vcfdt-tool` volume stores the uploaded executable.
+It is disposable and can be restored by uploading the archive again. It must
+never be merged with `vcf-services-vcfdt-state`, whose machine identity is not
+disposable. The admin console mounts the tool volume read-write for upload and
+replacement; the internet-facing sync service mounts it read-only.
 
 Backup data uses a separate volume mounted read-write at `/mnt/backup`. Its
 location is prompted separately from the depot and must sit outside the depot
@@ -362,7 +373,7 @@ mirrored there and in the generated `.env` file.
 ## Scope
 
 This slice does not include a dedicated-IP or macvlan mode for SFTP, guided
-Supervisor or VKr content injection, VCFDT self-upgrade, or stack upgrade.
+Supervisor or VKr content injection, or stack upgrade.
 Those features are planned without changing the depot persistence and config
 contracts established here.
 

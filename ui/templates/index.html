@@ -65,6 +65,21 @@
 </header>
 <main>
   <section class="panel">
+    <h2>VCF Download Tool</h2>
+    <div class="formgrid">
+      <div class="field full">
+        <label for="vcfdt-archive">Licensed tool archive</label>
+        <input id="vcfdt-archive" type="file" accept=".tar.gz,.tgz,.zip">
+      </div>
+    </div>
+    <p class="help">Upload the archive downloaded from the Broadcom portal. The console validates a complete replacement before switching the sync service to it. The Software Depot ID is stored in a separate protected volume.</p>
+    <div class="row" style="margin-top:12px">
+      <button id="vcfdt-upload">Upload or replace tool</button>
+      <span id="vcfdt-flash" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="panel">
     <div id="arming" class="notice" hidden></div>
     <h2>Sync now</h2>
     <div class="row" style="margin-bottom:12px">
@@ -181,6 +196,7 @@ async function poll() {
     byId('st-next').textContent = fmt(status.nextRun);
     byId('st-ver').textContent = status.vcfVersion || 'not configured';
     byId('st-tool').textContent = status.vcfdtVersion || 'unknown';
+    byId('vcfdt-upload').disabled = running;
     byId('arming').hidden = armed;
     byId('arming').textContent = armed ? '' : `Not armed: activation code missing. ${status.armingInstructions}`;
     const lastRun = status.lastRun || {};
@@ -239,6 +255,26 @@ byId('syncBtn').onclick = async () => {
   poll();
 };
 byId('refreshRemote').onclick = () => loadRemote(true);
+byId('vcfdt-upload').onclick = async () => {
+  const archive = byId('vcfdt-archive').files[0];
+  if (!archive) { byId('vcfdt-flash').textContent = 'Choose an archive first'; return; }
+  byId('vcfdt-upload').disabled = true;
+  byId('vcfdt-flash').textContent = 'Uploading and validating';
+  const payload = new FormData();
+  payload.append('archive', archive);
+  try {
+    const response = await fetch('api/vcfdt', {method:'POST', body:payload});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Upload failed');
+    byId('vcfdt-archive').value = '';
+    byId('vcfdt-flash').textContent = `Tool ${result.version || 'unknown'} is ready`;
+    await poll();
+  } catch (error) {
+    byId('vcfdt-flash').textContent = error.message;
+  } finally {
+    byId('vcfdt-upload').disabled = false;
+  }
+};
 byId('bk-storage').onchange = toggleBackupStorage;
 byId('bk-save').onclick = async () => {
   byId('bk-save').disabled = true;

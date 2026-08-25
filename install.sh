@@ -8,7 +8,6 @@ answers_file=""
 minimum_free_gb=500
 backup_minimum_free_gb=""
 backup_advisory_free_gb=100
-validate_only=""
 release_version=""
 image_repository=""
 release_version_override=""
@@ -26,7 +25,6 @@ Usage: ./install.sh [--answers-file PATH] [--min-free-gb NUMBER]
                     [--version TAG] [--image-repository REPOSITORY]
                     [--adopt-state-dir PATH | --adopt-state-volume NAME]
                     [--confirm-old-writer-stopped]
-       ./install.sh --validate-archive PATH
 
 The depot free-space floor defaults to 500 GB. Use --min-free-gb only when a
 smaller lab or test store is intentional.
@@ -65,11 +63,6 @@ while [ "$#" -gt 0 ]; do
 		--min-backup-free-gb)
 			[ "$#" -ge 2 ] || { echo "ERROR: --min-backup-free-gb requires a number" >&2; exit 2; }
 			backup_minimum_free_gb="$2"
-			shift 2
-			;;
-		--validate-archive)
-			[ "$#" -ge 2 ] || { echo "ERROR: --validate-archive requires a path" >&2; exit 2; }
-			validate_only="$2"
 			shift 2
 			;;
 		--version)
@@ -146,7 +139,7 @@ fi
 declare -A answers=()
 allowed_answer() {
 	case "$1" in
-		VCFDT_ARCHIVE|PRODUCT_FQDN|TZ|STORAGE_MODE|DEPOT_LOCAL_PATH|BACKUP_LOCAL_PATH|NFS_SERVER|NFS_EXPORT|BACKUP_NFS_EXPORT|NFS_OPTIONS|TLS_MODE|TLS_CERT_PATH|TLS_KEY_PATH|AUTH_USERNAME|AUTH_PASSWORD|HTTPS_PORT|BACKUP_ENABLED|SFTP_PORT|SFTP_PASSWORD|SFTP_UID_GID|VCF_VERSION|SKU|SYNC_TARGETS|CRON_SCHEDULE|CEIP|ESX_MODE|LOG_RETENTION|VKR_MATCH|VKR_OS|DEPOT_ENDPOINT|TOKEN_URL|ACTIVATION_CODE) return 0 ;;
+		PRODUCT_FQDN|TZ|STORAGE_MODE|DEPOT_LOCAL_PATH|BACKUP_LOCAL_PATH|NFS_SERVER|NFS_EXPORT|BACKUP_NFS_EXPORT|NFS_OPTIONS|TLS_MODE|TLS_CERT_PATH|TLS_KEY_PATH|AUTH_USERNAME|AUTH_PASSWORD|HTTPS_PORT|BACKUP_ENABLED|SFTP_PORT|SFTP_PASSWORD|SFTP_UID_GID|VCF_VERSION|SKU|SYNC_TARGETS|CRON_SCHEDULE|CEIP|ESX_MODE|LOG_RETENTION|VKR_MATCH|VKR_OS|DEPOT_ENDPOINT|TOKEN_URL|ACTIVATION_CODE) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -193,29 +186,6 @@ require_command() {
 	command -v "$1" >/dev/null 2>&1 || { echo "ERROR: required command not found: $1" >&2; exit 1; }
 }
 
-archive_listing() {
-	local archive="$1"
-	case "$archive" in
-		*.tar.gz|*.tgz) tar -tzf "$archive" ;;
-		*.zip) unzip -Z1 "$archive" ;;
-		*) echo "ERROR: VCFDT archive must be .tar.gz, .tgz, or .zip" >&2; return 1 ;;
-	esac
-}
-
-validate_archive() {
-	local archive="$1" listing
-	[ -f "$archive" ] || { echo "ERROR: VCFDT archive not found: $archive" >&2; return 1; }
-	listing="$(archive_listing "$archive")" || return 1
-	if printf '%s\n' "$listing" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
-		echo "ERROR: VCFDT archive contains an unsafe path" >&2
-		return 1
-	fi
-	printf '%s\n' "$listing" | grep -Eq '(^|/)bin/vcf-download-tool$' || {
-		echo "ERROR: archive does not contain bin/vcf-download-tool" >&2
-		return 1
-	}
-}
-
 confirm_previous_writer_is_stopped() {
 	local scripted_confirmation="$1" reply
 	cat >&2 <<'EOF'
@@ -246,12 +216,6 @@ EOF
 		return 1
 	}
 }
-
-if [ -n "$validate_only" ]; then
-	validate_archive "$validate_only"
-	echo "VCFDT archive validation passed"
-	exit 0
-fi
 
 if [ "$adopt_mode" = true ]; then
 	confirm_previous_writer_is_stopped "$confirm_old_writer_stopped" || exit 2
@@ -328,10 +292,6 @@ sftp_image="$image_repository/sftp:$release_version"
 echo "VCF Services installer"
 echo "The health endpoint and UMDS patch-store subtree are intentionally unauthenticated."
 echo "Expected storage: 0.5 to 1 TB for one VCF train, plus about 461 GB for the full VKr library."
-
-ask VCFDT_ARCHIVE "Path to the VCF Download Tool archive" "./vcf-download-tool.tar.gz"
-vcfdt_archive="$REPLY_VALUE"
-validate_archive "$vcfdt_archive"
 
 ask PRODUCT_FQDN "Depot FQDN" "vcf-services.example.com"
 product_fqdn="$REPLY_VALUE"
@@ -539,7 +499,6 @@ if [ "$EUID" -ne 0 ] && ! id -nG | tr ' ' '\n' | grep -qx docker; then
 	exit 1
 fi
 for command_name in docker curl openssl jq realpath sha256sum ss; do require_command "$command_name"; done
-case "$vcfdt_archive" in *.zip) require_command unzip ;; *) require_command tar ;; esac
 docker info >/dev/null 2>&1 || { echo "ERROR: current user cannot access the Docker daemon" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "ERROR: Docker Compose v2 is required" >&2; exit 1; }
 if host_tcp_port_is_bound "$sftp_port" \
@@ -566,7 +525,7 @@ if [ "$outbound_status" = 000 ]; then
 fi
 
 mkdir -p "$project_dir/config" "$project_dir/secrets/tls" "$project_dir/secrets/sftp" \
-	"$project_dir/data" "$project_dir/build/vcfdt"
+	"$project_dir/data"
 chmod 0700 "$project_dir/secrets"
 chmod 0700 "$project_dir/secrets/sftp"
 if [ -n "$sftp_password" ]; then
@@ -575,7 +534,6 @@ if [ -n "$sftp_password" ]; then
 	sftp_password=""
 fi
 
-stage_dir=""
 transient_volumes=()
 cleanup_transient() {
 	local volume
@@ -583,7 +541,6 @@ cleanup_transient() {
 		docker volume rm "$volume" >/dev/null 2>&1 || true
 	done
 	transient_volumes=()
-	[ -z "$stage_dir" ] || rm -rf "$stage_dir"
 }
 trap cleanup_transient EXIT
 
@@ -684,22 +641,6 @@ if [ "$storage_mode" = nfs ]; then
 	drop_transient_volume "$preflight_volume"
 fi
 
-echo "Staging the licensed VCF Download Tool locally"
-stage_dir="$(mktemp -d /tmp/vcf-services-vcfdt.XXXXXX)"
-case "$vcfdt_archive" in
-	*.tar.gz|*.tgz) tar -xzf "$vcfdt_archive" -C "$stage_dir" ;;
-	*.zip) unzip -q "$vcfdt_archive" -d "$stage_dir" ;;
-esac
-tool_path="$(find "$stage_dir" -type f -path '*/bin/vcf-download-tool' -print -quit)"
-[ -n "$tool_path" ] || { echo "ERROR: staged archive lost bin/vcf-download-tool" >&2; exit 1; }
-tool_root="$(dirname "$(dirname "$tool_path")")"
-find "$project_dir/build/vcfdt" -mindepth 1 -delete
-cp -a "$tool_root/." "$project_dir/build/vcfdt/"
-chmod 0755 "$project_dir/build/vcfdt/bin/vcf-download-tool"
-
-archive_name="$(basename "$vcfdt_archive")"
-vcfdt_version="$(sed -nE 's/^vcf-download-tool-([0-9][0-9A-Za-z._-]*)\.(tar\.gz|tgz|zip)$/\1/p' <<< "$archive_name")"
-vcfdt_version="${vcfdt_version:-unknown}"
 backup_volume_fingerprint="$(printf '%s\n' "$storage_mode|$backup_local_path|$nfs_server|$backup_nfs_export|$nfs_options" \
 	| sha256sum | cut -c1-12)"
 backup_volume_name="vcf-services-backup-store-$backup_volume_fingerprint"
@@ -743,7 +684,7 @@ write_setting SFTP_UID_GID "$sftp_uid_gid"
 write_setting BACKUP_VOLUME_NAME "$backup_volume_name"
 write_setting BACKUP_LOCAL_PATH "$saved_backup_local_path"
 write_setting BACKUP_NFS_EXPORT "$saved_backup_nfs_export"
-write_setting VCFDT_VERSION "$vcfdt_version"
+write_setting VCFDT_VERSION "$(saved_setting VCFDT_VERSION "not installed")"
 chmod 0640 "$settings_tmp"
 mv "$settings_tmp" "$project_dir/config/settings.env"
 
@@ -755,6 +696,7 @@ env_tmp="$(mktemp "$project_dir/.env.XXXXXX")"
 	printf 'BACKUP_VOLUME_NAME=%s\n' "$backup_volume_name"
 	printf 'VCF_SERVICES_VERSION=%s\n' "$release_version"
 	printf 'VCF_SERVICES_UI_IMAGE=%s\n' "$ui_image"
+	printf 'VCF_SERVICES_SYNC_IMAGE=%s\n' "$sync_base_image"
 	printf 'VCF_SERVICES_SFTP_IMAGE=%s\n' "$sftp_image"
 	if [ "$storage_mode" = local ]; then
 		printf 'DEPOT_VOLUME_TYPE=none\n'
@@ -820,18 +762,10 @@ pull_product_image() {
 	exit 1
 }
 
-echo "Pulling product images and building the local licensed sync layer"
+echo "Pulling license-safe product images"
 pull_product_image "$ui_image"
 pull_product_image "$sync_base_image"
 pull_product_image "$sftp_image"
-docker build --build-arg "SYNC_BASE_IMAGE=$sync_base_image" \
-	-f "$project_dir/Dockerfile.sync" -t vcf-services-sync:local "$project_dir"
-
-tool_version_output="$(docker run --rm --entrypoint /opt/vcfdt/bin/vcf-download-tool vcf-services-sync:local --version 2>/dev/null | head -n 1 || true)"
-if [ -n "$tool_version_output" ]; then
-	vcfdt_version="$(tr -cd '[:alnum:]. _-' <<< "$tool_version_output" | cut -c1-80)"
-	sed -i "s|^VCFDT_VERSION=.*$|VCFDT_VERSION=\"$vcfdt_version\"|" "$project_dir/config/settings.env"
-fi
 
 docker volume create vcf-services-sftp-host-keys >/dev/null
 if ! docker volume inspect "$backup_volume_name" >/dev/null 2>&1; then
@@ -864,6 +798,53 @@ if ! docker run --rm --user "$sftp_uid:$sftp_gid" --entrypoint /bin/sh \
 	echo "       The re-own attempt did not take effect. Correct the share ownership, then rerun install.sh." >&2
 	exit 1
 fi
+patch_installed_tool_endpoints() {
+	docker run --rm --network none --entrypoint /bin/sh \
+		--env "VCFDT_DEPOT_ENDPOINT=$depot_endpoint" \
+		--env "VCFDT_TOKEN_URL=$token_url" \
+		-v vcf-services-vcfdt-tool:/opt/vcfdt:rw "$sync_base_image" -c '
+			set -eu
+			properties=/opt/vcfdt/current/conf/application-prodv2.properties
+			[ -f "$properties" ] || exit 0
+			exec 7>/opt/vcfdt/.update.lock
+			flock -x 7
+			temporary="$(mktemp "${properties}.XXXXXX")"
+			found_depot=false
+			found_token=false
+			while IFS= read -r line || [ -n "$line" ]; do
+				case "$line" in
+					lcm.depot.adapter.host=*)
+						printf "%s\n" "lcm.depot.adapter.host=${VCFDT_DEPOT_ENDPOINT}"
+						found_depot=true
+						;;
+					lcm.access_token.broadcom.authorization.server.url=*)
+						printf "%s\n" "lcm.access_token.broadcom.authorization.server.url=${VCFDT_TOKEN_URL}"
+						found_token=true
+						;;
+					*) printf "%s\n" "$line" ;;
+				esac
+			done < "$properties" > "$temporary"
+			[ "$found_depot" = true ] || printf "%s\n" "lcm.depot.adapter.host=${VCFDT_DEPOT_ENDPOINT}" >> "$temporary"
+			[ "$found_token" = true ] || printf "%s\n" "lcm.access_token.broadcom.authorization.server.url=${VCFDT_TOKEN_URL}" >> "$temporary"
+			chmod --reference="$properties" "$temporary"
+			mv "$temporary" "$properties"
+		'
+}
+tool_installed=false
+if docker volume inspect vcf-services-vcfdt-tool >/dev/null 2>&1 \
+	&& docker run --rm --entrypoint /bin/sh \
+	-v vcf-services-vcfdt-tool:/opt/vcfdt:ro "$sync_base_image" \
+	-c 'test -s /opt/vcfdt/current/bin/vcf-download-tool'; then
+	tool_installed=true
+fi
+if [ "$tool_installed" = true ]; then
+	patch_installed_tool_endpoints
+fi
+if [ "$adopt_mode" = true ] && [ "$tool_installed" = false ]; then
+	echo "ERROR: depot adoption needs the VCF Download Tool to read and verify the Software Depot ID." >&2
+	echo "       Install normally, upload the tool in the admin console, then rerun with the adoption options." >&2
+	exit 1
+fi
 if [ "$adopt_mode" = true ]; then
 	if [ -n "$adopt_state_dir" ]; then
 		state_source_kind=directory
@@ -873,26 +854,34 @@ if [ "$adopt_mode" = true ]; then
 		state_source_value="$adopt_state_volume"
 	fi
 	machine_id_output="$("$project_dir/scripts/import-vcfdt-state.sh" \
-		vcf-services-sync:local "$state_source_kind" "$state_source_value" \
-		vcf-services-vcfdt-state)"
+		"$sync_base_image" "$state_source_kind" "$state_source_value" \
+		vcf-services-vcfdt-state vcf-services-vcfdt-tool)"
 else
 	docker volume create vcf-services-vcfdt-state >/dev/null
-	machine_id_output="$(docker run --rm \
-		--entrypoint /opt/vcfdt/bin/vcf-download-tool \
-		-v vcf-services-vcfdt-state:/root/.local/share/vmware/vdt \
-		vcf-services-sync:local configuration get --machineId)"
+	if [ "$tool_installed" = true ]; then
+		machine_id_output="$(docker run --rm \
+			--entrypoint /opt/vcfdt/current/bin/vcf-download-tool \
+			-v vcf-services-vcfdt-tool:/opt/vcfdt:ro \
+			-v vcf-services-vcfdt-state:/root/.local/share/vmware/vdt \
+			"$sync_base_image" configuration get --machineId)"
+	fi
 fi
-echo
-echo "Software Depot ID"
-echo "$machine_id_output"
-echo "Open the Broadcom support portal download tool registration flow, register this ID, and obtain an activation code."
-echo "The GetActivationCode.ps1 registration path is also supported by the vendor."
-ask ACTIVATION_CODE "Activation code (blank to skip for now)" "" true
-activation_code="$REPLY_VALUE"
-if [ -n "$activation_code" ]; then
-	printf '%s\n' "$activation_code" > "$project_dir/secrets/activation-code.txt"
-	chmod 0600 "$project_dir/secrets/activation-code.txt"
-elif [ ! -s "$project_dir/secrets/activation-code.txt" ]; then
+if [ "$tool_installed" = true ]; then
+	echo
+	echo "Software Depot ID"
+	echo "$machine_id_output"
+	echo "Open the Broadcom support portal download tool registration flow, register this ID, and obtain an activation code."
+	echo "The GetActivationCode.ps1 registration path is also supported by the vendor."
+	ask ACTIVATION_CODE "Activation code (blank to skip for now)" "" true
+	activation_code="$REPLY_VALUE"
+	if [ -n "$activation_code" ]; then
+		printf '%s\n' "$activation_code" > "$project_dir/secrets/activation-code.txt"
+		chmod 0600 "$project_dir/secrets/activation-code.txt"
+	fi
+else
+	echo "VCF Download Tool is not installed yet. Upload it in the admin console after startup."
+fi
+if [ ! -s "$project_dir/secrets/activation-code.txt" ]; then
 	echo "Sync will start cleanly dormant because no activation code is present."
 fi
 

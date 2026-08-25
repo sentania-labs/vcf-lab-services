@@ -14,6 +14,7 @@ fi
 : "${STATE_DIR:=/state}"
 : "${AUTH_FILE:=/run/secrets/activation-code.txt}"
 : "${TOOL_ROOT:=/opt/vcfdt}"
+: "${VCFDT_TOOL_STORE:=$TOOL_ROOT}"
 : "${SYNC_TARGETS:=esx install upgrade patches}"
 : "${VCF_VERSION:=9.1.0}"
 : "${SKU:=VCF}"
@@ -89,6 +90,21 @@ if ! flock -n 9; then
 	log "another sync is already running, skipping this trigger"
 	exit 0
 fi
+
+if [ ! -x "$tool" ]; then
+	write_state '. + {running:false, currentTarget:null}'
+	log "VCF Download Tool is not installed; upload it in the admin console"
+	exit 1
+fi
+tool_lock="$VCFDT_TOOL_STORE/.update.lock"
+if [ ! -e "$tool_lock" ]; then
+	write_state '. + {running:false, currentTarget:null}'
+	log "ERROR: the tool volume has no $tool_lock update lock; the tool store is incomplete"
+	log "Re-upload the VCF Download Tool in the admin console to repair the tool volume."
+	exit 1
+fi
+exec 7<"$tool_lock"
+flock -s 7
 
 run_log="$STATE_DIR/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
 exec > >(tee -a "$run_log") 2>&1

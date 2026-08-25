@@ -1,8 +1,11 @@
 import importlib.util
+import io
 import json
 import os
+import tarfile
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -20,6 +23,7 @@ class UiApiTests(unittest.TestCase):
         self.settings = root / "settings.env"
         self.sftp_secrets = root / "sftp-secrets"
         self.sftp_secrets.mkdir()
+        self.tool_store = root / "vcfdt-tool"
         self.settings.write_text(
             'VCF_VERSION="9.1.0"\n'
             'SYNC_TARGETS="esx install upgrade patches"\n'
@@ -34,6 +38,7 @@ class UiApiTests(unittest.TestCase):
             "REDIS_PORT": "1",
             "REDIS_PASSWORD_FILE": str(root / "missing-password"),
             "SFTP_SECRET_DIR": str(self.sftp_secrets),
+            "VCFDT_STORE": str(self.tool_store),
         }
         with mock.patch.dict(os.environ, environment):
             spec = importlib.util.spec_from_file_location("vcf_services_ui", APP_PATH)
@@ -54,14 +59,169 @@ class UiApiTests(unittest.TestCase):
         bus.get.side_effect = lambda key: (values or {}).get(key)
         return bus
 
-    def test_dormant_status_has_registration_guidance(self):
+    @staticmethod
+    def tar_tool(payload=None, version="9.1.2"):
+        payload = payload or f"#!/bin/sh\necho 'vcf-download-tool {version}'\n".encode()
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+            info = tarfile.TarInfo("vcf-download-tool/bin/vcf-download-tool")
+            info.size = len(payload)
+            info.mode = 0o755
+            archive.addfile(info, io.BytesIO(payload))
+            properties = b"lcm.depot.adapter.host=old.example.test\n"
+            info = tarfile.TarInfo(
+                "vcf-download-tool/conf/application-prodv2.properties"
+            )
+            info.size = len(properties)
+            archive.addfile(info, io.BytesIO(properties))
+        stream.seek(0)
+        return stream
+
+    @staticmethod
+    def zip_tool(payload=None, version="2.0"):
+        payload = payload or f"#!/bin/sh\necho 'vcf-download-tool {version}'\n".encode()
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr("vcf-download-tool/bin/vcf-download-tool", payload)
+        stream.seek(0)
+        return stream
+
+    def test_dormant_status_ignores_legacy_version_when_tool_volume_is_empty(self):
         self.write_state()
         response = self.client.get("/api/status")
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertFalse(body["armed"])
         self.assertIn("Register the Software Depot ID", body["armingInstructions"])
-        self.assertEqual(body["vcfdtVersion"], "test-version")
+        self.assertFalse(body["vcfdtInstalled"])
+        self.assertEqual(body["vcfdtVersion"], "not installed")
+
+    def test_tool_upload_stages_and_atomically_selects_valid_tar(self):
+        self.write_state()
+        response = self.client.post(
+            "/api/vcfdt",
+            data={"archive": (self.tar_tool(), "vcf-download-tool-9.1.2.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["version"], "vcf-download-tool 9.1.2")
+        current = self.tool_store / "current"
+        self.assertTrue(current.is_symlink())
+        tool = current / "bin" / "vcf-download-tool"
+        self.assertIn(b"vcf-download-tool 9.1.2", tool.read_bytes())
+        self.assertEqual(tool.stat().st_mode & 0o777, 0o755)
+        properties = (
+            current / "conf" / "application-prodv2.properties"
+        ).read_text()
+        self.assertIn("lcm.depot.adapter.host=dl.broadcom.com", properties)
+        status = self.client.get("/api/status").get_json()
+        self.assertTrue(status["vcfdtInstalled"])
+        self.assertEqual(status["vcfdtVersion"], "vcf-download-tool 9.1.2")
+
+    def test_bad_replacement_preserves_the_live_tool(self):
+        self.write_state()
+        first = self.client.post(
+            "/api/vcfdt",
+            data={"archive": (self.tar_tool(version="1.0"), "vcf-download-tool-1.0.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(first.status_code, 201)
+        original_target = os.readlink(self.tool_store / "current")
+        invalid = io.BytesIO()
+        with tarfile.open(fileobj=invalid, mode="w:gz") as archive:
+            content = b"not the tool"
+            info = tarfile.TarInfo("README.txt")
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+        invalid.seek(0)
+        response = self.client.post(
+            "/api/vcfdt",
+            data={"archive": (invalid, "vcf-download-tool-2.0.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(os.readlink(self.tool_store / "current"), original_target)
+        self.assertIn(
+            b"vcf-download-tool 1.0",
+            (self.tool_store / "current" / "bin" / "vcf-download-tool").read_bytes(),
+        )
+
+    def test_zip_upload_is_supported(self):
+        self.write_state()
+        response = self.client.post(
+            "/api/vcfdt",
+            data={"archive": (self.zip_tool(), "vcf-download-tool-2.0.zip")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["version"], "vcf-download-tool 2.0")
+
+    def test_zip_upload_preserves_safe_member_permissions(self):
+        self.write_state()
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            tool = zipfile.ZipInfo("vcf-download-tool/bin/vcf-download-tool")
+            tool.external_attr = 0o100755 << 16
+            archive.writestr(tool, b"#!/bin/sh\necho 'vcf-download-tool 3.0'\n")
+            helper = zipfile.ZipInfo("vcf-download-tool/jre/bin/java")
+            helper.external_attr = 0o100755 << 16
+            archive.writestr(helper, b"#!/bin/sh\nexit 0\n")
+            secret = zipfile.ZipInfo("vcf-download-tool/conf/token.txt")
+            secret.external_attr = 0o104600 << 16
+            archive.writestr(secret, b"token\n")
+        stream.seek(0)
+        response = self.client.post(
+            "/api/vcfdt",
+            data={"archive": (stream, "vcf-download-tool-3.0.zip")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        current = self.tool_store / "current"
+        helper_mode = (current / "jre" / "bin" / "java").stat().st_mode & 0o7777
+        self.assertEqual(helper_mode, 0o755)
+        secret_mode = (current / "conf" / "token.txt").stat().st_mode & 0o7777
+        self.assertEqual(secret_mode, 0o600)
+
+    def test_tool_upload_is_refused_while_sync_runs(self):
+        self.write_state(running=True, armed=True)
+        response = self.client.post(
+            "/api/vcfdt",
+            data={"archive": (self.tar_tool(), "vcf-download-tool-3.0.tgz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("running sync", response.get_json()["error"])
+
+    def test_tool_upload_respects_the_sync_process_lock(self):
+        self.write_state()
+        self.tool_store.mkdir()
+        with open(self.tool_store / ".update.lock", "w") as lock_file:
+            self.module.fcntl.flock(lock_file, self.module.fcntl.LOCK_SH)
+            response = self.client.post(
+                "/api/vcfdt",
+                data={"archive": (self.tar_tool(), "vcf-download-tool-3.0.tgz")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("sync or tool update", response.get_json()["error"])
+
+    def test_tool_upload_rejects_archive_path_escape(self):
+        self.write_state()
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+            content = b"bad"
+            info = tarfile.TarInfo("../bin/vcf-download-tool")
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+        stream.seek(0)
+        response = self.client.post(
+            "/api/vcfdt",
+            data={"archive": (stream, "vcf-download-tool-3.0.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unsafe path", response.get_json()["error"])
+        self.assertFalse((self.tool_store / "current").exists())
 
     def test_dormant_sync_is_rejected_cleanly(self):
         self.write_state()
