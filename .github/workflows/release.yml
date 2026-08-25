@@ -165,15 +165,7 @@ jobs:
           image_root="ghcr.io/${GITHUB_REPOSITORY,,}"
           ./scripts/package-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/release" "$image_root"
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          version="$GITHUB_REF_NAME"
-          gh release create "$version" \
-            "$RUNNER_TEMP/release/install.sh#Installer entry point" \
-            "$RUNNER_TEMP/release/vcf-lab-services-$version.tar.gz#Installation bundle" \
-            "$RUNNER_TEMP/release/vcf-lab-services-$version.tar.gz.sha256#Installation bundle checksum" \
-            --verify-tag \
-            --generate-notes \
-            --title "$version"
+        run: ./scripts/publish-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/release"
