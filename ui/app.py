@@ -34,6 +34,18 @@ DEPOT = Path(os.environ.get("DEPOT_DIR", "/depot"))
 BACKUP = Path(os.environ.get("BACKUP_DIR", "/mnt/backup"))
 STATE = Path(os.environ.get("STATE_DIR", "/state"))
 SETTINGS = Path(os.environ.get("SETTINGS_FILE", "/config/settings.env"))
+VERSION_MARKER_FILE = Path(
+    os.environ.get("VERSION_MARKER_FILE", "/config/.vcf-services-version")
+)
+VERSION_STATUS_FILE = Path(
+    os.environ.get(
+        "VERSION_STATUS_FILE", "/config/.vcf-services-version-status.json"
+    )
+)
+SOFTWARE_DEPOT_ID_FILE = Path(
+    os.environ.get("SOFTWARE_DEPOT_ID_FILE", "/config/software-depot-id")
+)
+CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
 AUTH_FILE = Path(os.environ.get("AUTH_FILE", "/run/secrets/auth.json"))
 ACTIVATION_CODE_FILE = Path(
@@ -59,6 +71,15 @@ LOG_KEY = "vcf-services:sync:log"
 VERSIONS_KEY = "vcf-services:sync:versions"
 VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr"]
 BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
+TOOL_VERSION_RE = re.compile(
+    r"vcf-download-tool(?:\s+version)?(?:\s*[:=])?\s+"
+    r"v?[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?",
+    re.IGNORECASE,
+)
+SOFTWARE_DEPOT_ID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
 ARMING_INSTRUCTIONS = (
     "Register the Software Depot ID in the Broadcom download tool registration "
     "flow, then save the activation code here."
@@ -204,13 +225,53 @@ def require_console_owner():
         "/api/bootstrap",
         "/api/login",
     }
+    version_problem = _version_problem()
     if request.path in public_paths:
+        if version_problem and request.path in {"/auth/check", "/api/claim"}:
+            return jsonify({"error": version_problem["message"]}), 503
         return None
     if _auth_doc() is None:
         return jsonify({"error": "claim this appliance before continuing"}), 403
     if not _is_authenticated():
         return jsonify({"error": "sign in to continue"}), 401
+    allowed_during_version_block = {
+        "/api/bootstrap",
+        "/api/log",
+        "/api/logout",
+        "/api/status",
+        "/api/tls/ca",
+    }
+    if version_problem and request.path not in allowed_during_version_block:
+        return jsonify({"error": version_problem["message"]}), 409
     return None
+
+
+def _version_problem():
+    try:
+        status = json.loads(VERSION_STATUS_FILE.read_text(encoding="utf-8"))
+        if status.get("blocked") and status.get("message"):
+            return status
+    except (OSError, ValueError, TypeError):
+        pass
+    if CURRENT_VERSION == "dev":
+        return None
+    try:
+        found = VERSION_MARKER_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        found = ""
+    if found == CURRENT_VERSION:
+        return None
+    found_label = found or "unversioned state"
+    return {
+        "blocked": True,
+        "expectedVersion": CURRENT_VERSION,
+        "foundVersion": found or None,
+        "message": (
+            f"Startup is blocked because the config volume contains {found_label}, "
+            f"but this appliance is {CURRENT_VERSION}. Stop the stack, preserve any "
+            "data you need, then start with a matching new or restored config volume."
+        ),
+    }
 
 
 def _safe_archive_path(name):
@@ -337,13 +398,40 @@ def _probe_tool_version(tool_root):
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ToolArchiveError("bin/vcf-download-tool could not report its version") from exc
-    first_line = next(
+    version = next(
         (line.strip() for line in result.stdout.splitlines() if line.strip()), ""
     )
-    version = re.sub(r"[^A-Za-z0-9._ +()-]", "", first_line)[:120].strip()
-    if result.returncode != 0 or not version:
+    if (
+        result.returncode != 0
+        or len(version) > 120
+        or TOOL_VERSION_RE.fullmatch(version) is None
+    ):
         raise ToolArchiveError("bin/vcf-download-tool could not report its version")
     return version
+
+
+def _probe_machine_id(tool_root):
+    tool = tool_root / "bin" / "vcf-download-tool"
+    try:
+        result = subprocess.run(
+            [tool, "configuration", "get", "--machineId"],
+            cwd=tool_root,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ToolArchiveError(
+            "bin/vcf-download-tool could not read a Software Depot ID"
+        ) from exc
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    match = SOFTWARE_DEPOT_ID_RE.search(output)
+    if result.returncode != 0 or match is None:
+        raise ToolArchiveError(
+            "bin/vcf-download-tool did not return a recognizable Software Depot ID"
+        )
+    return match.group(0)
 
 
 def _current_tool_info():
@@ -403,6 +491,7 @@ def _install_tool(upload):
             "version": _probe_tool_version(tool_root),
             "uploadedAt": datetime.now(timezone.utc).isoformat(),
         }
+        machine_id = _probe_machine_id(tool_root)
         (tool_root / ".vcf-services.json").write_text(json.dumps(metadata) + "\n")
         os.replace(tool_root, release_path)
 
@@ -412,7 +501,7 @@ def _install_tool(upload):
         next_link.symlink_to(Path("releases") / release_id)
         os.replace(next_link, current)
         swapped = True
-        return metadata, old_target
+        return metadata, old_target, machine_id
     finally:
         if not swapped:
             shutil.rmtree(release_path, ignore_errors=True)
@@ -584,40 +673,38 @@ def _activation_configured():
 _machine_id_cache = {"value": None}
 
 
+def _persisted_machine_id():
+    try:
+        value = SOFTWARE_DEPOT_ID_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value if SOFTWARE_DEPOT_ID_RE.fullmatch(value) else None
+
+
+def _remember_machine_id(value):
+    if SOFTWARE_DEPOT_ID_RE.fullmatch(value) is None:
+        raise ValueError("refusing to persist an invalid Software Depot ID")
+    _write_secret(SOFTWARE_DEPOT_ID_FILE, value + "\n")
+    _machine_id_cache["value"] = value
+
+
 def _machine_id():
     if _machine_id_cache["value"]:
         return _machine_id_cache["value"], None
     tool = VCFDT_STORE / "current" / "bin" / "vcf-download-tool"
     if not tool.is_file():
-        return None, "Upload the VCF Download Tool first."
+        saved = _persisted_machine_id()
+        return saved, "Upload the VCF Download Tool before verifying its saved ID."
     try:
-        result = subprocess.run(
-            [tool, "configuration", "get", "--machineId"],
-            cwd=tool.parent.parent,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
+        value = _probe_machine_id(tool.parent.parent)
+        _remember_machine_id(value)
+        return value, None
+    except (ToolArchiveError, OSError):
+        saved = _persisted_machine_id()
+        return saved, (
+            "The tool probe failed and did not return a recognizable Software Depot ID. "
+            "The last verified ID is unchanged."
         )
-    except (OSError, subprocess.SubprocessError):
-        return None, "The tool could not read its Software Depot ID."
-    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-    if result.returncode != 0:
-        return None, f"The tool returned exit code {result.returncode} while reading its ID."
-    uuid_match = re.search(
-        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
-        output,
-    )
-    if uuid_match:
-        _machine_id_cache["value"] = uuid_match.group(0)
-        return uuid_match.group(0), None
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    value = lines[-1].split(":", 1)[-1].strip() if lines else ""
-    if not value or len(value) > 200 or not re.fullmatch(r"[A-Za-z0-9._:-]+", value):
-        return None, "The tool did not return a recognizable Software Depot ID."
-    _machine_id_cache["value"] = value
-    return value, None
 
 
 def _storage_entry(path):
@@ -800,12 +887,14 @@ def logout():
 def bootstrap_status():
     auth = _auth_doc()
     settings = _settings_doc()
+    version_problem = _version_problem()
     if auth and not _is_authenticated():
         return jsonify(
             {
                 "claimed": True,
                 "authenticated": False,
-                "setupComplete": settings["setupComplete"],
+                "setupComplete": False if version_problem else settings["setupComplete"],
+                "versionProblem": version_problem,
             }
         )
     tool = _current_tool_info()
@@ -816,7 +905,8 @@ def bootstrap_status():
         {
             "claimed": auth is not None,
             "authenticated": _is_authenticated(),
-            "setupComplete": settings["setupComplete"],
+            "setupComplete": False if version_problem else settings["setupComplete"],
+            "versionProblem": version_problem,
             "tool": tool,
             "machineId": machine_id,
             "machineIdError": machine_error,
@@ -894,7 +984,8 @@ def upload_vcfdt():
         with _tool_update_lock():
             if _state().get("running", False):
                 return jsonify({"error": "wait for the running sync to finish"}), 409
-            metadata, old_target = _install_tool(upload)
+            metadata, old_target, machine_id = _install_tool(upload)
+            _remember_machine_id(machine_id)
             if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
                 shutil.rmtree(old_target, ignore_errors=True)
     except BlockingIOError:
@@ -909,7 +1000,7 @@ def upload_vcfdt():
 @app.get("/api/registration")
 def registration_status():
     machine_id, error = _machine_id()
-    status_code = 200 if machine_id else 409
+    status_code = 200 if machine_id and not error else 409
     return (
         jsonify(
             {
@@ -930,7 +1021,7 @@ def save_registration():
     if _state().get("running", False):
         return jsonify({"error": "wait for the running sync to finish"}), 409
     machine_id, machine_error = _machine_id()
-    if not machine_id:
+    if machine_error:
         return jsonify({"error": machine_error}), 409
     if not isinstance(activation_code, str) or not activation_code.strip():
         return jsonify({"error": "enter the activation code from Broadcom"}), 400
@@ -967,57 +1058,80 @@ def update_settings():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"error": "a JSON settings document is required"}), 400
-    vcf_version = str(body.get("vcfVersion", "")).strip()
+    allowed_fields = {
+        "backupEnabled",
+        "ceip",
+        "cronSchedule",
+        "depotEndpoint",
+        "esxMode",
+        "logRetention",
+        "sku",
+        "storageConfirmed",
+        "syncTargets",
+        "timezone",
+        "tokenUrl",
+        "uidGid",
+        "vcfVersion",
+        "vkrMatch",
+        "vkrOs",
+    }
+    unknown_fields = sorted(set(body) - allowed_fields)
+    if unknown_fields:
+        return jsonify(
+            {"error": "unknown settings field: " + ", ".join(unknown_fields)}
+        ), 400
+    body = {**_settings_doc(), **body}
+    vcf_version = str(body["vcfVersion"]).strip()
     if not re.fullmatch(r"[0-9][0-9A-Za-z.*_-]*(\.\.)?", vcf_version):
         return jsonify({"error": "the VCF version filter is invalid"}), 400
-    sku = str(body.get("sku", ""))
+    sku = str(body["sku"])
     if sku not in {"VCF", "VVF"}:
         return jsonify({"error": "SKU must be VCF or VVF"}), 400
-    targets = body.get("syncTargets")
+    targets = body["syncTargets"]
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "select at least one sync target"}), 400
     if any(target not in VALID_TARGETS for target in targets) or len(set(targets)) != len(targets):
         return jsonify({"error": "the sync target selection is invalid"}), 400
-    cron = str(body.get("cronSchedule", "")).strip()
+    cron = str(body["cronSchedule"]).strip()
     if len(cron.split()) != 5 or not re.fullmatch(r"[0-9*/ ,\-]+", cron):
         return jsonify({"error": "the schedule must use five cron fields"}), 400
     try:
         croniter(cron, datetime.now(timezone.utc)).get_next(datetime)
     except (KeyError, ValueError):
         return jsonify({"error": "the sync schedule is invalid"}), 400
-    timezone_name = str(body.get("timezone", "")).strip()
+    timezone_name = str(body["timezone"]).strip()
     try:
         ZoneInfo(timezone_name)
     except (KeyError, ValueError):
         return jsonify({"error": "choose a valid IANA timezone"}), 400
-    ceip = str(body.get("ceip", ""))
+    ceip = str(body["ceip"])
     if ceip not in {"DISABLE", "ENABLE"}:
         return jsonify({"error": "CEIP must be explicitly enabled or disabled"}), 400
-    depot_endpoint = str(body.get("depotEndpoint", "")).strip().lower()
+    depot_endpoint = str(body["depotEndpoint"]).strip().lower()
     if not re.fullmatch(r"[A-Za-z0-9.-]+", depot_endpoint) or ".." in depot_endpoint:
         return jsonify({"error": "the download endpoint hostname is invalid"}), 400
-    token_url = str(body.get("tokenUrl", "")).strip()
+    token_url = str(body["tokenUrl"]).strip()
     if not re.fullmatch(r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", token_url):
         return jsonify({"error": "the token URL must be a valid HTTPS URL"}), 400
-    backup_enabled = body.get("backupEnabled")
-    storage_confirmed = body.get("storageConfirmed")
+    backup_enabled = body["backupEnabled"]
+    storage_confirmed = body["storageConfirmed"]
     if not isinstance(backup_enabled, bool) or not isinstance(storage_confirmed, bool):
         return jsonify({"error": "storage and backup selections must be true or false"}), 400
-    uid_gid = str(body.get("uidGid", ""))
+    uid_gid = str(body["uidGid"])
     match = re.fullmatch(r"([0-9]+):([0-9]+)", uid_gid)
     if not match or any(not 1 <= int(value) <= 2147483647 for value in match.groups()):
         return jsonify({"error": "UID:GID must contain two non-root numeric values"}), 400
-    esx_mode = str(body.get("esxMode", ""))
+    esx_mode = str(body["esxMode"])
     if esx_mode not in {"download", "metadata"}:
         return jsonify({"error": "ESX mode must be download or metadata"}), 400
-    log_retention = body.get("logRetention")
+    log_retention = body["logRetention"]
     if isinstance(log_retention, bool) or not str(log_retention).isdigit():
         return jsonify({"error": "log retention must be a whole number"}), 400
     log_retention = int(log_retention)
     if not 1 <= log_retention <= 1000:
         return jsonify({"error": "log retention must be from 1 through 1000"}), 400
-    vkr_match = str(body.get("vkrMatch", "")).strip()
-    vkr_os = str(body.get("vkrOs", "")).strip()
+    vkr_match = str(body["vkrMatch"]).strip()
+    vkr_os = str(body["vkrOs"]).strip()
     if len(vkr_match) > 200 or len(vkr_os) > 100 or any(
         "\n" in value or "\r" in value for value in (vkr_match, vkr_os)
     ):
@@ -1089,8 +1203,8 @@ def complete_setup():
     missing = []
     if not _current_tool_info()["installed"]:
         missing.append("licensed tool")
-    machine_id, _error = _machine_id()
-    if not machine_id:
+    machine_id, machine_error = _machine_id()
+    if not machine_id or machine_error:
         missing.append("Software Depot ID")
     if not _activation_configured():
         missing.append("activation code")

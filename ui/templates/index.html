@@ -76,6 +76,13 @@
   <div class="row"><span id="signed-in" class="muted"></span><button id="logout" class="ghost" hidden>Sign out</button></div>
 </header>
 
+<main id="version-blocked" hidden>
+  <section class="notice">
+    <strong>Startup blocked to protect persistent state</strong>
+    <p id="version-problem-copy"></p>
+  </section>
+</main>
+
 <main id="auth-shell">
   <section class="panel auth hero">
     <div class="eyebrow" id="auth-eyebrow">First run</div>
@@ -243,8 +250,17 @@ function showAuth(claimed) {
   $('auth-password').autocomplete=claimed ? 'current-password' : 'new-password';
 }
 
+function showVersionProblem(problem) {
+  const blocked=Boolean(problem?.blocked);
+  $('version-blocked').hidden=!blocked;
+  $('version-problem-copy').textContent=blocked ? problem.message : '';
+  document.querySelectorAll('#app-shell button, #app-shell input, #app-shell select')
+    .forEach(control => { control.disabled=blocked; });
+}
+
 function populateSetup(data) {
   bootstrap=data;
+  showVersionProblem(data.versionProblem);
   const settings=data.settings;
   $('signed-in').textContent=`Signed in as ${settings.username}`; $('logout').hidden=false;
   $('setup').hidden=false; $('ready').hidden=!data.setupComplete; $('finish-setup').hidden=data.setupComplete;
@@ -271,6 +287,7 @@ function populateSetup(data) {
 async function boot() {
   try {
     const data=await api('api/bootstrap');
+    showVersionProblem(data.versionProblem);
     if (!data.claimed || !data.authenticated) { showAuth(data.claimed); return; }
     $('auth-shell').hidden=true; $('app-shell').hidden=false; populateSetup(data);
     await poll();

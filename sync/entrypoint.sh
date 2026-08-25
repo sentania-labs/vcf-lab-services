@@ -11,6 +11,7 @@ POLL_SECONDS="${POLL_SECONDS:-10}"
 REDIS_HOST="${REDIS_HOST:-}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 REDIS_PASSWORD_FILE="${REDIS_PASSWORD_FILE:-/run/secrets/redis/password}"
+VERSION_STATUS_FILE="${VERSION_STATUS_FILE:-/etc/vcf-services/.vcf-services-version-status.json}"
 
 REQUEST_QUEUE="vcf-services:sync:requests"
 STATUS_KEY="vcf-services:sync:status"
@@ -205,6 +206,21 @@ refresh_armed_state() {
 main() {
 	load_settings
 	init_state
+	if [ -s "$VERSION_STATUS_FILE" ]; then
+		local startup_error tmp_state
+		startup_error="$(jq -r '.message // "persistent configuration version mismatch"' "$VERSION_STATUS_FILE" 2>/dev/null)"
+		tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
+		jq --arg error "$startup_error" \
+			'. + {running:false, armed:false, currentTarget:null, startupBlocked:true, startupError:$error}' \
+			"$STATE_DIR/state.json" > "$tmp_state"
+		mv "$tmp_state" "$STATE_DIR/state.json"
+		echo "[scheduler] ERROR: $startup_error"
+		echo "[scheduler] Sync dispatch is disabled until the config volume is replaced or restored."
+		while true; do
+			redis_cmd -x SET "$STATUS_KEY" < "$STATE_DIR/state.json" >/dev/null || true
+			sleep "$POLL_SECONDS"
+		done
+	fi
 	echo "[scheduler] vcf-services sync scheduler ready, schedule: '$CRON_SCHEDULE'"
 	local attempt=0
 	while [ "$attempt" -lt 30 ]; do

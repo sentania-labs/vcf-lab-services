@@ -14,12 +14,14 @@ product_files=(docker-compose.yml compose.sh install.sh caddy/Caddyfile Dockerfi
 ! grep -Eq 'STORAGE_MODE|NFS_|driver_opts|DEPOT_VOLUME_(TYPE|OPTIONS|DEVICE)|BACKUP_VOLUME_(TYPE|OPTIONS|DEVICE)' \
 	-- "${product_files[@]}" || fail "product-managed storage configuration remains"
 
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/ui:latest' docker-compose.yml \
-	|| fail "UI does not default to the published image"
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest' docker-compose.yml \
-	|| fail "sync does not default to the published image"
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sftp:latest' docker-compose.yml \
-	|| fail "SFTP does not default to the published image"
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.1' docker-compose.yml \
+	|| fail "UI does not default to the release image"
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.1' docker-compose.yml \
+	|| fail "sync does not default to the release image"
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.1' docker-compose.yml \
+	|| fail "SFTP does not default to the release image"
+./scripts/verify-compose-version.sh v0.2.1 >/dev/null \
+	|| fail "Compose defaults do not match v0.2.1"
 ! grep -q '^ *build:' docker-compose.yml || fail "Compose still builds a product image"
 
 published_services="$(awk '/^  [A-Za-z0-9_-]+:$/ {service=$1} /^    ports:/ {print service}' docker-compose.yml)"
@@ -33,6 +35,9 @@ grep -q 'config_state:/config:rw' docker-compose.yml || fail "console lacks writ
 grep -q 'secrets_state:/run/secrets:rw' docker-compose.yml || fail "console lacks writable protected secrets"
 grep -q 'requirepass' ui/bootstrap.py || fail "bootstrap does not protect Redis"
 ! grep -q 'requirepass' docker-compose.yml || fail "Redis password material appears in Compose"
+grep -q '.vcf-services-version' ui/bootstrap.py || fail "bootstrap does not mark config versions"
+grep -q 'VERSION_STATUS_FILE' sync/entrypoint.sh || fail "sync does not stop on config version mismatch"
+grep -q 'VERSION_STATUS_FILE' sftp/entrypoint.sh || fail "SFTP does not stop on config version mismatch"
 
 grep -q 'depot_store:/depot:ro' docker-compose.yml || fail "web depot mount must be read-only at /depot"
 grep -q 'depot_store:/depot:rw' docker-compose.yml || fail "sync depot mount must be read-write at /depot"

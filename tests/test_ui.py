@@ -13,6 +13,7 @@ from unittest import mock
 
 
 APP_PATH = Path(__file__).parents[1] / "ui" / "app.py"
+BOOTSTRAP_PATH = Path(__file__).parents[1] / "ui" / "bootstrap.py"
 
 
 class UiApiTests(unittest.TestCase):
@@ -57,6 +58,9 @@ class UiApiTests(unittest.TestCase):
             "SFTP_PASSWORD_FILE": str(self.secrets / "sftp-password"),
             "FLASK_SECRET_FILE": str(self.secrets / "flask-secret"),
             "VCFDT_STORE": str(self.tool_store),
+            "SOFTWARE_DEPOT_ID_FILE": str(root / "software-depot-id"),
+            "VERSION_MARKER_FILE": str(root / ".vcf-services-version"),
+            "VERSION_STATUS_FILE": str(root / ".vcf-services-version-status.json"),
         }
         (self.secrets / "flask-secret").write_text("test-secret\n")
         with mock.patch.dict(os.environ, environment):
@@ -211,6 +215,56 @@ class UiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(os.readlink(self.tool_store / "current"), original)
 
+    def test_implausible_tool_probes_preserve_verified_depot_id(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        verified_id = "11111111-1111-4111-8111-111111111111"
+        self.assertEqual(self.get("/api/registration").get_json()["machineId"], verified_id)
+        original = os.readlink(self.tool_store / "current")
+
+        bad_version = self.tar_tool(version="fake", machine_id="fake")
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (bad_version, "fake-version.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(os.readlink(self.tool_store / "current"), original)
+
+        bad_id = self.tar_tool(version="9.1.3", machine_id="fake")
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (bad_id, "fake-id.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(os.readlink(self.tool_store / "current"), original)
+        self.module._machine_id_cache["value"] = None
+        registration = self.get("/api/registration")
+        self.assertEqual(registration.status_code, 200)
+        self.assertEqual(registration.get_json()["machineId"], verified_id)
+
+    def test_failed_machine_id_probe_reports_error_without_replacing_saved_id(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        verified_id = "11111111-1111-4111-8111-111111111111"
+        self.assertEqual(self.get("/api/registration").get_json()["machineId"], verified_id)
+        tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
+        tool.write_text("#!/bin/sh\necho fake\n")
+        tool.chmod(0o755)
+        self.module._machine_id_cache["value"] = None
+
+        registration = self.get("/api/registration")
+        self.assertEqual(registration.status_code, 409)
+        body = registration.get_json()
+        self.assertEqual(body["machineId"], verified_id)
+        self.assertIn("probe failed", body["error"])
+        self.assertEqual(
+            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), verified_id
+        )
+
     def test_registration_reads_machine_id_and_saves_activation_secret(self):
         self.claim()
         self.write_state()
@@ -245,6 +299,52 @@ class UiApiTests(unittest.TestCase):
             self.tool_store / "current" / "conf" / "application-prodv2.properties"
         ).read_text()
         self.assertIn("lcm.depot.adapter.host=downloads.example.test", properties)
+
+    def test_partial_settings_update_merges_over_stored_document(self):
+        self.claim()
+        self.write_state()
+        response = self.post(
+            "/api/settings", json={"cronSchedule": "30 2 * * *"}
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["cronSchedule"], "30 2 * * *")
+        self.assertEqual(body["vcfVersion"], "9.1.0")
+        self.assertEqual(body["sku"], "VCF")
+
+    def test_version_mismatch_reports_blocked_setup_and_refuses_changes(self):
+        self.claim()
+        self.settings.write_text(
+            self.settings.read_text().replace(
+                'SETUP_COMPLETE="false"', 'SETUP_COMPLETE="true"'
+            )
+        )
+        status_file = Path(self.module.VERSION_STATUS_FILE)
+        status_file.write_text(
+            json.dumps(
+                {
+                    "blocked": True,
+                    "expectedVersion": "v0.2.1",
+                    "foundVersion": "v0.1.0",
+                    "message": "Startup is blocked because v0.1.0 state is not trusted.",
+                }
+            )
+        )
+        bootstrap = self.get("/api/bootstrap")
+        self.assertEqual(bootstrap.status_code, 200)
+        self.assertFalse(bootstrap.get_json()["setupComplete"])
+        self.assertTrue(bootstrap.get_json()["versionProblem"]["blocked"])
+        refused = self.post(
+            "/api/settings", json={"cronSchedule": "30 2 * * *"}
+        )
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("Startup is blocked", refused.get_json()["error"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        depot_auth = self.get(
+            "/auth/check",
+            headers={"Authorization": "Basic dmNmOmEgc3Ryb25nIHRlc3QgcGFzc3dvcmQ="},
+        )
+        self.assertEqual(depot_auth.status_code, 503)
 
     def test_settings_reject_bad_schedule_and_bad_uid(self):
         self.claim()
@@ -424,6 +524,61 @@ class UiApiTests(unittest.TestCase):
         with mock.patch.object(self.module, "_redis", return_value=bus):
             body = self.get("/api/versions/remote").get_json()
         self.assertEqual(body["components"][0]["build"], "20000000")
+
+
+class BootstrapVersionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.config = self.root / "config"
+        self.secrets = self.root / "secrets"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_bootstrap(self):
+        environment = {
+            "CONFIG_DIR": str(self.config),
+            "SECRETS_DIR": str(self.secrets),
+            "VCF_SERVICES_VERSION": "v0.2.1",
+        }
+        with mock.patch.dict(os.environ, environment):
+            spec = importlib.util.spec_from_file_location(
+                f"vcf_services_bootstrap_{id(self)}", BOOTSTRAP_PATH
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.main()
+        return module
+
+    def test_clean_boot_writes_version_marker(self):
+        module = self.run_bootstrap()
+        self.assertEqual(module.VERSION_MARKER.read_text().strip(), "v0.2.1")
+        self.assertFalse(module.VERSION_STATUS.exists())
+
+    def test_existing_unmarked_config_is_quarantined_without_rewriting_setup(self):
+        self.config.mkdir()
+        settings = self.config / "settings.env"
+        settings.write_text('SETUP_COMPLETE="true"\n')
+        module = self.run_bootstrap()
+        status = json.loads(module.VERSION_STATUS.read_text())
+        self.assertTrue(status["blocked"])
+        self.assertIsNone(status["foundVersion"])
+        self.assertIn("unversioned state", status["message"])
+        self.assertEqual(settings.read_text(), 'SETUP_COMPLETE="true"\n')
+        self.assertFalse(module.VERSION_MARKER.exists())
+
+    def test_mismatched_marker_is_quarantined(self):
+        self.config.mkdir()
+        (self.config / "settings.env").write_text('SETUP_COMPLETE="true"\n')
+        (self.config / ".vcf-services-version").write_text("v0.1.0\n")
+        module = self.run_bootstrap()
+        status = json.loads(module.VERSION_STATUS.read_text())
+        self.assertEqual(status["expectedVersion"], "v0.2.1")
+        self.assertEqual(status["foundVersion"], "v0.1.0")
+        self.assertEqual(
+            (self.config / ".vcf-services-version").read_text(), "v0.1.0\n"
+        )
 
 
 if __name__ == "__main__":

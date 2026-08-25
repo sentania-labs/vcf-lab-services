@@ -37,8 +37,10 @@ removed their installer entry point, so adoption currently has no reachable
 path and needs a console path before that flow can be claimed working. The
 scripts stay in place until that console path exists.
 
-Release validation also requires a real rendered browser check and live HTTPS
-Range request against the candidate containers. A healthy container alone is
+Release validation also requires a live HTTP walk through claim, upload,
+registration, and settings, plus an authenticated HTTPS Range request. The
+release workflow repeats this proof against the published tagged images on
+clean volumes before creating the GitHub release. Healthy containers alone are
 not sufficient.
 
 The stub cannot verify these claims:
