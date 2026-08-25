@@ -22,9 +22,11 @@ verification script. It contains no product source and no licensed content.
 
 The workflow's publish step (`scripts/publish-release.sh`, exercised by
 `tests/test_release.sh`) is idempotent per tag: it verifies the tag exists
-on the remote, creates the GitHub release when none exists, and otherwise
-re-uploads the same labelled assets to the existing release with `--clobber`.
-Re-running the workflow for a tag therefore converges instead of failing.
+on the remote and creates the GitHub release when none exists. When the
+release already exists, it compares each labelled asset against the published
+copy, skips identical assets, uploads only missing or differing assets with
+`--clobber`, and publishes the release if it is still a draft. Re-running the
+workflow for a tag therefore converges instead of failing.
 
 ## Local release checks
 
