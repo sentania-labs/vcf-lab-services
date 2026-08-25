@@ -396,8 +396,8 @@ def _probe_tool_version(tool_root):
             timeout=30,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ToolArchiveError("bin/vcf-download-tool could not report its version") from exc
+    except (OSError, subprocess.SubprocessError):
+        return None
     version = next(
         (line.strip() for line in result.stdout.splitlines() if line.strip()), ""
     )
@@ -406,7 +406,7 @@ def _probe_tool_version(tool_root):
         or len(version) > 120
         or TOOL_VERSION_RE.fullmatch(version) is None
     ):
-        raise ToolArchiveError("bin/vcf-download-tool could not report its version")
+        return None
     return version
 
 
@@ -447,6 +447,7 @@ def _current_tool_info():
     return {
         "installed": True,
         "version": metadata.get("version", "unknown"),
+        "versionVerified": bool(metadata.get("versionVerified", "version" in metadata)),
         "uploadedAt": metadata.get("uploadedAt"),
     }
 
@@ -487,11 +488,16 @@ def _install_tool(upload):
             _extract_zip(archive_path, extracted)
         tool_root = _find_tool_root(extracted)
         _patch_tool_endpoints(tool_root)
+        version = _probe_tool_version(tool_root)
         metadata = {
-            "version": _probe_tool_version(tool_root),
+            "version": version if version else "unverified",
+            "versionVerified": version is not None,
             "uploadedAt": datetime.now(timezone.utc).isoformat(),
         }
-        machine_id = _probe_machine_id(tool_root)
+        try:
+            machine_id = _probe_machine_id(tool_root)
+        except ToolArchiveError:
+            machine_id = None
         (tool_root / ".vcf-services.json").write_text(json.dumps(metadata) + "\n")
         os.replace(tool_root, release_path)
 
@@ -985,7 +991,10 @@ def upload_vcfdt():
             if _state().get("running", False):
                 return jsonify({"error": "wait for the running sync to finish"}), 409
             metadata, old_target, machine_id = _install_tool(upload)
-            _remember_machine_id(machine_id)
+            if machine_id:
+                _remember_machine_id(machine_id)
+            else:
+                _machine_id_cache["value"] = None
             if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
                 shutil.rmtree(old_target, ignore_errors=True)
     except BlockingIOError:

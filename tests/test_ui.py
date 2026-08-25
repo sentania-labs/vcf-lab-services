@@ -223,27 +223,43 @@ class UiApiTests(unittest.TestCase):
         self.assertEqual(self.get("/api/registration").get_json()["machineId"], verified_id)
         original = os.readlink(self.tool_store / "current")
 
-        bad_version = self.tar_tool(version="fake", machine_id="fake")
+        bogus = self.tar_tool(version="fake", machine_id="fake")
         response = self.post(
             "/api/vcfdt",
-            data={"archive": (bad_version, "fake-version.tar.gz")},
+            data={"archive": (bogus, "bogus-probes.tar.gz")},
             content_type="multipart/form-data",
         )
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(os.readlink(self.tool_store / "current"), original)
+        self.assertEqual(response.status_code, 201)
+        body = response.get_json()
+        self.assertEqual(body["version"], "unverified")
+        self.assertFalse(body["versionVerified"])
+        self.assertNotEqual(os.readlink(self.tool_store / "current"), original)
+        registration = self.get("/api/registration")
+        self.assertEqual(registration.status_code, 409)
+        self.assertEqual(registration.get_json()["machineId"], verified_id)
+        self.assertEqual(
+            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), verified_id
+        )
 
-        bad_id = self.tar_tool(version="9.1.3", machine_id="fake")
+    def test_unexpected_version_output_installs_marked_unverified(self):
+        self.claim()
+        self.write_state()
+        new_id = "22222222-2222-4222-8222-222222222222"
+        weird = self.tar_tool(version="fake", machine_id=new_id)
         response = self.post(
             "/api/vcfdt",
-            data={"archive": (bad_id, "fake-id.tar.gz")},
+            data={"archive": (weird, "weird-version.tar.gz")},
             content_type="multipart/form-data",
         )
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(os.readlink(self.tool_store / "current"), original)
-        self.module._machine_id_cache["value"] = None
+        self.assertEqual(response.status_code, 201)
+        body = response.get_json()
+        self.assertEqual(body["version"], "unverified")
+        self.assertFalse(body["versionVerified"])
+        status = self.get("/api/status").get_json()
+        self.assertEqual(status["vcfdtVersion"], "unverified")
         registration = self.get("/api/registration")
         self.assertEqual(registration.status_code, 200)
-        self.assertEqual(registration.get_json()["machineId"], verified_id)
+        self.assertEqual(registration.get_json()["machineId"], new_id)
 
     def test_failed_machine_id_probe_reports_error_without_replacing_saved_id(self):
         self.claim()

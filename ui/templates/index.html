@@ -265,7 +265,7 @@ function populateSetup(data) {
   $('signed-in').textContent=`Signed in as ${settings.username}`; $('logout').hidden=false;
   $('setup').hidden=false; $('ready').hidden=!data.setupComplete; $('finish-setup').hidden=data.setupComplete;
   $('machine-id').textContent=data.machineId || data.machineIdError || 'Upload the tool first';
-  $('vcfdt-flash').textContent=data.tool.installed ? `${data.tool.version} is ready` : 'Not installed';
+  $('vcfdt-flash').textContent=data.tool.installed ? (data.tool.versionVerified ? `${data.tool.version} is ready` : 'Installed; the reported version could not be verified') : 'Not installed';
   $('activation-flash').textContent=data.activationConfigured ? 'Activation code saved' : '';
   $('depot-storage').textContent=storageText(data.storage.depot);
   $('backup-storage').textContent=storageText(data.storage.backup);
