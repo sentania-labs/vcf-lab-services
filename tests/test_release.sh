@@ -164,6 +164,8 @@ grep -q '^release upload v1.2.3 .*/install.sh#Installer entry point .*/vcf-lab-s
 grep -q '^ls-remote --exit-code --tags origin refs/tags/v1.2.3$' "$git_calls"
 
 # 3. When tag does not exist remotely: fails before create or upload
+: > "$gh_calls"
+: > "$git_calls"
 set +e
 run_release_step false false >/dev/null 2>&1
 tag_missing_rc=$?
