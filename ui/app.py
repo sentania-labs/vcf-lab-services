@@ -8,6 +8,7 @@ the Docker daemon.
 """
 
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -67,8 +68,13 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 try:
     app.secret_key = FLASK_SECRET_FILE.read_text().strip()
-except OSError:
-    app.secret_key = "development-only-vcf-services-key"
+except OSError as exc:
+    raise RuntimeError(
+        f"the session secret at {FLASK_SECRET_FILE} is missing or unreadable; "
+        "run the bootstrap container to initialize the secrets volume"
+    ) from exc
+if not app.secret_key:
+    raise RuntimeError(f"the session secret at {FLASK_SECRET_FILE} is empty")
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Strict",
@@ -99,14 +105,40 @@ def _is_authenticated():
     return bool(auth and session.get("owner") == auth.get("username"))
 
 
+_verified_cache = {"stamp": None, "entries": {}}
+VERIFIED_CACHE_TTL = 300
+VERIFIED_CACHE_MAX = 128
+
+
+def _auth_file_stamp():
+    try:
+        stat = AUTH_FILE.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
 def _verify_credentials(username, password):
     auth = _auth_doc()
     if not auth or username != auth.get("username"):
         return False
+    stamp = _auth_file_stamp()
+    if stamp != _verified_cache["stamp"] or stamp is None:
+        _verified_cache.update(stamp=stamp, entries={})
+    digest = hashlib.sha256(f"{username}\x00{password}".encode()).hexdigest()
+    now = time.monotonic()
+    expiry = _verified_cache["entries"].get(digest)
+    if expiry is not None and expiry > now:
+        return True
     try:
-        return bcrypt.checkpw(password.encode(), auth["passwordHash"].encode())
+        verified = bcrypt.checkpw(password.encode(), auth["passwordHash"].encode())
     except (ValueError, TypeError):
         return False
+    if verified:
+        if len(_verified_cache["entries"]) >= VERIFIED_CACHE_MAX:
+            _verified_cache["entries"].clear()
+        _verified_cache["entries"][digest] = now + VERIFIED_CACHE_TTL
+    return verified
 
 
 def _write_secret(path, value):
@@ -395,7 +427,13 @@ def _settings():
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip('"').strip("'")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                quote = value[0]
+                value = value[1:-1]
+                if quote == '"':
+                    value = re.sub(r"\\([\\\"$`])", r"\1", value)
+            values[key.strip()] = value
     except OSError:
         pass
     return values
@@ -497,7 +535,12 @@ def _activation_configured():
         return False
 
 
+_machine_id_cache = {"value": None}
+
+
 def _machine_id():
+    if _machine_id_cache["value"]:
+        return _machine_id_cache["value"], None
     tool = VCFDT_STORE / "current" / "bin" / "vcf-download-tool"
     if not tool.is_file():
         return None, "Upload the VCF Download Tool first."
@@ -521,11 +564,13 @@ def _machine_id():
         output,
     )
     if uuid_match:
+        _machine_id_cache["value"] = uuid_match.group(0)
         return uuid_match.group(0), None
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     value = lines[-1].split(":", 1)[-1].strip() if lines else ""
     if not value or len(value) > 200 or not re.fullmatch(r"[A-Za-z0-9._:-]+", value):
         return None, "The tool did not return a recognizable Software Depot ID."
+    _machine_id_cache["value"] = value
     return value, None
 
 

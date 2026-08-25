@@ -52,11 +52,18 @@ def main():
     )
     write_once(SETTINGS, settings_text, 0o640)
 
-    redis_password = SECRETS_DIR / "redis-password"
+    for consumer in ("redis", "sync", "sftp", "ui"):
+        subdir = SECRETS_DIR / consumer
+        subdir.mkdir(exist_ok=True)
+        os.chmod(subdir, 0o700)
+
+    redis_password = SECRETS_DIR / "redis" / "redis-password"
     write_once(redis_password, secrets.token_urlsafe(48) + "\n")
     password = redis_password.read_text(encoding="utf-8").strip()
+    write_once(SECRETS_DIR / "sync" / "redis-password", password + "\n")
+    write_once(SECRETS_DIR / "ui" / "redis-password", password + "\n")
     write_once(
-        SECRETS_DIR / "redis.conf",
+        SECRETS_DIR / "redis" / "redis.conf",
         "bind 0.0.0.0\n"
         "protected-mode yes\n"
         "port 6379\n"
@@ -64,8 +71,8 @@ def main():
         "appendonly no\n"
         f"requirepass {password}\n",
     )
-    write_once(SECRETS_DIR / "flask-secret", secrets.token_hex(48) + "\n")
-    write_once(SECRETS_DIR / "activation-code.txt", "")
+    write_once(SECRETS_DIR / "ui" / "flask-secret", secrets.token_hex(48) + "\n")
+    write_once(SECRETS_DIR / "sync" / "activation-code.txt", "")
     print("VCF Services persistent configuration is ready")
 
 

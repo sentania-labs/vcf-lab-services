@@ -59,7 +59,12 @@ services:
       - vcfdt_state:/root/.local/share/vmware/vdt
       - sync_state:/state:rw
       - config_state:/etc/vcf-services:ro
-      - secrets_state:/run/secrets:ro
+      - type: volume
+        source: secrets_state
+        target: /run/secrets
+        read_only: true
+        volume:
+          subpath: sync
     networks:
       - control
     depends_on:
@@ -86,7 +91,12 @@ services:
       - backup_store:/mnt/backup:rw
       - sftp_host_keys:/etc/ssh/keys:rw
       - config_state:/config:ro
-      - secrets_state:/run/secrets:ro
+      - type: volume
+        source: secrets_state
+        target: /run/secrets
+        read_only: true
+        volume:
+          subpath: sftp
     networks:
       - control
     depends_on:
@@ -114,11 +124,12 @@ services:
       SETTINGS_FILE: /config/settings.env
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      REDIS_PASSWORD_FILE: /run/secrets/redis-password
+      REDIS_PASSWORD_FILE: /run/secrets/ui/redis-password
       VCFDT_STORE: /opt/vcfdt
-      AUTH_FILE: /run/secrets/auth.json
-      ACTIVATION_CODE_FILE: /run/secrets/activation-code.txt
-      FLASK_SECRET_FILE: /run/secrets/flask-secret
+      AUTH_FILE: /run/secrets/ui/auth.json
+      ACTIVATION_CODE_FILE: /run/secrets/sync/activation-code.txt
+      SFTP_PASSWORD_FILE: /run/secrets/sftp/sftp-password
+      FLASK_SECRET_FILE: /run/secrets/ui/flask-secret
     volumes:
       - depot_store:/depot:ro
       - backup_store:/mnt/backup:ro
@@ -143,7 +154,12 @@ services:
     restart: unless-stopped
     command: ["sh", "-c", "exec redis-server /etc/redis/redis.conf"]
     volumes:
-      - secrets_state:/etc/redis:ro
+      - type: volume
+        source: secrets_state
+        target: /etc/redis
+        read_only: true
+        volume:
+          subpath: redis
     networks:
       - control
     depends_on:
