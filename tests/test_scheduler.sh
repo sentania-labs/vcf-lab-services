@@ -41,6 +41,30 @@ jq -e '.running == false and .armed == false and .lastRun == {}' \
 	"$STATE_DIR/state.json" >/dev/null
 echo "malformed state recovery tests passed"
 
+STATE_DIR="$work_dir/state-lock"
+AUTH_FILE="$work_dir/activation-code.txt"
+mkdir -p "$STATE_DIR"
+printf 'stub-code\n' > "$AUTH_FILE"
+printf '%s' '{"running":false,"armed":false,"currentTarget":null,"lastRun":{}}' \
+	> "$STATE_DIR/state.json"
+exec 7>"$STATE_DIR/sync.lock"
+flock 7
+(
+	exec 7>&-
+	refresh_armed_state
+) &
+refresh_pid=$!
+sleep 0.2
+kill -0 "$refresh_pid"
+printf '%s' '{"running":true,"armed":false,"currentTarget":"patches","lastRun":{"esx":{"status":"OK"}}}' \
+	> "$STATE_DIR/state.json"
+flock -u 7
+exec 7>&-
+wait "$refresh_pid"
+jq -e '.running == true and .armed == true and .currentTarget == "patches"
+  and .lastRun.esx.status == "OK"' "$STATE_DIR/state.json" >/dev/null
+echo "armed-state update lock test passed"
+
 stub_bin="$work_dir/bin"
 mkdir -p "$stub_bin"
 export FAKE_QUEUE_FILE="$work_dir/queue"

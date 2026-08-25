@@ -4,7 +4,9 @@ import json
 import os
 import tarfile
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -288,6 +290,84 @@ class UiApiTests(unittest.TestCase):
             json={"username": "vcf", "password": "a different strong password"},
         )
         self.assertEqual(login.status_code, 200)
+
+    def test_overlapping_password_changes_leave_one_shared_credential(self):
+        self.claim()
+        barrier = threading.Barrier(2)
+
+        def change_password(name, new_password):
+            client = self.module.app.test_client()
+            login = client.post(
+                "/api/login",
+                base_url="https://localhost",
+                json={"username": "vcf", "password": "a strong test password"},
+            )
+            self.assertEqual(login.status_code, 200)
+            barrier.wait()
+            response = client.post(
+                "/api/password",
+                base_url="https://localhost",
+                json={
+                    "currentPassword": "a strong test password",
+                    "newPassword": new_password,
+                },
+            )
+            return name, response.status_code
+
+        changes = {
+            "first": "first replacement password",
+            "second": "second replacement password",
+        }
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(change_password, name, password)
+                for name, password in changes.items()
+            ]
+            results = dict(future.result(timeout=10) for future in futures)
+
+        self.assertEqual(sorted(results.values()), [200, 403])
+        winner = next(name for name, status in results.items() if status == 200)
+        winning_password = changes[winner]
+        self.assertEqual(
+            (self.secrets / "sftp-password").read_text(), winning_password + "\n"
+        )
+        self.assertTrue(self.module._verify_credentials("vcf", winning_password))
+        losing_password = next(
+            password for name, password in changes.items() if name != winner
+        )
+        self.assertFalse(self.module._verify_credentials("vcf", losing_password))
+
+    def test_password_change_rolls_back_sftp_when_auth_write_fails(self):
+        self.claim()
+        original_write_secret = self.module._write_secret
+
+        def fail_auth_write(path, value):
+            if path == self.module.AUTH_FILE:
+                raise OSError("simulated auth write failure")
+            return original_write_secret(path, value)
+
+        with mock.patch.object(
+            self.module, "_write_secret", side_effect=fail_auth_write
+        ):
+            response = self.post(
+                "/api/password",
+                json={
+                    "currentPassword": "a strong test password",
+                    "newPassword": "a failed replacement password",
+                },
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            (self.secrets / "sftp-password").read_text(),
+            "a strong test password\n",
+        )
+        self.assertTrue(
+            self.module._verify_credentials("vcf", "a strong test password")
+        )
+        self.assertFalse(
+            self.module._verify_credentials("vcf", "a failed replacement password")
+        )
 
     def test_sync_uses_activation_secret_and_publishes_valid_targets(self):
         self.claim()

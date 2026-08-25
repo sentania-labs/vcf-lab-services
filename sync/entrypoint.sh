@@ -182,6 +182,8 @@ init_state() {
 refresh_armed_state() {
 	local armed=false tmp_state
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
+	exec 8>"$STATE_DIR/sync.lock"
+	flock 8
 	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
 	if jq --argjson armed "$armed" '.armed=$armed' "$STATE_DIR/state.json" > "$tmp_state" 2>/dev/null; then
 		mv "$tmp_state" "$STATE_DIR/state.json"
@@ -189,6 +191,7 @@ refresh_armed_state() {
 	else
 		rm -f "$tmp_state"
 	fi
+	exec 8>&-
 }
 
 main() {

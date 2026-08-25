@@ -159,6 +159,39 @@ def _write_secret(path, value):
         raise
 
 
+@contextmanager
+def _credential_update_lock():
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(
+        AUTH_FILE.parent / ".credentials.lock", "a+", encoding="utf-8"
+    )
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+    finally:
+        lock_file.close()
+
+
+def _replace_shared_credentials(auth_doc, password):
+    previous_sftp = None
+    sftp_existed = SFTP_PASSWORD_FILE.exists()
+    if sftp_existed:
+        previous_sftp = SFTP_PASSWORD_FILE.read_text(encoding="utf-8")
+
+    sftp_replaced = False
+    try:
+        _write_sftp_password(password)
+        sftp_replaced = True
+        _write_secret(AUTH_FILE, json.dumps(auth_doc) + "\n")
+    except OSError:
+        if sftp_replaced:
+            if sftp_existed:
+                _write_secret(SFTP_PASSWORD_FILE, previous_sftp)
+            else:
+                SFTP_PASSWORD_FILE.unlink(missing_ok=True)
+        raise
+
+
 @app.before_request
 def require_console_owner():
     public_paths = {
@@ -715,9 +748,7 @@ def claim():
     if len(password) > 1024 or "\n" in password or "\r" in password:
         return jsonify({"error": "the password must be one line and at most 1024 characters"}), 400
 
-    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(AUTH_FILE.parent / ".claim.lock", "a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+    with _credential_update_lock():
         if _auth_doc() is not None:
             return jsonify({"error": "this appliance has already been claimed"}), 409
         password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -728,8 +759,7 @@ def claim():
         }
         try:
             _write_settings({"AUTH_USERNAME": username})
-            _write_sftp_password(password)
-            _write_secret(AUTH_FILE, json.dumps(auth) + "\n")
+            _replace_shared_credentials(auth, password)
         except OSError:
             return jsonify({"error": "the owner credentials could not be saved"}), 500
     session.clear()
@@ -1020,23 +1050,23 @@ def update_password():
     body = request.get_json(silent=True) or {}
     current = str(body.get("currentPassword", ""))
     new = body.get("newPassword")
-    auth = _auth_doc()
-    if not auth or not _verify_credentials(auth["username"], current):
-        return jsonify({"error": "the current password is incorrect"}), 403
     if not isinstance(new, str) or len(new) < 12:
         return jsonify({"error": "use a new password of at least 12 characters"}), 400
     if len(new) > 1024 or "\n" in new or "\r" in new:
         return jsonify({"error": "the password must be one line and at most 1024 characters"}), 400
-    updated = {
-        **auth,
-        "passwordHash": bcrypt.hashpw(new.encode(), bcrypt.gensalt()).decode(),
-        "changedAt": datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        _write_sftp_password(new)
-        _write_secret(AUTH_FILE, json.dumps(updated) + "\n")
-    except OSError:
-        return jsonify({"error": "the shared password could not be saved"}), 500
+    with _credential_update_lock():
+        auth = _auth_doc()
+        if not auth or not _verify_credentials(auth["username"], current):
+            return jsonify({"error": "the current password is incorrect"}), 403
+        updated = {
+            **auth,
+            "passwordHash": bcrypt.hashpw(new.encode(), bcrypt.gensalt()).decode(),
+            "changedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            _replace_shared_credentials(updated, new)
+        except OSError:
+            return jsonify({"error": "the shared password could not be saved"}), 500
     return jsonify({"saved": True, "consumerUpdateRequired": True})
 
 
