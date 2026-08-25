@@ -535,9 +535,7 @@ def status():
             "defaultTargets": settings.get("SYNC_TARGETS", "").split(),
             "vcfVersion": settings.get("VCF_VERSION", "9.1.0"),
             "vcfdtInstalled": tool_info["installed"],
-            "vcfdtVersion": tool_info["version"]
-            if tool_info["installed"]
-            else settings.get("VCFDT_VERSION", "not installed"),
+            "vcfdtVersion": tool_info["version"],
             "vcfdtUploadedAt": tool_info.get("uploadedAt"),
         }
     )

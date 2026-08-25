@@ -86,14 +86,15 @@ class UiApiTests(unittest.TestCase):
         stream.seek(0)
         return stream
 
-    def test_dormant_status_has_registration_guidance(self):
+    def test_dormant_status_ignores_legacy_version_when_tool_volume_is_empty(self):
         self.write_state()
         response = self.client.get("/api/status")
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertFalse(body["armed"])
         self.assertIn("Register the Software Depot ID", body["armingInstructions"])
-        self.assertEqual(body["vcfdtVersion"], "test-version")
+        self.assertFalse(body["vcfdtInstalled"])
+        self.assertEqual(body["vcfdtVersion"], "not installed")
 
     def test_tool_upload_stages_and_atomically_selects_valid_tar(self):
         self.write_state()
