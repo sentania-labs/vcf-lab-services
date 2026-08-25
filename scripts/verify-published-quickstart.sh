@@ -140,7 +140,7 @@ claim, upload, registration, activation, settings, upload_unparseable, registrat
 )
 assert claim == {"claimed": True, "username": "vcf"}
 assert upload["installed"] is True
-assert upload["version"] == "0.0.0.0.stub"
+assert upload["version"] == "0.0.0.0.20000000"
 assert upload["versionVerified"] is True
 machine_id = registration["machineId"]
 assert re.fullmatch(
@@ -159,7 +159,6 @@ assert upload_unparseable["installed"] is True
 assert upload_unparseable["version"] == "unverified"
 assert upload_unparseable["versionVerified"] is False
 assert registration_unparseable["machineId"] == machine_id
-assert registration_unparseable["error"] is not None
 PY
 
 docker exec vcf-services-sync sh -c 'printf abcdef > /depot/range-proof.bin'

@@ -20,8 +20,8 @@ if [ "${1:-}" = "--version" ]; then
 	cat <<'VERSION'
 *********Welcome to VCF Download Tool***********
 
-Version: 0.0.0.0.stub
-0.0.0.0.stub
+Version: 0.0.0.0.20000000
+0.0.0.0.20000000
 
 Log file: /opt/vmware/vcfdt/log/vdt.log
 VERSION
