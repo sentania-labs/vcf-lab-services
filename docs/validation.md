@@ -27,6 +27,15 @@ Redis, fixed mount contracts, and the absence of a Docker socket. Shell tests
 cover scheduler timing, single-writer sync behavior, log retention, SFTP
 identity and host keys, Range serving, packaging, and license isolation.
 
+`tests/test_install_checks.sh` is a regression guard, not a gate for a
+reachable operator path. It exercises the retained depot-adoption scripts
+(`scripts/install-checks.sh`, `scripts/import-vcfdt-state.sh`, and
+`scripts/validate-adopted-depot.sh`) that let an existing VCFDT depot and
+Software Depot ID be adopted without re-downloading. The GUI-first prototype
+removed their installer entry point, so adoption currently has no reachable
+path and needs a console path before that flow can be claimed working. The
+scripts stay in place until that console path exists.
+
 Release validation also requires a real rendered browser check and live HTTPS
 Range request against the candidate containers. A healthy container alone is
 not sufficient.

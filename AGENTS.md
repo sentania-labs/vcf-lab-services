@@ -8,6 +8,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `tests/test_install_checks.sh`, `tests/test_compose.sh`,
   `tests/test_release.sh`, `tests/test_sftp.sh`, the UI unit test documented in
   `docs/validation.md`, and the live Range check before release.
+  `tests/test_install_checks.sh` is a regression guard for the retained
+  depot-adoption scripts in `scripts/`, not a gate for a reachable operator
+  path: the GUI-first prototype removed their installer entry point, and
+  adoption needs a console path (see `docs/validation.md`).
 - Release tags are the product version authority. Follow `docs/releasing.md`
   and keep the published sync base free of licensed VCFDT content.
 - Preserve the storage contracts in `docker-compose.yml`: the depot is `/depot`

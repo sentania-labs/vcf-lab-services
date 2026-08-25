@@ -127,6 +127,11 @@ Deferred work is explicit:
 - VCFDT self-upgrade from content already in the depot. Upload-driven atomic
   replacement is present.
 - Backup status by product and product release checking.
+- A console path for adopting an existing VCFDT depot and Software Depot ID.
+  The adoption scripts remain in `scripts/`, but removing the installer left
+  no reachable way to run them (see [docs/validation.md](docs/validation.md)).
+- Restricting on-demand TLS certificate issuance to configured or observed
+  appliance hostnames. The prototype keeps the open ask behavior unchanged.
 
 The repository stub validates the setup workflow, but the following need the
 captain's licensed archive and lab before they can be claimed as working:
