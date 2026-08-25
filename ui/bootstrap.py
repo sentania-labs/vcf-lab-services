@@ -64,7 +64,7 @@ def write_atomic(path, content, mode=0o600):
         raise
 
 
-def verify_config_version(settings_existed):
+def verify_config_version(config_was_empty):
     found = None
     try:
         found = VERSION_MARKER.read_text(encoding="utf-8").strip() or None
@@ -73,19 +73,20 @@ def verify_config_version(settings_existed):
 
     if found == CURRENT_VERSION:
         VERSION_STATUS.unlink(missing_ok=True)
-        return
-    if found is None and not settings_existed:
+        return True
+    if found is None and config_was_empty:
         write_once(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
         VERSION_STATUS.unlink(missing_ok=True)
-        return
+        return True
 
     found_label = found or "unversioned state"
     message = (
         f"Startup is blocked because the config volume contains {found_label}, "
-        f"but this appliance is {CURRENT_VERSION}. The existing setup state was not "
-        "trusted or changed. Stop the stack, preserve any data you need, then start "
-        f"{CURRENT_VERSION} with a new config volume or restore a config volume marked "
-        f"for {CURRENT_VERSION}."
+        f"but this appliance is {CURRENT_VERSION}. Existing settings, secrets, and "
+        "service identity were not trusted or changed; only this diagnostic block "
+        "record was added so the console can explain the problem. Stop the stack, "
+        f"preserve any data you need, then start {CURRENT_VERSION} with a new config "
+        f"volume or restore a config volume marked for {CURRENT_VERSION}."
     )
     status = {
         "blocked": True,
@@ -96,11 +97,16 @@ def verify_config_version(settings_existed):
     }
     write_atomic(VERSION_STATUS, json.dumps(status) + "\n", 0o640)
     print(f"ERROR: {message}")
+    return False
 
 
 def main():
-    settings_existed = SETTINGS.exists()
+    config_existed = CONFIG_DIR.exists()
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config_was_empty = not config_existed or not any(CONFIG_DIR.iterdir())
+    if not verify_config_version(config_was_empty):
+        return
+
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CONFIG_DIR, 0o750)
     os.chmod(SECRETS_DIR, 0o700)
@@ -109,7 +115,6 @@ def main():
         f'{key}="{value}"\n' for key, value in DEFAULT_SETTINGS.items()
     )
     write_once(SETTINGS, settings_text, 0o640)
-    verify_config_version(settings_existed)
 
     for consumer in ("redis", "sync", "sftp", "ui"):
         subdir = SECRETS_DIR / consumer

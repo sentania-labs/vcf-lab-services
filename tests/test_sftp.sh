@@ -40,6 +40,40 @@ docker run --rm --entrypoint /bin/sh -v "$backup_volume:/mnt/backup" "$image" \
 docker run --rm --user 1003:1003 --entrypoint /bin/sh -v "$backup_volume:/mnt/backup" "$image" \
 	-c 'mkdir -p /mnt/backup/sddc-manager /mnt/backup/nsx /mnt/backup/vcenter'
 
+snapshot_key_volume() {
+	docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:ro" "$image" -c '
+		find /keys -mindepth 1 -printf "%P|%y|%m|%s\n" | sort
+		find /keys -type f -exec sha256sum {} + | sed "s#/keys/##" | sort
+	'
+}
+
+docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:rw" "$image" \
+	-c 'printf "recovery sentinel\n" > /keys/recovery-sentinel && chmod 0640 /keys/recovery-sentinel'
+blocked_keys_before="$(snapshot_key_volume)"
+printf '%s\n' '{"blocked":true,"message":"config volume version mismatch"}' \
+	> "$work_dir/config/.vcf-services-version-status.json"
+docker run -d --name "$container" \
+	-v "$backup_volume:/mnt/backup:rw" \
+	-v "$key_volume:/etc/ssh/keys:rw" \
+	-v "$work_dir/config:/config:ro" \
+	-v "$work_dir/secrets:/run/sftp-secrets:ro" \
+	"$image" >/dev/null
+deadline=$((SECONDS + 15))
+while [ "$SECONDS" -lt "$deadline" ]; do
+	docker logs "$container" 2>&1 \
+		| grep -q 'SFTP is disabled because the config volume version check failed' \
+		&& break
+	sleep 1
+done
+docker logs "$container" 2>&1 \
+	| grep -q 'SFTP is disabled because the config volume version check failed' \
+	|| fail "blocked SFTP startup did not report the config version failure"
+blocked_keys_after="$(snapshot_key_volume)"
+[ "$blocked_keys_before" = "$blocked_keys_after" ] \
+	|| fail "blocked SFTP startup changed the persistent host-key volume"
+docker rm -f "$container" >/dev/null
+rm "$work_dir/config/.vcf-services-version-status.json"
+
 start_server() {
 	docker run -d --name "$container" -p 127.0.0.1::22 \
 		-v "$backup_volume:/mnt/backup:rw" \

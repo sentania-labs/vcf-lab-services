@@ -582,6 +582,20 @@ class BootstrapVersionTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    @staticmethod
+    def persistent_snapshot(root, ignored=()):
+        if not root.exists():
+            return {}
+        ignored = set(ignored)
+        snapshot = {".": (root.stat().st_mode & 0o777, None)}
+        for path in sorted(root.rglob("*")):
+            relative = str(path.relative_to(root))
+            if relative in ignored:
+                continue
+            mode = path.stat().st_mode & 0o777
+            snapshot[relative] = (mode, path.read_bytes() if path.is_file() else None)
+        return snapshot
+
     def run_bootstrap(self):
         environment = {
             "CONFIG_DIR": str(self.config),
@@ -606,25 +620,40 @@ class BootstrapVersionTests(unittest.TestCase):
         self.config.mkdir()
         settings = self.config / "settings.env"
         settings.write_text('SETUP_COMPLETE="true"\n')
+        self.secrets.mkdir()
+        (self.secrets / "restored-secret").write_text("preserve me\n")
+        config_before = self.persistent_snapshot(self.config)
+        secrets_before = self.persistent_snapshot(self.secrets)
         module = self.run_bootstrap()
         status = json.loads(module.VERSION_STATUS.read_text())
         self.assertTrue(status["blocked"])
         self.assertIsNone(status["foundVersion"])
         self.assertIn("unversioned state", status["message"])
-        self.assertEqual(settings.read_text(), 'SETUP_COMPLETE="true"\n')
+        self.assertEqual(
+            self.persistent_snapshot(self.config, {module.VERSION_STATUS.name}),
+            config_before,
+        )
+        self.assertEqual(self.persistent_snapshot(self.secrets), secrets_before)
         self.assertFalse(module.VERSION_MARKER.exists())
 
     def test_mismatched_marker_is_quarantined(self):
         self.config.mkdir()
-        (self.config / "settings.env").write_text('SETUP_COMPLETE="true"\n')
         (self.config / ".vcf-services-version").write_text("v0.1.0\n")
+        (self.config / "restored-config").write_text("preserve me\n")
+        self.secrets.mkdir()
+        (self.secrets / "restored-secret").write_text("preserve me\n")
+        config_before = self.persistent_snapshot(self.config)
+        secrets_before = self.persistent_snapshot(self.secrets)
         module = self.run_bootstrap()
         status = json.loads(module.VERSION_STATUS.read_text())
         self.assertEqual(status["expectedVersion"], "v0.2.1")
         self.assertEqual(status["foundVersion"], "v0.1.0")
         self.assertEqual(
-            (self.config / ".vcf-services-version").read_text(), "v0.1.0\n"
+            self.persistent_snapshot(self.config, {module.VERSION_STATUS.name}),
+            config_before,
         )
+        self.assertEqual(self.persistent_snapshot(self.secrets), secrets_before)
+        self.assertFalse((self.config / "settings.env").exists())
 
 
 if __name__ == "__main__":

@@ -149,6 +149,17 @@ shutdown() {
 }
 trap shutdown INT TERM
 
+last_uid_gid=""
+last_password_hash=""
+touch /run/sftp-supervisor-ready
+
+while [ -s "$version_status_file" ]; do
+	stop_sshd
+	echo "ERROR: SFTP is disabled because the config volume version check failed." >&2
+	sleep 30 &
+	wait $!
+done
+
 generate_host_key ed25519 ""
 generate_host_key rsa 3072
 generate_host_key ecdsa 256
@@ -159,10 +170,6 @@ for public_key in /etc/ssh/keys/ssh_host_ed25519_key.pub \
 	/etc/ssh/keys/ssh_host_ecdsa_key.pub; do
 	ssh-keygen -lf "$public_key"
 done
-
-last_uid_gid=""
-last_password_hash=""
-touch /run/sftp-supervisor-ready
 
 while :; do
 	if [ -s "$version_status_file" ]; then
