@@ -49,7 +49,9 @@ not sufficient.
 
 The stub cannot verify these claims:
 
-- Actual machine ID and version output from the licensed VCF Download Tool.
+- Actual machine ID output from the licensed VCF Download Tool. Version
+  output is already confirmed against captured licensed tool output (see
+  `docs/releasing.md`).
 - Registration and download with a real activation code.
 - A real content sync and consumption by VCF Installer, SDDC Manager, UMDS, or
   Fleet.

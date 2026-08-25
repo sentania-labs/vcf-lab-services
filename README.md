@@ -144,7 +144,8 @@ Deferred work is explicit:
 The repository stub validates the setup workflow, but the following need the
 captain's licensed archive and lab before they can be claimed as working:
 
-- Machine ID and version output from the real licensed tool.
+- Machine ID output from the real licensed tool. Version output parsing is
+  already confirmed against captured licensed output.
 - Registration with a real activation code and an actual Broadcom download.
 - A completed sync serving real depot content to VCF consumers.
 - Consumer trust of the first-boot CA, and live VCF component SFTP behavior.
