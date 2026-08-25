@@ -61,7 +61,9 @@ class UiApiTests(unittest.TestCase):
             "SOFTWARE_DEPOT_ID_FILE": str(root / "software-depot-id"),
             "VERSION_MARKER_FILE": str(root / ".vcf-services-version"),
             "VERSION_STATUS_FILE": str(root / ".vcf-services-version-status.json"),
+            "VCF_SERVICES_VERSION": "v0.2.1",
         }
+        (root / ".vcf-services-version").write_text("v0.2.1\n")
         (self.secrets / "flask-secret").write_text("test-secret\n")
         with mock.patch.dict(os.environ, environment):
             spec = importlib.util.spec_from_file_location("vcf_services_ui", APP_PATH)
