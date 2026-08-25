@@ -20,12 +20,16 @@ docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:local \
 The UI test covers first-person ownership, login, live depot authentication,
 licensed archive staging, persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
-setup completion, shared password replacement, sync dispatch, and version
-parsing. The Compose test enforces published-image defaults, first-boot state
-initialization, internal TLS, the platform-provided storage boundary, protected
-Redis, fixed mount contracts, and the absence of a Docker socket. Shell tests
-cover scheduler timing, single-writer sync behavior, log retention, SFTP
-identity and host keys, Range serving, packaging, idempotent release
+setup completion, shared password replacement, sync dispatch, partial settings
+merges over the stored document, advisory tool version and Software Depot ID
+probes that preserve the last verified ID, and config version marker
+quarantine. The Compose test enforces release-pinned published-image defaults,
+first-boot state initialization, internal TLS, the platform-provided storage
+boundary, protected Redis, fixed mount contracts, version mismatch safe-stop
+wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
+single-writer sync behavior, sync safe-stop on a version mismatch, log
+retention, SFTP identity and host keys, Range serving, packaging, rejection of
+release tags that disagree with the Compose defaults, idempotent release
 publication, and license isolation.
 
 `tests/test_install_checks.sh` is a regression guard, not a gate for a
