@@ -10,8 +10,8 @@ redistributed by this project.
 
 ## First run
 
-Requirements are Docker Engine, Docker Compose v2, host port 443, and enough
-durable storage for the depot. Plan for roughly 0.5 to 1 TB for one VCF release
+Requirements are Docker Engine 26.0 or newer, Docker Compose 2.26 or newer,
+host port 443, and enough durable storage for the depot. Plan for roughly 0.5 to 1 TB for one VCF release
 train.
 
 Start the published images directly. There is no installer step and no local

@@ -23,7 +23,7 @@ case "${1:-}" in
 esac
 
 command -v docker >/dev/null 2>&1 || {
-	echo "ERROR: Docker is required before VCF Services can start." >&2
+	echo "ERROR: Docker Engine 26.0 or newer is required before VCF Services can start." >&2
 	exit 1
 }
 docker info >/dev/null 2>&1 || {
@@ -31,7 +31,7 @@ docker info >/dev/null 2>&1 || {
 	exit 1
 }
 docker compose version >/dev/null 2>&1 || {
-	echo "ERROR: Docker Compose v2 is required." >&2
+	echo "ERROR: Docker Compose 2.26 or newer is required." >&2
 	exit 1
 }
 
