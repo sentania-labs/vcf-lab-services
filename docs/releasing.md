@@ -20,6 +20,11 @@ The release bundle contains only the Compose definition, Caddy configuration,
 thin optional bootstrap helper, operational documentation, license, and Range
 verification script. It contains no product source and no licensed content.
 
+The workflow's publish step is idempotent per tag: it verifies the tag exists
+on the remote, creates the GitHub release when none exists, and otherwise
+re-uploads the same labelled assets to the existing release with `--clobber`.
+Re-running the workflow for a tag therefore converges instead of failing.
+
 ## Local release checks
 
 ```bash

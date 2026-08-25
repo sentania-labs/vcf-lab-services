@@ -25,7 +25,8 @@ parsing. The Compose test enforces published-image defaults, first-boot state
 initialization, internal TLS, the platform-provided storage boundary, protected
 Redis, fixed mount contracts, and the absence of a Docker socket. Shell tests
 cover scheduler timing, single-writer sync behavior, log retention, SFTP
-identity and host keys, Range serving, packaging, and license isolation.
+identity and host keys, Range serving, packaging, idempotent release
+publication, and license isolation.
 
 `tests/test_install_checks.sh` is a regression guard, not a gate for a
 reachable operator path. It exercises the retained depot-adoption scripts
