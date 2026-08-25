@@ -36,10 +36,7 @@ jobs:
           ./tests/test_sftp.sh
 
       - name: Validate Compose rendering
-        run: |
-          mkdir -p secrets
-          touch secrets/caddy.env
-          docker compose config --quiet
+        run: docker compose config --quiet
 
       - name: Build license-safe product images
         env:

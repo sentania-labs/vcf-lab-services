@@ -1,10 +1,15 @@
 {
 	auto_https off
 	admin off
+	on_demand_tls {
+		ask http://admin-ui:8080/tls/allow
+	}
 }
 
 :443 {
-	tls /certs/server.crt /certs/server.key
+	tls internal {
+		on_demand
+	}
 
 	handle /healthz {
 		respond "ok" 200
@@ -17,22 +22,16 @@
 	}
 
 	handle /admin {
-		basic_auth {
-			{$AUTH_USERNAME} {$AUTH_PASSWORD_HASH}
-		}
 		redir /admin/ 308
 	}
 
 	handle_path /admin/* {
-		basic_auth {
-			{$AUTH_USERNAME} {$AUTH_PASSWORD_HASH}
-		}
 		reverse_proxy admin-ui:8080
 	}
 
 	handle {
-		basic_auth {
-			{$AUTH_USERNAME} {$AUTH_PASSWORD_HASH}
+		forward_auth admin-ui:8080 {
+			uri /auth/check
 		}
 		root * /depot
 		header Accept-Ranges "bytes"

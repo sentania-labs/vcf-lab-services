@@ -5,7 +5,7 @@ test -f /run/sftp-supervisor-ready
 
 enabled="$(sed -n 's/^BACKUP_ENABLED=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}$/\1/p' \
 	"${SETTINGS_FILE:-/config/settings.env}" 2>/dev/null | tail -n 1)"
-case "${enabled:-true}" in
+case "${enabled:-false}" in
 	true|yes|1)
 		test -s /run/sshd.pid
 		kill -0 "$(cat /run/sshd.pid)"

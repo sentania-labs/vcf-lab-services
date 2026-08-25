@@ -9,6 +9,7 @@ the Docker daemon.
 
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -24,16 +25,31 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
 
+import bcrypt
 import redis as redis_lib
 from croniter import croniter
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file, session
 
 DEPOT = Path(os.environ.get("DEPOT_DIR", "/depot"))
+BACKUP = Path(os.environ.get("BACKUP_DIR", "/mnt/backup"))
 STATE = Path(os.environ.get("STATE_DIR", "/state"))
 SETTINGS = Path(os.environ.get("SETTINGS_FILE", "/config/settings.env"))
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
-SFTP_SECRET_DIR = Path(os.environ.get("SFTP_SECRET_DIR", "/run/sftp-secrets"))
-SFTP_PASSWORD_FILE = SFTP_SECRET_DIR / "password"
+AUTH_FILE = Path(os.environ.get("AUTH_FILE", "/run/secrets/auth.json"))
+ACTIVATION_CODE_FILE = Path(
+    os.environ.get("ACTIVATION_CODE_FILE", "/run/secrets/activation-code.txt")
+)
+SFTP_PASSWORD_FILE = Path(
+    os.environ.get("SFTP_PASSWORD_FILE", "/run/secrets/sftp-password")
+)
+FLASK_SECRET_FILE = Path(
+    os.environ.get("FLASK_SECRET_FILE", "/run/secrets/flask-secret")
+)
+CADDY_CA_FILE = Path(
+    os.environ.get(
+        "CADDY_CA_FILE", "/caddy-data/caddy/pki/authorities/local/root.crt"
+    )
+)
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_PASSWORD_FILE = os.environ.get("REDIS_PASSWORD_FILE", "/run/redis/password")
@@ -45,11 +61,25 @@ VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr"]
 BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
 ARMING_INSTRUCTIONS = (
     "Register the Software Depot ID in the Broadcom download tool registration "
-    "flow, then rerun install.sh with the activation code."
+    "flow, then save the activation code here."
 )
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
+try:
+    app.secret_key = FLASK_SECRET_FILE.read_text().strip()
+except OSError as exc:
+    raise RuntimeError(
+        f"the session secret at {FLASK_SECRET_FILE} is missing or unreadable; "
+        "run the bootstrap container to initialize the secrets volume"
+    ) from exc
+if not app.secret_key:
+    raise RuntimeError(f"the session secret at {FLASK_SECRET_FILE} is empty")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+    SESSION_COOKIE_SECURE=True,
+)
 _local_cache = {"ts": 0.0, "builds": None}
 
 MAX_ARCHIVE_MEMBERS = 20000
@@ -58,6 +88,129 @@ MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 
 class ToolArchiveError(ValueError):
     """An operator-supplied archive failed validation."""
+
+
+def _auth_doc():
+    try:
+        doc = json.loads(AUTH_FILE.read_text())
+        if doc.get("username") and doc.get("passwordHash"):
+            return doc
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _is_authenticated():
+    auth = _auth_doc()
+    return bool(auth and session.get("owner") == auth.get("username"))
+
+
+_verified_cache = {"stamp": None, "entries": {}}
+VERIFIED_CACHE_TTL = 300
+VERIFIED_CACHE_MAX = 128
+
+
+def _auth_file_stamp():
+    try:
+        stat = AUTH_FILE.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
+def _verify_credentials(username, password):
+    auth = _auth_doc()
+    if not auth or username != auth.get("username"):
+        return False
+    stamp = _auth_file_stamp()
+    if stamp != _verified_cache["stamp"] or stamp is None:
+        _verified_cache.update(stamp=stamp, entries={})
+    digest = hashlib.sha256(f"{username}\x00{password}".encode()).hexdigest()
+    now = time.monotonic()
+    expiry = _verified_cache["entries"].get(digest)
+    if expiry is not None and expiry > now:
+        return True
+    try:
+        verified = bcrypt.checkpw(password.encode(), auth["passwordHash"].encode())
+    except (ValueError, TypeError):
+        return False
+    if verified:
+        if len(_verified_cache["entries"]) >= VERIFIED_CACHE_MAX:
+            _verified_cache["entries"].clear()
+        _verified_cache["entries"][digest] = now + VERIFIED_CACHE_TTL
+    return verified
+
+
+def _write_secret(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(handle, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def _credential_update_lock():
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(
+        AUTH_FILE.parent / ".credentials.lock", "a+", encoding="utf-8"
+    )
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+    finally:
+        lock_file.close()
+
+
+def _replace_shared_credentials(auth_doc, password):
+    previous_sftp = None
+    sftp_existed = SFTP_PASSWORD_FILE.exists()
+    if sftp_existed:
+        previous_sftp = SFTP_PASSWORD_FILE.read_text(encoding="utf-8")
+
+    sftp_replaced = False
+    try:
+        _write_sftp_password(password)
+        sftp_replaced = True
+        _write_secret(AUTH_FILE, json.dumps(auth_doc) + "\n")
+    except OSError:
+        if sftp_replaced:
+            if sftp_existed:
+                _write_secret(SFTP_PASSWORD_FILE, previous_sftp)
+            else:
+                SFTP_PASSWORD_FILE.unlink(missing_ok=True)
+        raise
+
+
+@app.before_request
+def require_console_owner():
+    public_paths = {
+        "/",
+        "/healthz",
+        "/auth/check",
+        "/tls/allow",
+        "/api/session",
+        "/api/claim",
+        "/api/bootstrap",
+        "/api/login",
+    }
+    if request.path in public_paths:
+        return None
+    if _auth_doc() is None:
+        return jsonify({"error": "claim this appliance before continuing"}), 403
+    if not _is_authenticated():
+        return jsonify({"error": "sign in to continue"}), 401
+    return None
 
 
 def _safe_archive_path(name):
@@ -307,46 +460,65 @@ def _settings():
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip('"').strip("'")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                quote = value[0]
+                value = value[1:-1]
+                if quote == '"':
+                    value = re.sub(r"\\([\\\"$`])", r"\1", value)
+            values[key.strip()] = value
     except OSError:
         pass
     return values
 
 
-def _write_settings(updates):
-    lines = []
-    replaced = set()
-    try:
-        existing = SETTINGS.read_text().splitlines()
-    except OSError:
-        existing = []
-    for line in existing:
-        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", line)
-        key = match.group(1) if match else None
-        if key in updates:
-            lines.append(_format_setting(key, updates[key]))
-            replaced.add(key)
-        else:
-            lines.append(line)
-    for key, value in updates.items():
-        if key not in replaced:
-            lines.append(_format_setting(key, value))
-
+@contextmanager
+def _settings_update_lock():
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(prefix="settings.env.", dir=SETTINGS.parent)
+    lock_file = open(SETTINGS.parent / ".settings.lock", "a+", encoding="utf-8")
     try:
-        os.fchmod(handle, 0o640)
-        with os.fdopen(handle, "w") as stream:
-            stream.write("\n".join(lines) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp_name, SETTINGS)
-    except Exception:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+    finally:
+        lock_file.close()
+
+
+def _write_settings(updates):
+    with _settings_update_lock():
+        lines = []
+        replaced = set()
         try:
-            os.unlink(temp_name)
+            existing = SETTINGS.read_text().splitlines()
         except OSError:
-            pass
-        raise
+            existing = []
+        for line in existing:
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", line)
+            key = match.group(1) if match else None
+            if key in updates:
+                lines.append(_format_setting(key, updates[key]))
+                replaced.add(key)
+            else:
+                lines.append(line)
+        for key, value in updates.items():
+            if key not in replaced:
+                lines.append(_format_setting(key, value))
+
+        handle, temp_name = tempfile.mkstemp(
+            prefix="settings.env.", dir=SETTINGS.parent
+        )
+        try:
+            os.fchmod(handle, 0o640)
+            with os.fdopen(handle, "w") as stream:
+                stream.write("\n".join(lines) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_name, SETTINGS)
+        except Exception:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
 
 
 def _format_setting(key, value):
@@ -356,24 +528,10 @@ def _format_setting(key, value):
 
 
 def _write_sftp_password(password):
-    SFTP_SECRET_DIR.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(prefix="password.", dir=SFTP_SECRET_DIR)
-    try:
-        os.fchmod(handle, 0o600)
-        with os.fdopen(handle, "w") as stream:
-            stream.write(password + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp_name, SFTP_PASSWORD_FILE)
-    except Exception:
-        try:
-            os.unlink(temp_name)
-        except OSError:
-            pass
-        raise
+    _write_secret(SFTP_PASSWORD_FILE, password + "\n")
 
 
-def _bool_setting(value, fallback=True):
+def _bool_setting(value, fallback=False):
     normalized = str(value or "").lower()
     if normalized in {"true", "yes", "1"}:
         return True
@@ -382,7 +540,31 @@ def _bool_setting(value, fallback=True):
     return fallback
 
 
-DEFAULT_NFS_OPTIONS = "nfsvers=4,rw,hard,timeo=600,retrans=2"
+def _settings_doc(settings=None):
+    settings = settings or _settings()
+    return {
+        "backupEnabled": _bool_setting(settings.get("BACKUP_ENABLED")),
+        "ceip": settings.get("CEIP", "DISABLE"),
+        "cronSchedule": settings.get("CRON_SCHEDULE", "0 3 * * 0"),
+        "depotEndpoint": settings.get("DEPOT_ENDPOINT", "dl.broadcom.com"),
+        "esxMode": settings.get("ESX_MODE", "download"),
+        "logRetention": _int_setting(settings.get("LOG_RETENTION"), 20),
+        "setupComplete": _bool_setting(settings.get("SETUP_COMPLETE")),
+        "sku": settings.get("SKU", "VCF"),
+        "storageConfirmed": _bool_setting(settings.get("STORAGE_CONFIRMED")),
+        "syncTargets": settings.get(
+            "SYNC_TARGETS", "esx install upgrade patches"
+        ).split(),
+        "tokenUrl": settings.get(
+            "TOKEN_URL", "https://eapi.broadcom.com/vcf/generateToken"
+        ),
+        "timezone": settings.get("TZ", "UTC"),
+        "username": settings.get("AUTH_USERNAME", "vcf"),
+        "vcfVersion": settings.get("VCF_VERSION", "9.1.0"),
+        "uidGid": settings.get("SFTP_UID_GID", "1003:1003"),
+        "vkrMatch": settings.get("VKR_MATCH", ""),
+        "vkrOs": settings.get("VKR_OS", ""),
+    }
 
 
 def _int_setting(value, fallback):
@@ -392,41 +574,67 @@ def _int_setting(value, fallback):
         return fallback
 
 
-def _paths_are_disjoint(first, second):
-    first = first.rstrip("/")
-    second = second.rstrip("/")
-    if not first or not second or first == second:
+def _activation_configured():
+    try:
+        return bool(ACTIVATION_CODE_FILE.read_text().strip())
+    except OSError:
         return False
-    if any(part == ".." for path in (first, second) for part in path.split("/")):
-        return False
-    return not (
-        second.startswith(first + "/") or first.startswith(second + "/")
+
+
+_machine_id_cache = {"value": None}
+
+
+def _machine_id():
+    if _machine_id_cache["value"]:
+        return _machine_id_cache["value"], None
+    tool = VCFDT_STORE / "current" / "bin" / "vcf-download-tool"
+    if not tool.is_file():
+        return None, "Upload the VCF Download Tool first."
+    try:
+        result = subprocess.run(
+            [tool, "configuration", "get", "--machineId"],
+            cwd=tool.parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, "The tool could not read its Software Depot ID."
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if result.returncode != 0:
+        return None, f"The tool returned exit code {result.returncode} while reading its ID."
+    uuid_match = re.search(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+        output,
     )
+    if uuid_match:
+        _machine_id_cache["value"] = uuid_match.group(0)
+        return uuid_match.group(0), None
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    value = lines[-1].split(":", 1)[-1].strip() if lines else ""
+    if not value or len(value) > 200 or not re.fullmatch(r"[A-Za-z0-9._:-]+", value):
+        return None, "The tool did not return a recognizable Software Depot ID."
+    _machine_id_cache["value"] = value
+    return value, None
 
 
-def _backup_settings_doc(settings=None):
-    settings = settings or _settings()
-    storage_mode = settings.get("STORAGE_MODE", "local")
-    backup_local_path = settings.get("BACKUP_LOCAL_PATH", "")
-    backup_nfs_export = settings.get("BACKUP_NFS_EXPORT", "")
-    return {
-        "enabled": _bool_setting(settings.get("BACKUP_ENABLED"), True),
-        "port": _int_setting(settings.get("SFTP_PORT"), 2222),
-        "user": "vcfbackup",
-        "uidGid": settings.get("SFTP_UID_GID", "1003:1003"),
-        "storageMode": storage_mode,
-        "localPath": settings.get("DEPOT_LOCAL_PATH", ""),
-        "backupLocalPath": backup_local_path,
-        "nfsServer": settings.get("NFS_SERVER", ""),
-        "nfsExport": settings.get("NFS_EXPORT", ""),
-        "backupNfsExport": backup_nfs_export,
-        "nfsOptions": settings.get("NFS_OPTIONS") or DEFAULT_NFS_OPTIONS,
-        "backupPath": backup_local_path
-        if storage_mode == "local"
-        else backup_nfs_export,
-        "passwordConfigured": SFTP_PASSWORD_FILE.is_file()
-        and SFTP_PASSWORD_FILE.stat().st_size > 0,
-    }
+def _storage_entry(path):
+    result = {"path": str(path), "mounted": path.is_dir(), "readable": False}
+    if not path.is_dir():
+        return result
+    try:
+        usage = shutil.disk_usage(path)
+        result.update(
+            readable=True,
+            freeBytes=usage.free,
+            totalBytes=usage.total,
+            device=os.stat(path).st_dev,
+        )
+    except OSError:
+        pass
+    return result
 
 
 def _state():
@@ -499,9 +707,140 @@ def healthz():
     return "ok", 200
 
 
+@app.get("/tls/allow")
+def allow_tls_name():
+    domain = str(request.args.get("domain", ""))
+    try:
+        ipaddress.ip_address(domain)
+        return "", 204
+    except ValueError:
+        pass
+    if len(domain) <= 253 and re.fullmatch(
+        r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+        domain,
+    ):
+        return "", 204
+    return "invalid certificate name", 403
+
+
 @app.get("/")
 def index():
     return render_template("index.html", targets=VALID_TARGETS)
+
+
+@app.get("/auth/check")
+def auth_check():
+    credentials = request.authorization
+    if credentials and _verify_credentials(credentials.username, credentials.password):
+        return "ok", 200
+    return "authentication required", 401, {"WWW-Authenticate": 'Basic realm="VCF Services"'}
+
+
+@app.get("/api/session")
+def session_status():
+    auth = _auth_doc()
+    return jsonify(
+        {
+            "claimed": auth is not None,
+            "authenticated": _is_authenticated(),
+            "username": auth.get("username") if auth and _is_authenticated() else None,
+        }
+    )
+
+
+@app.post("/api/claim")
+def claim():
+    body = request.get_json(silent=True) or {}
+    username = str(body.get("username", "")).strip()
+    password = body.get("password")
+    if username != "vcf":
+        return jsonify({"error": "the prototype owner username is vcf"}), 400
+    if not isinstance(password, str) or len(password) < 12:
+        return jsonify({"error": "use a password of at least 12 characters"}), 400
+    if len(password) > 1024 or "\n" in password or "\r" in password:
+        return jsonify({"error": "the password must be one line and at most 1024 characters"}), 400
+
+    with _credential_update_lock():
+        if _auth_doc() is not None:
+            return jsonify({"error": "this appliance has already been claimed"}), 409
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        auth = {
+            "username": username,
+            "passwordHash": password_hash,
+            "claimedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            _write_settings({"AUTH_USERNAME": username})
+            _replace_shared_credentials(auth, password)
+        except OSError:
+            return jsonify({"error": "the owner credentials could not be saved"}), 500
+    session.clear()
+    session["owner"] = username
+    return jsonify({"claimed": True, "username": username}), 201
+
+
+@app.post("/api/login")
+def login():
+    body = request.get_json(silent=True) or {}
+    if not _verify_credentials(str(body.get("username", "")), str(body.get("password", ""))):
+        return jsonify({"error": "the username or password is incorrect"}), 401
+    session.clear()
+    session["owner"] = body["username"]
+    return jsonify({"authenticated": True, "username": body["username"]})
+
+
+@app.post("/api/logout")
+def logout():
+    session.clear()
+    return jsonify({"authenticated": False})
+
+
+@app.get("/api/bootstrap")
+def bootstrap_status():
+    auth = _auth_doc()
+    settings = _settings_doc()
+    if auth and not _is_authenticated():
+        return jsonify(
+            {
+                "claimed": True,
+                "authenticated": False,
+                "setupComplete": settings["setupComplete"],
+            }
+        )
+    tool = _current_tool_info()
+    machine_id, machine_error = (None, None)
+    if tool["installed"]:
+        machine_id, machine_error = _machine_id()
+    return jsonify(
+        {
+            "claimed": auth is not None,
+            "authenticated": _is_authenticated(),
+            "setupComplete": settings["setupComplete"],
+            "tool": tool,
+            "machineId": machine_id,
+            "machineIdError": machine_error,
+            "activationConfigured": _activation_configured(),
+            "storage": {
+                "confirmed": settings["storageConfirmed"],
+                "depot": _storage_entry(DEPOT),
+                "backup": _storage_entry(BACKUP),
+            },
+            "settings": settings,
+        }
+    )
+
+
+@app.get("/api/tls/ca")
+def download_tls_ca():
+    if not CADDY_CA_FILE.is_file():
+        return jsonify({"error": "the first-boot CA is not available yet"}), 404
+    return send_file(
+        CADDY_CA_FILE,
+        as_attachment=True,
+        download_name="vcf-services-root-ca.crt",
+        mimetype="application/x-x509-ca-cert",
+    )
 
 
 @app.get("/api/status")
@@ -519,7 +858,7 @@ def status():
         next_run = croniter(cron, datetime.now(tzinfo)).get_next(datetime).isoformat()
     except (KeyError, ValueError):
         pass
-    armed = bool(state.get("armed", False))
+    armed = _activation_configured()
     return jsonify(
         {
             "running": state.get("running", False),
@@ -567,6 +906,44 @@ def upload_vcfdt():
     return jsonify({"installed": True, **metadata}), 201
 
 
+@app.get("/api/registration")
+def registration_status():
+    machine_id, error = _machine_id()
+    status_code = 200 if machine_id else 409
+    return (
+        jsonify(
+            {
+                "machineId": machine_id,
+                "error": error,
+                "activationConfigured": _activation_configured(),
+                "instructions": ARMING_INSTRUCTIONS,
+            }
+        ),
+        status_code,
+    )
+
+
+@app.post("/api/registration")
+def save_registration():
+    body = request.get_json(silent=True) or {}
+    activation_code = body.get("activationCode")
+    if _state().get("running", False):
+        return jsonify({"error": "wait for the running sync to finish"}), 409
+    machine_id, machine_error = _machine_id()
+    if not machine_id:
+        return jsonify({"error": machine_error}), 409
+    if not isinstance(activation_code, str) or not activation_code.strip():
+        return jsonify({"error": "enter the activation code from Broadcom"}), 400
+    activation_code = activation_code.strip()
+    if len(activation_code) > 4096 or "\n" in activation_code or "\r" in activation_code:
+        return jsonify({"error": "the activation code must be one line"}), 400
+    try:
+        _write_secret(ACTIVATION_CODE_FILE, activation_code + "\n")
+    except OSError:
+        return jsonify({"error": "the activation code could not be saved"}), 500
+    return jsonify({"saved": True, "machineId": machine_id})
+
+
 @app.get("/api/log")
 def log():
     text = _bus_get(LOG_KEY)
@@ -580,147 +957,152 @@ def log():
     return jsonify({"log": text})
 
 
-@app.get("/api/settings/backup")
-def backup_settings():
-    return jsonify(_backup_settings_doc())
+@app.get("/api/settings")
+def settings():
+    return jsonify(_settings_doc())
 
 
-@app.post("/api/settings/backup")
-def update_backup_settings():
+@app.post("/api/settings")
+def update_settings():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"error": "a JSON settings document is required"}), 400
-
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        return jsonify({"error": "enabled must be true or false"}), 400
-
-    port = body.get("port")
-    if isinstance(port, bool) or not str(port).isdigit() or not 1 <= int(port) <= 65535:
-        return jsonify({"error": "port must be a whole number from 1 through 65535"}), 400
-    port = int(port)
-
+    vcf_version = str(body.get("vcfVersion", "")).strip()
+    if not re.fullmatch(r"[0-9][0-9A-Za-z.*_-]*(\.\.)?", vcf_version):
+        return jsonify({"error": "the VCF version filter is invalid"}), 400
+    sku = str(body.get("sku", ""))
+    if sku not in {"VCF", "VVF"}:
+        return jsonify({"error": "SKU must be VCF or VVF"}), 400
+    targets = body.get("syncTargets")
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "select at least one sync target"}), 400
+    if any(target not in VALID_TARGETS for target in targets) or len(set(targets)) != len(targets):
+        return jsonify({"error": "the sync target selection is invalid"}), 400
+    cron = str(body.get("cronSchedule", "")).strip()
+    if len(cron.split()) != 5 or not re.fullmatch(r"[0-9*/ ,\-]+", cron):
+        return jsonify({"error": "the schedule must use five cron fields"}), 400
+    try:
+        croniter(cron, datetime.now(timezone.utc)).get_next(datetime)
+    except (KeyError, ValueError):
+        return jsonify({"error": "the sync schedule is invalid"}), 400
+    timezone_name = str(body.get("timezone", "")).strip()
+    try:
+        ZoneInfo(timezone_name)
+    except (KeyError, ValueError):
+        return jsonify({"error": "choose a valid IANA timezone"}), 400
+    ceip = str(body.get("ceip", ""))
+    if ceip not in {"DISABLE", "ENABLE"}:
+        return jsonify({"error": "CEIP must be explicitly enabled or disabled"}), 400
+    depot_endpoint = str(body.get("depotEndpoint", "")).strip().lower()
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", depot_endpoint) or ".." in depot_endpoint:
+        return jsonify({"error": "the download endpoint hostname is invalid"}), 400
+    token_url = str(body.get("tokenUrl", "")).strip()
+    if not re.fullmatch(r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", token_url):
+        return jsonify({"error": "the token URL must be a valid HTTPS URL"}), 400
+    backup_enabled = body.get("backupEnabled")
+    storage_confirmed = body.get("storageConfirmed")
+    if not isinstance(backup_enabled, bool) or not isinstance(storage_confirmed, bool):
+        return jsonify({"error": "storage and backup selections must be true or false"}), 400
     uid_gid = str(body.get("uidGid", ""))
     match = re.fullmatch(r"([0-9]+):([0-9]+)", uid_gid)
     if not match or any(not 1 <= int(value) <= 2147483647 for value in match.groups()):
         return jsonify({"error": "UID:GID must contain two non-root numeric values"}), 400
-
-    storage_mode = str(body.get("storageMode", "")).lower()
-    if storage_mode not in {"local", "nfs"}:
-        return jsonify({"error": "storage mode must be local or nfs"}), 400
-
-    stored = _settings()
-    local_path = str(body.get("localPath", ""))
-    backup_local_path = str(body.get("backupLocalPath", ""))
-    nfs_server = str(body.get("nfsServer", ""))
-    nfs_export = str(body.get("nfsExport", ""))
-    backup_nfs_export = str(body.get("backupNfsExport", ""))
-    nfs_options = str(body.get("nfsOptions", ""))
-    if storage_mode == "local" and not re.fullmatch(r"[A-Za-z0-9_=,.-]+", nfs_options):
-        nfs_options = DEFAULT_NFS_OPTIONS
-    if not re.fullmatch(r"[A-Za-z0-9_=,.-]+", nfs_options):
-        return jsonify({"error": "NFS options contain unsupported characters"}), 400
-    if storage_mode == "local":
-        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", local_path):
-            return jsonify({"error": "local path must be a plain absolute path"}), 400
-        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", backup_local_path):
-            return jsonify(
-                {"error": "local backup path must be a plain absolute path"}
-            ), 400
-        if not _paths_are_disjoint(local_path, backup_local_path):
-            return jsonify(
-                {
-                    "error": "the backup path must sit outside the depot path"
-                    " and neither may contain a '..' segment"
-                }
-            ), 400
-        nfs_server = stored.get("NFS_SERVER", "")
-        nfs_export = stored.get("NFS_EXPORT", "")
-        backup_nfs_export = stored.get("BACKUP_NFS_EXPORT", "")
-        depot_material_path, backup_material_path = local_path, backup_local_path
-        depot_material_export, backup_material_export = "", ""
-        depot_material_server = ""
-    else:
-        if not re.fullmatch(r"[A-Za-z0-9.:-]+", nfs_server):
-            return jsonify({"error": "NFS server is invalid"}), 400
-        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", nfs_export):
-            return jsonify({"error": "NFS export must be a plain absolute path"}), 400
-        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", backup_nfs_export):
-            return jsonify(
-                {"error": "backup NFS export must be a plain absolute path"}
-            ), 400
-        if not _paths_are_disjoint(nfs_export, backup_nfs_export):
-            return jsonify(
-                {
-                    "error": "the backup export must sit outside the depot export"
-                    " and neither may contain a '..' segment"
-                }
-            ), 400
-        local_path = stored.get("DEPOT_LOCAL_PATH", "")
-        backup_local_path = stored.get("BACKUP_LOCAL_PATH", "")
-        depot_material_path, backup_material_path = "", ""
-        depot_material_export, backup_material_export = nfs_export, backup_nfs_export
-        depot_material_server = nfs_server
-
-    password = body.get("password")
-    if password is not None:
-        if not isinstance(password, str) or "\n" in password or "\r" in password:
-            return jsonify({"error": "password must be one line"}), 400
-        if len(password) > 1024:
-            return jsonify({"error": "password is too long"}), 400
-        if not password:
-            password = None
-    if enabled and not password and not (
-        SFTP_PASSWORD_FILE.is_file() and SFTP_PASSWORD_FILE.stat().st_size > 0
+    esx_mode = str(body.get("esxMode", ""))
+    if esx_mode not in {"download", "metadata"}:
+        return jsonify({"error": "ESX mode must be download or metadata"}), 400
+    log_retention = body.get("logRetention")
+    if isinstance(log_retention, bool) or not str(log_retention).isdigit():
+        return jsonify({"error": "log retention must be a whole number"}), 400
+    log_retention = int(log_retention)
+    if not 1 <= log_retention <= 1000:
+        return jsonify({"error": "log retention must be from 1 through 1000"}), 400
+    vkr_match = str(body.get("vkrMatch", "")).strip()
+    vkr_os = str(body.get("vkrOs", "")).strip()
+    if len(vkr_match) > 200 or len(vkr_os) > 100 or any(
+        "\n" in value or "\r" in value for value in (vkr_match, vkr_os)
     ):
-        return jsonify({"error": "a password is required before backup can be enabled"}), 400
-
-    depot_material = "|".join(
-        [storage_mode, depot_material_path, depot_material_server,
-         depot_material_export, nfs_options]
-    )
-    backup_material = "|".join(
-        [storage_mode, backup_material_path, depot_material_server,
-         backup_material_export, nfs_options]
-    )
+        return jsonify({"error": "VKr filters must be short single-line values"}), 400
     updates = {
-        "BACKUP_ENABLED": str(enabled).lower(),
-        "SFTP_PORT": str(port),
+        "BACKUP_ENABLED": str(backup_enabled).lower(),
+        "CEIP": ceip,
+        "CRON_SCHEDULE": cron,
+        "DEPOT_ENDPOINT": depot_endpoint,
+        "ESX_MODE": esx_mode,
+        "LOG_RETENTION": str(log_retention),
+        "SKU": sku,
         "SFTP_UID_GID": uid_gid,
-        "STORAGE_MODE": storage_mode,
-        "DEPOT_LOCAL_PATH": local_path,
-        "NFS_SERVER": nfs_server,
-        "NFS_EXPORT": nfs_export,
-        "NFS_OPTIONS": nfs_options,
-        "DEPOT_VOLUME_NAME": "vcf-services-depot-store-"
-        + hashlib.sha256((depot_material + "\n").encode()).hexdigest()[:12],
-        "BACKUP_VOLUME_NAME": "vcf-services-backup-store-"
-        + hashlib.sha256((backup_material + "\n").encode()).hexdigest()[:12],
-        "BACKUP_LOCAL_PATH": backup_local_path,
-        "BACKUP_NFS_EXPORT": backup_nfs_export,
+        "STORAGE_CONFIRMED": str(storage_confirmed).lower(),
+        "SYNC_TARGETS": " ".join(targets),
+        "TOKEN_URL": token_url,
+        "TZ": timezone_name,
+        "VCF_VERSION": vcf_version,
+        "VKR_MATCH": vkr_match,
+        "VKR_OS": vkr_os,
     }
-    before = _backup_settings_doc()
+    if _state().get("running", False) and any(
+        _settings().get(key) != value for key, value in updates.items()
+    ):
+        return jsonify({"error": "wait for the running sync to finish before changing settings"}), 409
     try:
-        _write_settings(updates)
-        if password:
-            _write_sftp_password(password)
+        with _tool_update_lock():
+            if _state().get("running", False):
+                return jsonify({"error": "wait for the running sync to finish before changing settings"}), 409
+            _write_settings(updates)
+            current = VCFDT_STORE / "current"
+            if current.is_dir():
+                _patch_tool_endpoints(current)
+    except BlockingIOError:
+        return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
     except OSError as exc:
-        return jsonify({"error": f"could not save backup settings: {exc}"}), 500
+        return jsonify({"error": f"could not save settings: {exc}"}), 500
+    return jsonify({**_settings_doc(), "saved": True})
 
-    after = _backup_settings_doc()
-    restart_required = any(
-        before[key] != after[key]
-        for key in ("port", "storageMode", "localPath", "backupLocalPath",
-                    "nfsServer", "nfsExport", "backupNfsExport", "nfsOptions")
-    )
-    return jsonify(
-        {
-            **after,
-            "saved": True,
-            "liveReloadSeconds": 5,
-            "installerRerunRequired": restart_required,
+
+@app.post("/api/password")
+def update_password():
+    body = request.get_json(silent=True) or {}
+    current = str(body.get("currentPassword", ""))
+    new = body.get("newPassword")
+    if not isinstance(new, str) or len(new) < 12:
+        return jsonify({"error": "use a new password of at least 12 characters"}), 400
+    if len(new) > 1024 or "\n" in new or "\r" in new:
+        return jsonify({"error": "the password must be one line and at most 1024 characters"}), 400
+    with _credential_update_lock():
+        auth = _auth_doc()
+        if not auth or not _verify_credentials(auth["username"], current):
+            return jsonify({"error": "the current password is incorrect"}), 403
+        updated = {
+            **auth,
+            "passwordHash": bcrypt.hashpw(new.encode(), bcrypt.gensalt()).decode(),
+            "changedAt": datetime.now(timezone.utc).isoformat(),
         }
-    )
+        try:
+            _replace_shared_credentials(updated, new)
+        except OSError:
+            return jsonify({"error": "the shared password could not be saved"}), 500
+    return jsonify({"saved": True, "consumerUpdateRequired": True})
+
+
+@app.post("/api/setup/complete")
+def complete_setup():
+    settings_doc = _settings_doc()
+    missing = []
+    if not _current_tool_info()["installed"]:
+        missing.append("licensed tool")
+    machine_id, _error = _machine_id()
+    if not machine_id:
+        missing.append("Software Depot ID")
+    if not _activation_configured():
+        missing.append("activation code")
+    if not settings_doc["storageConfirmed"]:
+        missing.append("storage confirmation")
+    if missing:
+        return jsonify({"error": "finish setup first: " + ", ".join(missing)}), 409
+    try:
+        _write_settings({"SETUP_COMPLETE": "true"})
+    except OSError:
+        return jsonify({"error": "setup completion could not be saved"}), 500
+    return jsonify({"setupComplete": True})
 
 
 @app.get("/api/versions/local")
@@ -785,7 +1167,7 @@ def sync():
     if not targets:
         return jsonify({"error": "select at least one valid target"}), 400
     state = _state()
-    if not state.get("armed", False):
+    if not _activation_configured():
         return jsonify({"error": f"not armed: activation code missing. {ARMING_INSTRUCTIONS}"}), 409
     if state.get("running"):
         return jsonify({"error": "a sync is already running"}), 409
