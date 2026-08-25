@@ -52,9 +52,12 @@ grep -A1 'name: vcf-services-vcfdt-state' docker-compose.yml | grep -q 'external
 grep -q 'name: vcf-services-vcfdt-tool' docker-compose.yml || fail "vcfdt tool volume missing"
 ! grep -q 'docker volume create vcf-services-vcfdt-tool' install.sh \
 	|| fail "installer must let Compose create and own the disposable tool volume"
-grep -q 'vcfdt_tool:/opt/vcfdt:rw' docker-compose.yml || fail "tool volume must be mounted in both consumers"
-[ "$(grep -c 'vcfdt_tool:/opt/vcfdt:rw' docker-compose.yml)" -eq 2 ] \
-	|| fail "tool volume must be shared by the console and sync service"
+grep -q 'vcfdt_tool:/opt/vcfdt:ro' docker-compose.yml || fail "sync tool mount must be read-only"
+grep -q 'vcfdt_tool:/opt/vcfdt:rw' docker-compose.yml || fail "console tool mount must be read-write"
+[ "$(grep -c 'vcfdt_tool:/opt/vcfdt:rw' docker-compose.yml)" -eq 1 ] \
+	|| fail "only the console may write the tool volume"
+! grep -q 'patch_tool_endpoint' sync/entrypoint.sh \
+	|| fail "sync entrypoint must not rewrite the mounted tool"
 ! grep -q 'COPY build/vcfdt' Dockerfile.sync || fail "licensed tool is still baked into an image"
 grep -q 'VCF_SERVICES_SYNC_IMAGE' docker-compose.yml || fail "compose does not consume the license-safe sync image"
 

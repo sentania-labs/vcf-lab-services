@@ -44,7 +44,7 @@ services:
       VCFDT_TOOL_STORE: /opt/vcfdt
     volumes:
       - depot_store:/depot:rw
-      - vcfdt_tool:/opt/vcfdt:rw
+      - vcfdt_tool:/opt/vcfdt:ro
       - vcfdt_state:/root/.local/share/vmware/vdt
       - sync_state:/state:rw
       - ./config:/etc/vcf-services:ro

@@ -251,7 +251,8 @@ depot tree preserves its portable layout.
 The separate `vcf-services-vcfdt-tool` volume stores the uploaded executable.
 It is disposable and can be restored by uploading the archive again. It must
 never be merged with `vcf-services-vcfdt-state`, whose machine identity is not
-disposable.
+disposable. The admin console mounts the tool volume read-write for upload and
+replacement; the internet-facing sync service mounts it read-only.
 
 Backup data uses a separate volume mounted read-write at `/mnt/backup`. Its
 location is prompted separately from the depot and must sit outside the depot

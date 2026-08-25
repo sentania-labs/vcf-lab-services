@@ -9,6 +9,7 @@ trap 'rm -rf "$work_dir"' EXIT
 mkdir -p "$work_dir/tool" "$work_dir/depot" "$work_dir/state" "$work_dir/secrets"
 tar -xzf "$work_dir/vcf-download-tool-0.0.0-stub.tar.gz" \
 	-C "$work_dir/tool" --strip-components=1
+touch "$work_dir/tool/.update.lock"
 
 run_sync() {
 	SETTINGS_FILE="$work_dir/missing-settings.env" \

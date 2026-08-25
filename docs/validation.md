@@ -66,7 +66,8 @@ SFTP password when a settings write fails. The compose test statically
 enforces the captain decisions: no Docker socket mount, no Docker client
 dependency, no macvlan, a non-published password-protected Redis service, only
 the configured HTTPS and alternate SFTP ports published, and directory-based
-config mounts compatible with atomic settings replacement. It also drives
+config mounts compatible with atomic settings replacement. It also requires
+the internet-facing sync service to mount the uploaded tool read-only. It drives
 `compose.sh` against a stubbed `docker` to prove the startup preflight names
 each missing install-created prerequisite, points the operator at `install.sh`,
 blames a stopped daemon separately, still preflights when Compose global

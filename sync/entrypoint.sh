@@ -107,8 +107,6 @@ refresh_versions() {
 		exec 8>&-
 		return 0
 	fi
-	exec 7>"${VCFDT_TOOL_STORE:-$TOOL_ROOT}/.update.lock"
-	flock -s 7
 	local output rc=0
 	if [ ! -x "$tool" ]; then
 		jq -n --arg t "$(date -u +%FT%TZ)" \
@@ -118,6 +116,8 @@ refresh_versions() {
 		exec 8>&-
 		return 0
 	fi
+	exec 7<"${VCFDT_TOOL_STORE:-$TOOL_ROOT}/.update.lock"
+	flock -s 7
 	output="$("$tool" binaries list "--vcf-version=${VCF_VERSION:-9.1.0}" --type=UPGRADE \
 		"--depot-download-activation-code-file=$AUTH_FILE" "--ceip=${CEIP:-DISABLE}" 2>&1)" || rc=$?
 	jq -n --arg out "$output" --arg t "$(date -u +%FT%TZ)" --argjson rc "$rc" \
@@ -171,24 +171,9 @@ init_state() {
 	fi
 }
 
-patch_tool_endpoint() {
-	[ -f "$TOOL_ROOT/conf/application-prodv2.properties" ] || return 0
-	: "${DEPOT_ENDPOINT:=dl.broadcom.com}"
-	: "${TOKEN_URL:=https://eapi.broadcom.com/vcf/generateToken}"
-	local properties="$TOOL_ROOT/conf/application-prodv2.properties" safe_token_url
-	safe_token_url="$(printf '%s' "$TOKEN_URL" | sed 's/[\\&|]/\\&/g')"
-	sed -i -E "s|^lcm\.depot\.adapter\.host=.*$|lcm.depot.adapter.host=${DEPOT_ENDPOINT}|" "$properties"
-	if grep -q '^lcm.access_token.broadcom.authorization.server.url=' "$properties"; then
-		sed -i -E "s|^lcm\.access_token\.broadcom\.authorization\.server\.url=.*$|lcm.access_token.broadcom.authorization.server.url=${safe_token_url}|" "$properties"
-	else
-		printf '%s\n' "lcm.access_token.broadcom.authorization.server.url=${TOKEN_URL}" >> "$properties"
-	fi
-}
-
 main() {
 	load_settings
 	init_state
-	patch_tool_endpoint
 	echo "[scheduler] vcf-services sync scheduler ready, schedule: '$CRON_SCHEDULE'"
 	local attempt=0
 	while [ "$attempt" -lt 30 ]; do

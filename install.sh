@@ -798,12 +798,47 @@ if ! docker run --rm --user "$sftp_uid:$sftp_gid" --entrypoint /bin/sh \
 	echo "       The re-own attempt did not take effect. Correct the share ownership, then rerun install.sh." >&2
 	exit 1
 fi
+patch_installed_tool_endpoints() {
+	docker run --rm --network none --entrypoint /bin/sh \
+		--env "VCFDT_DEPOT_ENDPOINT=$depot_endpoint" \
+		--env "VCFDT_TOKEN_URL=$token_url" \
+		-v vcf-services-vcfdt-tool:/opt/vcfdt:rw "$sync_base_image" -c '
+			set -eu
+			properties=/opt/vcfdt/current/conf/application-prodv2.properties
+			[ -f "$properties" ] || exit 0
+			exec 7>/opt/vcfdt/.update.lock
+			flock -x 7
+			temporary="$(mktemp "${properties}.XXXXXX")"
+			found_depot=false
+			found_token=false
+			while IFS= read -r line || [ -n "$line" ]; do
+				case "$line" in
+					lcm.depot.adapter.host=*)
+						printf "%s\n" "lcm.depot.adapter.host=${VCFDT_DEPOT_ENDPOINT}"
+						found_depot=true
+						;;
+					lcm.access_token.broadcom.authorization.server.url=*)
+						printf "%s\n" "lcm.access_token.broadcom.authorization.server.url=${VCFDT_TOKEN_URL}"
+						found_token=true
+						;;
+					*) printf "%s\n" "$line" ;;
+				esac
+			done < "$properties" > "$temporary"
+			[ "$found_depot" = true ] || printf "%s\n" "lcm.depot.adapter.host=${VCFDT_DEPOT_ENDPOINT}" >> "$temporary"
+			[ "$found_token" = true ] || printf "%s\n" "lcm.access_token.broadcom.authorization.server.url=${VCFDT_TOKEN_URL}" >> "$temporary"
+			chmod --reference="$properties" "$temporary"
+			mv "$temporary" "$properties"
+		'
+}
 tool_installed=false
 if docker volume inspect vcf-services-vcfdt-tool >/dev/null 2>&1 \
 	&& docker run --rm --entrypoint /bin/sh \
 	-v vcf-services-vcfdt-tool:/opt/vcfdt:ro "$sync_base_image" \
 	-c 'test -s /opt/vcfdt/current/bin/vcf-download-tool'; then
 	tool_installed=true
+fi
+if [ "$tool_installed" = true ]; then
+	patch_installed_tool_endpoints
 fi
 if [ "$adopt_mode" = true ] && [ "$tool_installed" = false ]; then
 	echo "ERROR: depot adoption needs the VCF Download Tool to read and verify the Software Depot ID." >&2

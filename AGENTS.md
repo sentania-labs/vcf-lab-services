@@ -15,6 +15,8 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `vcf-services-vcfdt-tool` is disposable and distinct from the protected
   `vcf-services-vcfdt-state`, and the state plus SFTP host-key volumes are
   external so a recreate cannot discard registered identity or fingerprints.
+  The console mounts the tool read-write and the sync service mounts it
+  read-only.
 - The admin console and sync service exchange jobs only over the internal
   password-protected Redis bus defined in `docs/redis-contract.md`. No
   container mounts the Docker socket and macvlan networking is out of scope.

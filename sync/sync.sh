@@ -90,7 +90,13 @@ if ! flock -n 9; then
 	log "another sync is already running, skipping this trigger"
 	exit 0
 fi
-exec 7>"$VCFDT_TOOL_STORE/.update.lock"
+
+if [ ! -x "$tool" ]; then
+	write_state '. + {running:false, currentTarget:null}'
+	log "VCF Download Tool is not installed; upload it in the admin console"
+	exit 1
+fi
+exec 7<"$VCFDT_TOOL_STORE/.update.lock"
 flock -s 7
 
 run_log="$STATE_DIR/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
@@ -126,12 +132,6 @@ prune_logs() {
 	fi
 }
 prune_logs
-
-if [ ! -x "$tool" ]; then
-	write_state '. + {running:false, currentTarget:null}'
-	log "VCF Download Tool is not installed; upload it in the admin console"
-	exit 1
-fi
 
 if [ ! -s "$AUTH_FILE" ]; then
 	write_state '. + {running:false, armed:false, currentTarget:null}'
