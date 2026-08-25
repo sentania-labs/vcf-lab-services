@@ -62,6 +62,11 @@ every state write:
 Consumers must fall back to reading `state.json` from the sync state volume
 when the key is absent, because the bus is not persistent.
 
+When the config volume fails its version check at startup, the scheduler
+refuses to dispatch and publishes the same shape with `running` and `armed`
+false plus `startupBlocked: true` and a `startupError` message, republished
+every poll interval until the config volume is replaced or restored.
+
 ## Versions shape (`vcf-services:sync:versions`)
 
 ```json
