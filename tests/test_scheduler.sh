@@ -54,16 +54,21 @@ flock 7
 	refresh_armed_state
 ) &
 refresh_pid=$!
-sleep 0.2
-kill -0 "$refresh_pid"
+sleep 0.5
+if kill -0 "$refresh_pid" 2>/dev/null; then
+	echo "refresh_armed_state blocked on a held sync lock" >&2
+	exit 1
+fi
+wait "$refresh_pid"
+jq -e '.armed == false' "$STATE_DIR/state.json" >/dev/null
 printf '%s' '{"running":true,"armed":false,"currentTarget":"patches","lastRun":{"esx":{"status":"OK"}}}' \
 	> "$STATE_DIR/state.json"
 flock -u 7
 exec 7>&-
-wait "$refresh_pid"
+refresh_armed_state
 jq -e '.running == true and .armed == true and .currentTarget == "patches"
   and .lastRun.esx.status == "OK"' "$STATE_DIR/state.json" >/dev/null
-echo "armed-state update lock test passed"
+echo "armed-state non-blocking update tests passed"
 
 stub_bin="$work_dir/bin"
 mkdir -p "$stub_bin"
@@ -145,6 +150,39 @@ touch "$refresh_set_log"
 [ "$(grep -c '^invoked$' "$work_dir/tool-calls.log")" -eq 1 ]
 [ "$(grep -c 'vcf-services:sync:versions' "$refresh_set_log")" -eq 2 ]
 echo "versions refresh lock tests passed"
+
+armed_set_log="$work_dir/armed-set.log"
+touch "$armed_set_log"
+mkdir -p "$work_dir/state-armed"
+printf '%s' '{"running":false,"armed":false,"currentTarget":null,"lastRun":{}}' \
+	> "$work_dir/state-armed/state.json"
+(
+	export FAKE_SET_LOG="$armed_set_log"
+	export PATH="$stub_bin:$PATH"
+	export STATE_DIR="$work_dir/state-armed"
+	export AUTH_FILE="$work_dir/activation-code.txt"
+	export REDIS_HOST=stub
+	# shellcheck source=/dev/null
+	source "$project_dir/sync/entrypoint.sh"
+	refresh_armed_state
+)
+[ "$(grep -c 'vcf-services:sync:status' "$armed_set_log")" -eq 1 ]
+jq -e '.armed == true' "$work_dir/state-armed/state.json" >/dev/null
+armed_state_inode="$(stat -c %i "$work_dir/state-armed/state.json")"
+(
+	export FAKE_SET_LOG="$armed_set_log"
+	export PATH="$stub_bin:$PATH"
+	export STATE_DIR="$work_dir/state-armed"
+	export AUTH_FILE="$work_dir/activation-code.txt"
+	export REDIS_HOST=stub
+	# shellcheck source=/dev/null
+	source "$project_dir/sync/entrypoint.sh"
+	refresh_armed_state
+	refresh_armed_state
+)
+[ "$(grep -c 'vcf-services:sync:status' "$armed_set_log")" -eq 1 ]
+[ "$(stat -c %i "$work_dir/state-armed/state.json")" = "$armed_state_inode" ]
+echo "armed-state skip-unchanged tests passed"
 
 printf '%s\n' '{"kind":"sync","targets":["patches","bogus"]}' > "$FAKE_QUEUE_FILE"
 printf '%s\n' '{"kind":"versions"}' >> "$FAKE_QUEUE_FILE"

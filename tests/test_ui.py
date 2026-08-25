@@ -270,6 +270,21 @@ class UiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('SETUP_COMPLETE="true"', self.settings.read_text())
 
+    def test_concurrent_settings_writes_do_not_drop_updates(self):
+        keys = [f"CONCURRENT_TEST_KEY_{index}" for index in range(8)]
+        barrier = threading.Barrier(len(keys))
+
+        def write(key):
+            barrier.wait()
+            self.module._write_settings({key: f"value-{key}"})
+
+        with ThreadPoolExecutor(max_workers=len(keys)) as executor:
+            list(executor.map(write, keys))
+
+        values = self.module._settings()
+        for key in keys:
+            self.assertEqual(values.get(key), f"value-{key}")
+
     def test_shared_password_change_updates_console_and_sftp(self):
         self.claim()
         response = self.post(

@@ -472,40 +472,53 @@ def _settings():
     return values
 
 
-def _write_settings(updates):
-    lines = []
-    replaced = set()
-    try:
-        existing = SETTINGS.read_text().splitlines()
-    except OSError:
-        existing = []
-    for line in existing:
-        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", line)
-        key = match.group(1) if match else None
-        if key in updates:
-            lines.append(_format_setting(key, updates[key]))
-            replaced.add(key)
-        else:
-            lines.append(line)
-    for key, value in updates.items():
-        if key not in replaced:
-            lines.append(_format_setting(key, value))
-
+@contextmanager
+def _settings_update_lock():
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(prefix="settings.env.", dir=SETTINGS.parent)
+    lock_file = open(SETTINGS.parent / ".settings.lock", "a+", encoding="utf-8")
     try:
-        os.fchmod(handle, 0o640)
-        with os.fdopen(handle, "w") as stream:
-            stream.write("\n".join(lines) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp_name, SETTINGS)
-    except Exception:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+    finally:
+        lock_file.close()
+
+
+def _write_settings(updates):
+    with _settings_update_lock():
+        lines = []
+        replaced = set()
         try:
-            os.unlink(temp_name)
+            existing = SETTINGS.read_text().splitlines()
         except OSError:
-            pass
-        raise
+            existing = []
+        for line in existing:
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", line)
+            key = match.group(1) if match else None
+            if key in updates:
+                lines.append(_format_setting(key, updates[key]))
+                replaced.add(key)
+            else:
+                lines.append(line)
+        for key, value in updates.items():
+            if key not in replaced:
+                lines.append(_format_setting(key, value))
+
+        handle, temp_name = tempfile.mkstemp(
+            prefix="settings.env.", dir=SETTINGS.parent
+        )
+        try:
+            os.fchmod(handle, 0o640)
+            with os.fdopen(handle, "w") as stream:
+                stream.write("\n".join(lines) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_name, SETTINGS)
+        except Exception:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
 
 
 def _format_setting(key, value):
