@@ -18,10 +18,11 @@ pair even when publication is delayed or fails. Each GitHub release bundle
 also includes a `.env` that pins Compose to the same exact release tags.
 
 Preparing a release starts by changing all product image defaults in
-`docker-compose.yml` to the intended tag. That change lands before the tag is
-pushed, so the tag names images the workflow is about to build. The release
-workflow runs `scripts/verify-compose-version.sh` before building or packaging
-and fails when any Compose default differs from the pushed tag. For the next
+`docker-compose.yml` and `kubernetes/deployment.yaml` to the intended tag. That
+change lands before the tag is pushed, so the tag names images the workflow is
+about to build. The release workflow runs
+`scripts/verify-compose-version.sh` before building or packaging and fails when
+any Compose or Kubernetes default differs from the pushed tag. For the next
 release, repeat the same version bump before tagging.
 
 After publishing and anonymously pulling the tagged images, the workflow runs
@@ -47,9 +48,10 @@ Depot ID. A failed or implausible
 Software Depot ID probe never blocks the upload and never replaces the last
 verified saved ID; the registration screen reports the probe failure.
 
-The release bundle contains only the Compose definition, Caddy configuration,
-thin optional bootstrap helper, operational documentation, license, and Range
-verification script. It contains no product source and no licensed content.
+The release bundle contains only the Compose and Kubernetes definitions, Caddy
+configuration, thin optional bootstrap helper, operational documentation,
+license, and Range verification script. It contains no product source and no
+licensed content.
 
 The workflow's publish step (`scripts/publish-release.sh`, exercised by
 `tests/test_release.sh`) is idempotent per tag: it verifies the tag exists

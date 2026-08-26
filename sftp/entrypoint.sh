@@ -2,7 +2,7 @@
 set -eu
 
 settings_file="${SETTINGS_FILE:-/config/settings.env}"
-password_file="${SFTP_PASSWORD_FILE:-/run/sftp-secrets/password}"
+password_file="${SFTP_PASSWORD_FILE:-/etc/vcf-services/secrets/sftp-password}"
 version_status_file="${VERSION_STATUS_FILE:-/config/.vcf-services-version-status.json}"
 backup_user=vcf
 sshd_pid=""
@@ -151,6 +151,7 @@ trap shutdown INT TERM
 
 last_uid_gid=""
 last_password_hash=""
+mkdir -p /run/sshd
 touch /run/sftp-supervisor-ready
 
 while [ -s "$version_status_file" ]; do

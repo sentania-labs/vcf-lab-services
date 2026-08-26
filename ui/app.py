@@ -47,15 +47,16 @@ SOFTWARE_DEPOT_ID_FILE = Path(
 )
 CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
-AUTH_FILE = Path(os.environ.get("AUTH_FILE", "/run/secrets/auth.json"))
+SECRETS_ROOT = "/etc/vcf-services/secrets"
+AUTH_FILE = Path(os.environ.get("AUTH_FILE", f"{SECRETS_ROOT}/auth.json"))
 ACTIVATION_CODE_FILE = Path(
-    os.environ.get("ACTIVATION_CODE_FILE", "/run/secrets/activation-code.txt")
+    os.environ.get("ACTIVATION_CODE_FILE", f"{SECRETS_ROOT}/activation-code.txt")
 )
 SFTP_PASSWORD_FILE = Path(
-    os.environ.get("SFTP_PASSWORD_FILE", "/run/secrets/sftp-password")
+    os.environ.get("SFTP_PASSWORD_FILE", f"{SECRETS_ROOT}/sftp-password")
 )
 FLASK_SECRET_FILE = Path(
-    os.environ.get("FLASK_SECRET_FILE", "/run/secrets/flask-secret")
+    os.environ.get("FLASK_SECRET_FILE", f"{SECRETS_ROOT}/flask-secret")
 )
 CADDY_CA_FILE = Path(
     os.environ.get(
@@ -64,7 +65,9 @@ CADDY_CA_FILE = Path(
 )
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
-REDIS_PASSWORD_FILE = os.environ.get("REDIS_PASSWORD_FILE", "/run/redis/password")
+REDIS_PASSWORD_FILE = os.environ.get(
+    "REDIS_PASSWORD_FILE", f"{SECRETS_ROOT}/redis-password"
+)
 REQUEST_QUEUE = "vcf-services:sync:requests"
 STATUS_KEY = "vcf-services:sync:status"
 LOG_KEY = "vcf-services:sync:log"
@@ -185,9 +188,10 @@ def _write_secret(path, value):
 @contextmanager
 def _credential_update_lock():
     AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = open(
-        AUTH_FILE.parent / ".credentials.lock", "a+", encoding="utf-8"
-    )
+    lock_path = AUTH_FILE.parent / ".credentials.lock"
+    lock_handle = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(lock_handle, 0o600)
+    lock_file = os.fdopen(lock_handle, "a+", encoding="utf-8")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         yield

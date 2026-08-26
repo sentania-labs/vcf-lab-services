@@ -1,0 +1,357 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vcf-services
+  namespace: vcf-services
+  labels:
+    app.kubernetes.io/name: vcf-services
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vcf-services
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vcf-services
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: volume-permissions
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.2
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - chown -R 1000:1000 /config /etc/vcf-services/secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, DAC_OVERRIDE, FOWNER]
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+          volumeMounts:
+            - name: config-state
+              mountPath: /config
+            - name: secrets-state
+              mountPath: /etc/vcf-services/secrets
+        - name: bootstrap
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.2
+          imagePullPolicy: IfNotPresent
+          command: [python, /app/bootstrap.py]
+          env:
+            - name: CONFIG_DIR
+              value: /config
+            - name: SECRETS_DIR
+              value: /etc/vcf-services/secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: config-state
+              mountPath: /config
+            - name: secrets-state
+              mountPath: /etc/vcf-services/secrets
+      containers:
+        - name: depot-web
+          image: caddy:2.10.0-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ADMIN_UI_UPSTREAM
+              value: 127.0.0.1:8080
+          ports:
+            - name: https
+              containerPort: 443
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - wget
+                - --quiet
+                - --no-check-certificate
+                - --output-document=/dev/null
+                - https://127.0.0.1/healthz
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: caddyfile
+              mountPath: /etc/caddy/Caddyfile
+              subPath: Caddyfile
+              readOnly: true
+            - name: depot-store
+              mountPath: /depot
+              readOnly: true
+            - name: caddy-data
+              mountPath: /data
+            - name: caddy-config
+              mountPath: /config
+            - name: caddy-tmp
+              mountPath: /tmp
+        - name: depot-sync
+          image: ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SETTINGS_FILE
+              value: /config/settings.env
+            - name: STATE_DIR
+              value: /state
+            - name: DEPOT_DIR
+              value: /depot
+            - name: AUTH_FILE
+              value: /etc/vcf-services/secrets/activation-code.txt
+            - name: REDIS_HOST
+              value: 127.0.0.1
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD_FILE
+              value: /etc/vcf-services/secrets/redis-password
+            - name: TOOL_ROOT
+              value: /opt/vcfdt/current
+            - name: VCFDT_TOOL_STORE
+              value: /opt/vcfdt
+            - name: VERSION_STATUS_FILE
+              value: /config/.vcf-services-version-status.json
+            - name: HOME
+              value: /home/vcf
+          readinessProbe:
+            exec:
+              command: [sh, -c, "test -s /state/state.json && kill -0 1"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: depot-store
+              mountPath: /depot
+            - name: vcfdt-tool
+              mountPath: /opt/vcfdt
+              readOnly: true
+            - name: vcfdt-state
+              mountPath: /home/vcf/.local/share/vmware/vdt
+            - name: sync-state
+              mountPath: /state
+            - name: config-state
+              mountPath: /config
+              readOnly: true
+            - name: secrets-state
+              mountPath: /etc/vcf-services/secrets
+              subPath: sync
+              readOnly: true
+            - name: sync-tmp
+              mountPath: /tmp
+        - name: sftp-backup
+          image: ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SETTINGS_FILE
+              value: /config/settings.env
+            - name: SFTP_PASSWORD_FILE
+              value: /etc/vcf-services/secrets/sftp-password
+          ports:
+            - name: sftp
+              containerPort: 22
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command: [/usr/local/bin/sftp-healthcheck.sh]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: backup-store
+              mountPath: /mnt/backup
+            - name: sftp-host-keys
+              mountPath: /etc/ssh/keys
+            - name: config-state
+              mountPath: /config
+              readOnly: true
+            - name: secrets-state
+              mountPath: /etc/vcf-services/secrets
+              subPath: sftp
+              readOnly: true
+            - name: sftp-run
+              mountPath: /run
+        - name: admin-ui
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DEPOT_DIR
+              value: /depot
+            - name: BACKUP_DIR
+              value: /mnt/backup
+            - name: STATE_DIR
+              value: /state
+            - name: SETTINGS_FILE
+              value: /config/settings.env
+            - name: REDIS_HOST
+              value: 127.0.0.1
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD_FILE
+              value: /etc/vcf-services/secrets/ui/redis-password
+            - name: VCFDT_STORE
+              value: /opt/vcfdt
+            - name: AUTH_FILE
+              value: /etc/vcf-services/secrets/ui/auth.json
+            - name: ACTIVATION_CODE_FILE
+              value: /etc/vcf-services/secrets/sync/activation-code.txt
+            - name: SFTP_PASSWORD_FILE
+              value: /etc/vcf-services/secrets/sftp/sftp-password
+            - name: FLASK_SECRET_FILE
+              value: /etc/vcf-services/secrets/ui/flask-secret
+            - name: HOME
+              value: /home/vcf
+          ports:
+            - name: admin
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: depot-store
+              mountPath: /depot
+              readOnly: true
+            - name: backup-store
+              mountPath: /mnt/backup
+              readOnly: true
+            - name: caddy-data
+              mountPath: /caddy-data
+              readOnly: true
+            - name: vcfdt-tool
+              mountPath: /opt/vcfdt
+            - name: vcfdt-state
+              mountPath: /home/vcf/.local/share/vmware/vdt
+            - name: sync-state
+              mountPath: /state
+              readOnly: true
+            - name: config-state
+              mountPath: /config
+            - name: secrets-state
+              mountPath: /etc/vcf-services/secrets
+            - name: ui-tmp
+              mountPath: /tmp
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c, "exec redis-server /etc/redis/redis.conf"]
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - REDISCLI_AUTH="$(cat /etc/redis/redis-password)" redis-cli ping | grep -q PONG
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: secrets-state
+              mountPath: /etc/redis
+              subPath: redis
+              readOnly: true
+            - name: redis-data
+              mountPath: /data
+            - name: redis-tmp
+              mountPath: /tmp
+      volumes:
+        - name: depot-store
+          persistentVolumeClaim:
+            claimName: depot-store
+        - name: backup-store
+          persistentVolumeClaim:
+            claimName: backup-store
+        - name: vcfdt-state
+          persistentVolumeClaim:
+            claimName: vcfdt-state
+        - name: vcfdt-tool
+          persistentVolumeClaim:
+            claimName: vcfdt-tool
+        - name: sync-state
+          persistentVolumeClaim:
+            claimName: sync-state
+        - name: caddy-data
+          persistentVolumeClaim:
+            claimName: caddy-data
+        - name: caddy-config
+          persistentVolumeClaim:
+            claimName: caddy-config
+        - name: sftp-host-keys
+          persistentVolumeClaim:
+            claimName: sftp-host-keys
+        - name: config-state
+          persistentVolumeClaim:
+            claimName: config-state
+        - name: secrets-state
+          persistentVolumeClaim:
+            claimName: secrets-state
+        - name: caddyfile
+          configMap:
+            name: vcf-services-caddy
+        - name: caddy-tmp
+          emptyDir: {}
+        - name: sync-tmp
+          emptyDir: {}
+        - name: sftp-run
+          emptyDir: {}
+        - name: ui-tmp
+          emptyDir: {}
+        - name: redis-data
+          emptyDir: {}
+        - name: redis-tmp
+          emptyDir: {}

@@ -12,7 +12,7 @@ fi
 
 : "${DEPOT_DIR:=/depot}"
 : "${STATE_DIR:=/state}"
-: "${AUTH_FILE:=/run/secrets/activation-code.txt}"
+: "${AUTH_FILE:=/etc/vcf-services/secrets/activation-code.txt}"
 : "${TOOL_ROOT:=/opt/vcfdt}"
 : "${VCFDT_TOOL_STORE:=$TOOL_ROOT}"
 : "${SYNC_TARGETS:=esx install upgrade patches}"
@@ -25,7 +25,7 @@ fi
 : "${VKR_OS:=}"
 : "${REDIS_HOST:=}"
 : "${REDIS_PORT:=6379}"
-: "${REDIS_PASSWORD_FILE:=/run/secrets/redis/password}"
+: "${REDIS_PASSWORD_FILE:=/etc/vcf-services/secrets/redis-password}"
 
 status_key="vcf-services:sync:status"
 log_key="vcf-services:sync:log"

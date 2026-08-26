@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/config"))
-SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/secrets"))
+SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/etc/vcf-services/secrets"))
 SETTINGS = CONFIG_DIR / "settings.env"
 VERSION_MARKER = CONFIG_DIR / ".vcf-services-version"
 VERSION_STATUS = CONFIG_DIR / ".vcf-services-version-status.json"
@@ -39,6 +39,7 @@ DEFAULT_SETTINGS = {
 
 def write_once(path, content, mode=0o600):
     if path.exists():
+        os.chmod(path, mode)
         return
     handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     with os.fdopen(handle, "w", encoding="utf-8") as stream:
@@ -120,6 +121,23 @@ def main():
         subdir = SECRETS_DIR / consumer
         subdir.mkdir(exist_ok=True)
         os.chmod(subdir, 0o700)
+
+    # Kubernetes fsGroup can add group-write bits while mounting a volume.
+    # Normalize private files on every start before their consumers run.
+    for relative in (
+        "redis/redis-password",
+        "redis/redis.conf",
+        "sync/activation-code.txt",
+        "sync/redis-password",
+        "sftp/sftp-password",
+        "ui/.credentials.lock",
+        "ui/auth.json",
+        "ui/flask-secret",
+        "ui/redis-password",
+    ):
+        secret = SECRETS_DIR / relative
+        if secret.exists():
+            os.chmod(secret, 0o600)
 
     redis_password = SECRETS_DIR / "redis" / "redis-password"
     write_once(redis_password, secrets.token_urlsafe(48) + "\n")

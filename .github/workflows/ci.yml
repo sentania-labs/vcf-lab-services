@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   checks:
-    name: Shell, tests, Compose, and images
+    name: Shell, tests, manifests, Compose, and images
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -34,6 +34,7 @@ jobs:
           ./tests/test_compose.sh
           ./tests/test_release.sh
           ./tests/test_sftp.sh
+          ./tests/test_kubernetes.sh
 
       - name: Validate Compose rendering
         run: docker compose config --quiet

@@ -616,6 +616,35 @@ class BootstrapVersionTests(unittest.TestCase):
         self.assertEqual(module.VERSION_MARKER.read_text().strip(), "v0.2.1")
         self.assertFalse(module.VERSION_STATUS.exists())
 
+    def test_matching_boot_repairs_fsgroup_bits_on_private_files(self):
+        self.config.mkdir()
+        (self.config / ".vcf-services-version").write_text("v0.2.1\n")
+        self.secrets.mkdir()
+        for consumer in ("redis", "sync", "sftp", "ui"):
+            (self.secrets / consumer).mkdir()
+        private_files = (
+            "redis/redis-password",
+            "redis/redis.conf",
+            "sync/activation-code.txt",
+            "sync/redis-password",
+            "sftp/sftp-password",
+            "ui/.credentials.lock",
+            "ui/auth.json",
+            "ui/flask-secret",
+            "ui/redis-password",
+        )
+        for relative in private_files:
+            path = self.secrets / relative
+            path.write_text("preserved\n")
+            path.chmod(0o660)
+
+        self.run_bootstrap()
+
+        for relative in private_files:
+            path = self.secrets / relative
+            self.assertEqual(path.read_text(), "preserved\n")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_existing_unmarked_config_is_quarantined_without_rewriting_setup(self):
         self.config.mkdir()
         settings = self.config / "settings.env"

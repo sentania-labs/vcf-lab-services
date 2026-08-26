@@ -29,8 +29,17 @@ files=(
 	compose.sh
 	install.sh
 	caddy/Caddyfile
+	docs/kubernetes.md
 	docs/redis-contract.md
 	docs/releasing.md
+	kubernetes/kustomization.yaml
+	kubernetes/namespace.yaml
+	kubernetes/storage.yaml
+	kubernetes/Caddyfile
+	kubernetes/deployment.yaml
+	kubernetes/service.yaml
+	kubernetes/service-sftp.yaml
+	kubernetes/ingress.yaml
 	scripts/verify-byte-exact.sh
 )
 for file in "${files[@]}"; do

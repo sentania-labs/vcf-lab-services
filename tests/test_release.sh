@@ -14,6 +14,14 @@ if "$project_dir/scripts/verify-compose-version.sh" v0.2.0 \
 fi
 "$project_dir/scripts/verify-compose-version.sh" "$version" \
 	"$project_dir/docker-compose.yml" >/dev/null
+bad_kubernetes="$work_dir/deployment-wrong-version.yaml"
+cp "$project_dir/kubernetes/deployment.yaml" "$bad_kubernetes"
+sed -i '0,/ui:v0.2.2/s//ui:v0.2.1/' "$bad_kubernetes"
+if "$project_dir/scripts/verify-compose-version.sh" "$version" \
+	"$project_dir/docker-compose.yml" "$bad_kubernetes" > /dev/null 2>&1; then
+	echo "release validation accepted a Kubernetes image that differs from the tag" >&2
+	exit 1
+fi
 grep -q 'verify-published-quickstart.sh.*GITHUB_REF_NAME' \
 	"$project_dir/.github/workflows/release.yml"
 grep -q '^docker compose up -d$' \
@@ -34,7 +42,11 @@ archive="$work_dir/vcf-lab-services-$version.tar.gz"
 bundle="vcf-lab-services-$version"
 listing="$(tar -tzf "$archive")"
 for path in .release.env .env install.sh compose.sh docker-compose.yml caddy/Caddyfile \
-	docs/releasing.md scripts/verify-byte-exact.sh; do
+	docs/kubernetes.md docs/releasing.md kubernetes/kustomization.yaml \
+	kubernetes/namespace.yaml kubernetes/deployment.yaml kubernetes/storage.yaml \
+	kubernetes/Caddyfile kubernetes/service.yaml kubernetes/service-sftp.yaml \
+	kubernetes/ingress.yaml \
+	scripts/verify-byte-exact.sh; do
 	grep -qx "$bundle/$path" <<< "$listing"
 done
 ! grep -Eq 'Dockerfile|(^|/)ui/|(^|/)sync/|config/answers' <<< "$listing"

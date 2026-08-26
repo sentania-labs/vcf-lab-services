@@ -4,6 +4,10 @@
 VCF binary depot, a scheduled VCF Download Tool sync engine, an SFTP backup
 target, and an admin console.
 
+An official single-Pod Kubernetes deployment is also available. See
+[docs/kubernetes.md](docs/kubernetes.md) for the storage, secret, ingress, and
+failure-domain contract.
+
 This branch is a workable GUI-first prototype. It is not the finished product.
 The licensed VCF Download Tool is never included, downloaded, logged, or
 redistributed by this project.

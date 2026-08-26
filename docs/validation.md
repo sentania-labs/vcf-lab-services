@@ -9,6 +9,7 @@ Run the repository gates before release:
 ./tests/test_compose.sh
 ./tests/test_release.sh
 ./tests/test_sftp.sh
+./tests/test_kubernetes.sh
 docker build -t vcf-services-sync-base:local -f Dockerfile.sync-base .
 ./scripts/verify-license-boundary.sh vcf-services-sync-base:local
 docker build -t vcf-services-ui:local -f Dockerfile.ui .
@@ -29,8 +30,19 @@ boundary, protected Redis, fixed mount contracts, version mismatch safe-stop
 wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
 single-writer sync behavior, sync safe-stop on a version mismatch, log
 retention, SFTP identity and host keys, Range serving, packaging, rejection of
-release tags that disagree with the Compose defaults, idempotent release
+release tags that disagree with the Compose or Kubernetes defaults, idempotent release
 publication, and license isolation.
+
+CI renders the Kubernetes manifests, validates them against strict Kubernetes
+schemas, and asserts the storage, secret-path, ingress, and single-Pod network
+contracts in the rendered output. Unit and container tests separately prove
+that bootstrap and SFTP return fsGroup-style private-file modes to `0600`.
+
+`tests/test_kubernetes_live.sh` is the command-line runtime proof for a current
+cluster after the three local product images have been tagged with `:ci`. It
+waits for the five-container Pod, exercises HTTPS and Redis over Pod loopback,
+checks ServiceAccount isolation, injects fsGroup-style `0660` modes, restarts
+the Pod, and verifies private secrets and SFTP host keys return to `0600`.
 
 `tests/test_install_checks.sh` is a regression guard, not a gate for a
 reachable operator path. It exercises the retained depot-adoption scripts
