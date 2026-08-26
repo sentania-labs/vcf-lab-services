@@ -38,7 +38,7 @@ trap 'exit 143' TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 command -v flock >/dev/null 2>&1 || fail "flock is required for one-at-a-time live testing"
-exec 9< "$project_dir/tests/test_kubernetes_live.sh"
+exec 9>> /tmp/vcf-services-kubernetes-live.lock
 flock --nonblock 9 \
 	|| fail "another Kubernetes live test is already running; refusing concurrent cluster creation"
 
