@@ -5,7 +5,7 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 work_dir="$(mktemp -d /tmp/vcf-services-release-test.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
 
-version=v0.2.1
+version=v0.2.2
 repository=ghcr.io/example/vcf-lab-services
 if "$project_dir/scripts/verify-compose-version.sh" v0.2.0 \
 	"$project_dir/docker-compose.yml" > /dev/null 2>&1; then
