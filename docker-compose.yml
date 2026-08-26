@@ -3,7 +3,7 @@ name: vcf-services
 services:
   bootstrap:
     container_name: vcf-services-bootstrap
-    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.1}
+    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.2}
     restart: "no"
     command: ["python", "/app/bootstrap.py"]
     environment:
@@ -41,7 +41,7 @@ services:
 
   depot-sync:
     container_name: vcf-services-sync
-    image: ${VCF_SERVICES_SYNC_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.1}
+    image: ${VCF_SERVICES_SYNC_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.2}
     restart: unless-stopped
     environment:
       SETTINGS_FILE: /etc/vcf-services/settings.env
@@ -79,7 +79,7 @@ services:
 
   sftp-backup:
     container_name: vcf-services-sftp
-    image: ${VCF_SERVICES_SFTP_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.1}
+    image: ${VCF_SERVICES_SFTP_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.2}
     restart: unless-stopped
     init: true
     environment:
@@ -111,7 +111,7 @@ services:
 
   admin-ui:
     container_name: vcf-services-ui
-    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.1}
+    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.2}
     restart: unless-stopped
     depends_on:
       redis:
