@@ -7,16 +7,16 @@ port_forward_pid=""
 namespace=vcf-services
 cluster_name="vcf-services-live-$$"
 kubeconfig="$work_dir/kubeconfig"
-cluster_created=false
+cluster_cleanup_owned=false
 
 cleanup() {
 	if [ -n "$port_forward_pid" ]; then
 		kill "$port_forward_pid" >/dev/null 2>&1 || true
 		wait "$port_forward_pid" >/dev/null 2>&1 || true
 	fi
-	if [ "$cluster_created" = true ]; then
+	if [ "$cluster_cleanup_owned" = true ]; then
 		kind delete cluster --name "$cluster_name" >/dev/null 2>&1 || true
-		cluster_created=false
+		cluster_cleanup_owned=false
 	fi
 	rm -rf "$work_dir"
 }
@@ -37,14 +37,19 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+command -v flock >/dev/null 2>&1 || fail "flock is required for one-at-a-time live testing"
+exec 9< "$project_dir/tests/test_kubernetes_live.sh"
+flock --nonblock 9 \
+	|| fail "another Kubernetes live test is already running; refusing concurrent cluster creation"
+
 for image in vcf-services-ui:ci vcf-services-sync-base:ci vcf-services-sftp:ci; do
 	docker image inspect "$image" >/dev/null 2>&1 \
 		|| fail "required local image is missing: $image"
 done
 
 command -v kind >/dev/null 2>&1 || fail "kind is required for the disposable live cluster"
+cluster_cleanup_owned=true
 kind create cluster --name "$cluster_name" --kubeconfig "$kubeconfig" --wait 3m
-cluster_created=true
 export KUBECONFIG="$kubeconfig"
 expected_context="kind-$cluster_name"
 discovered_context="$(kubectl config current-context 2>/dev/null || true)"
