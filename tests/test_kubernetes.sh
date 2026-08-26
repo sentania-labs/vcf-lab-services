@@ -38,6 +38,10 @@ for annotation in proxy-body-size proxy-read-timeout proxy-send-timeout proxy-re
 	grep -q "nginx.ingress.kubernetes.io/$annotation" "$rendered" \
 		|| fail "ingress upload annotation $annotation is missing"
 done
+grep -q 'nginx.ingress.kubernetes.io/force-ssl-redirect: "true"' "$rendered" \
+	|| fail "ingress does not force client HTTPS"
+grep -q 'secretName: vcf-services-ingress-tls' "$rendered" \
+	|| fail "ingress TLS certificate Secret is missing"
 
 for file in "$project_dir/caddy/Caddyfile" "$project_dir/kubernetes/Caddyfile"; do
 	[ "$(grep -c 'ADMIN_UI_UPSTREAM' "$file")" -eq 3 ] \

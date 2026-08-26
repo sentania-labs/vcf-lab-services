@@ -38,8 +38,9 @@ schemas, and asserts the storage, secret-path, ingress, and single-Pod network
 contracts in the rendered output. Unit and container tests separately prove
 that bootstrap and SFTP return fsGroup-style private-file modes to `0600`.
 
-`tests/test_kubernetes_live.sh` is the command-line runtime proof for a current
-cluster after the three local product images have been tagged with `:ci`. It
+`tests/test_kubernetes_live.sh` is the command-line runtime proof for a
+disposable kind cluster after the three local product images have been tagged
+with `:ci`. The test creates, verifies, and deletes its own cluster. It
 waits for the five-container Pod, exercises HTTPS and Redis over Pod loopback,
 checks ServiceAccount isolation, injects fsGroup-style `0660` modes, restarts
 the Pod, and verifies private secrets and SFTP host keys return to `0600`.

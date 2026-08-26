@@ -5,11 +5,18 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 work_dir="$(mktemp -d /tmp/vcf-services-kubernetes-live.XXXXXX)"
 port_forward_pid=""
 namespace=vcf-services
+cluster_name="vcf-services-live-$$"
+kubeconfig="$work_dir/kubeconfig"
+cluster_created=false
 
 cleanup() {
 	if [ -n "$port_forward_pid" ]; then
 		kill "$port_forward_pid" >/dev/null 2>&1 || true
 		wait "$port_forward_pid" >/dev/null 2>&1 || true
+	fi
+	if [ "$cluster_created" = true ]; then
+		kind delete cluster --name "$cluster_name" >/dev/null 2>&1 || true
+		cluster_created=false
 	fi
 	rm -rf "$work_dir"
 }
@@ -26,12 +33,32 @@ diagnose() {
 	exit "$status"
 }
 trap diagnose EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 for image in vcf-services-ui:ci vcf-services-sync-base:ci vcf-services-sftp:ci; do
 	docker image inspect "$image" >/dev/null 2>&1 \
 		|| fail "required local image is missing: $image"
 done
+
+command -v kind >/dev/null 2>&1 || fail "kind is required for the disposable live cluster"
+kind create cluster --name "$cluster_name" --kubeconfig "$kubeconfig" --wait 3m
+cluster_created=true
+export KUBECONFIG="$kubeconfig"
+expected_context="kind-$cluster_name"
+discovered_context="$(kubectl config current-context 2>/dev/null || true)"
+[ "$discovered_context" = "$expected_context" ] \
+	|| fail "refusing cluster access: discovered context '$discovered_context', expected '$expected_context'"
+control_plane="${cluster_name}-control-plane"
+[ "$(docker inspect --format '{{ index .Config.Labels "io.x-k8s.kind.cluster" }}' "$control_plane" 2>/dev/null || true)" = "$cluster_name" ] \
+	|| fail "refusing cluster access: context '$discovered_context' has no owned kind control plane"
+api_server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+api_port="$(docker inspect --format '{{ (index (index .NetworkSettings.Ports "6443/tcp") 0).HostPort }}' "$control_plane")"
+[ "$api_server" = "https://127.0.0.1:$api_port" ] \
+	|| fail "refusing cluster access: context '$discovered_context' targets '$api_server', not the owned kind cluster"
+kind load docker-image --name "$cluster_name" \
+	vcf-services-ui:ci vcf-services-sync-base:ci vcf-services-sftp:ci
 
 rendered="$work_dir/rendered.yaml"
 kubectl kustomize "$project_dir/kubernetes" \

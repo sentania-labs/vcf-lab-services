@@ -9,17 +9,28 @@ state.
 
 The defaults require a dynamic default StorageClass and request 1 TiB for the
 depot. Review the sizes in `kubernetes/storage.yaml`, and add a `storageClassName`
-to each claim when the cluster has no suitable default. Then deploy:
+to each claim when the cluster has no suitable default. Client TLS terminates at
+the ingress, while ingress-to-Caddy traffic remains HTTPS. Before applying the
+manifests, create the required `vcf-services-ingress-tls` Secret from the
+operator-supplied certificate and private key:
 
 ```bash
+kubectl apply -f kubernetes/namespace.yaml
+kubectl --namespace vcf-services create secret tls vcf-services-ingress-tls \
+  --cert=/path/to/fullchain.pem --key=/path/to/private-key.pem
 kubectl apply -k kubernetes
 kubectl wait --namespace vcf-services --for=condition=Available \
   deployment/vcf-services --timeout=10m
 kubectl get --namespace vcf-services pods,services,ingress,pvc
 ```
 
-Point the console hostname at the ingress address and replace
-`vcf-services.local` in `kubernetes/ingress.yaml` with that name. The separate
+Replace the example certificate paths with files for the deployed hostname.
+Without this Secret, the ingress has no valid certificate for the console and
+the deployment is not ready for operator traffic. Do not remove the `tls`
+section or the forced HTTPS redirect to work around a missing certificate.
+
+Point the console hostname at the ingress address and replace both occurrences
+of `vcf-services.local` in `kubernetes/ingress.yaml` with that name. The separate
 `vcf-services-sftp` LoadBalancer Service publishes SFTP on port 22. On a cluster
 without a LoadBalancer implementation, expose that Service through the site's
 normal TCP ingress or load balancer.
