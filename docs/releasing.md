@@ -38,7 +38,12 @@ version parser is confirmed against licensed VCF Download Tool output for
 line, and accepts the bare dotted version as a fallback. The probe remains
 advisory by design so a future output-format change does not reject a valid
 upload. An unexpected or failed version probe still installs the archive and
-marks its version as unverified in the console. A failed or implausible
+marks its version as unverified in the console. The published-quickstart proof
+exercises both paths: the CI stub emits licensed-shaped `--version` output
+(banner, `Version:` line, bare version, log-file line) and the proof asserts
+the parsed version matches the stub exactly, then uploads an unparseable stub
+and asserts it installs as unverified without disturbing the saved Software
+Depot ID. A failed or implausible
 Software Depot ID probe never blocks the upload and never replaces the last
 verified saved ID; the registration screen reports the probe failure.
 

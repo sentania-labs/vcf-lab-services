@@ -89,6 +89,45 @@ upload="$(curl --fail --silent --show-error --insecure -b "$cookie_jar" \
 	https://127.0.0.1/admin/api/vcfdt)"
 registration="$(curl --fail --silent --show-error --insecure -b "$cookie_jar" \
 	https://127.0.0.1/admin/api/registration)"
+
+# Create an unparseable stub archive to prove unverified tool installs and depot ID preservation.
+# Exercise this BEFORE arming the scheduler so no upload happens once the schedule is live.
+unparseable_work="$(mktemp -d)"
+mkdir -p "$unparseable_work/vcf-download-tool-stub/bin" "$unparseable_work/vcf-download-tool-stub/conf"
+cat > "$unparseable_work/vcf-download-tool-stub/bin/vcf-download-tool" <<'STUB'
+#!/bin/bash
+if [ "${1:-}" = "--version" ]; then
+	echo "unparseable version output banner"
+	exit 0
+fi
+if [ "${1:-}" = configuration ] && [ "${2:-}" = get ] && [ "${3:-}" = --machineId ]; then
+	echo "bogus-unparseable-machine-id"
+	exit 0
+fi
+exit 0
+STUB
+chmod 0755 "$unparseable_work/vcf-download-tool-stub/bin/vcf-download-tool"
+cat > "$unparseable_work/vcf-download-tool-stub/conf/application-prodv2.properties" <<'PROPERTIES'
+lcm.depot.adapter.host=dl.broadcom.com
+lcm.access_token.broadcom.authorization.server.url=https://eapi.broadcom.com/vcf/generateToken
+PROPERTIES
+unparseable_archive="$(mktemp --suffix=.tar.gz)"
+tar -czf "$unparseable_archive" -C "$unparseable_work" vcf-download-tool-stub
+rm -rf "$unparseable_work"
+
+upload_unparseable="$(curl --fail --silent --show-error --insecure -b "$cookie_jar" \
+	-F "archive=@$unparseable_archive;filename=vcf-download-tool-unparseable.tar.gz" \
+	https://127.0.0.1/admin/api/vcfdt)"
+registration_unparseable="$(curl --silent --show-error --insecure -b "$cookie_jar" \
+	https://127.0.0.1/admin/api/registration)"
+rm -f "$unparseable_archive"
+
+# Re-upload the working stub so the appliance has the valid tool before activation and settings
+upload_restored="$(curl --fail --silent --show-error --insecure -b "$cookie_jar" \
+	-F "archive=@$stub_archive;filename=vcf-download-tool-0.0.0-stub.tar.gz" \
+	https://127.0.0.1/admin/api/vcfdt)"
+rm -f "$stub_archive"
+
 activation="$(curl --fail --silent --show-error --insecure -b "$cookie_jar" \
 	-H 'Content-Type: application/json' \
 	-d '{"activationCode":"release-quickstart-test-code"}' \
@@ -98,21 +137,43 @@ settings="$(curl --fail --silent --show-error --insecure -b "$cookie_jar" \
 	-d '{"cronSchedule":"30 2 * * *"}' \
 	https://127.0.0.1/admin/api/settings)"
 
-python3 - "$claim" "$upload" "$registration" "$activation" "$settings" <<'PY'
+python3 - "$claim" "$upload" "$registration" "$upload_unparseable" "$registration_unparseable" \
+	"$upload_restored" "$activation" "$settings" <<'PY'
 import json
 import re
 import sys
 
-claim, upload, registration, activation, settings = map(json.loads, sys.argv[1:])
+(
+    claim,
+    upload,
+    registration,
+    upload_unparseable,
+    registration_unparseable,
+    upload_restored,
+    activation,
+    settings,
+) = map(json.loads, sys.argv[1:])
 assert claim == {"claimed": True, "username": "vcf"}
 assert upload["installed"] is True
-assert upload["version"] == "vcf-download-tool 0.0.0-stub"
+assert upload["version"] == "0.0.0.0.20000000"
+assert upload["versionVerified"] is True
 machine_id = registration["machineId"]
 assert re.fullmatch(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     machine_id,
 )
 assert registration["error"] is None
+
+# Case 2: unparseable version installs as unverified and preserves saved Software Depot ID
+assert upload_unparseable["installed"] is True
+assert upload_unparseable["version"] == "unverified"
+assert upload_unparseable["versionVerified"] is False
+assert registration_unparseable["machineId"] == machine_id
+
+assert upload_restored["installed"] is True
+assert upload_restored["version"] == "0.0.0.0.20000000"
+assert upload_restored["versionVerified"] is True
+
 assert activation == {"machineId": machine_id, "saved": True}
 assert settings["saved"] is True
 assert settings["cronSchedule"] == "30 2 * * *"
