@@ -48,6 +48,14 @@ not use the Kubernetes API. This is defense in depth: application secrets also
 live at `/etc/vcf-services/secrets`, outside Kubernetes' reserved
 `/var/run/secrets/kubernetes.io/serviceaccount` tree.
 
+The containers communicate over the shared Pod loopback interface. The
+`ADMIN_UI_UPSTREAM` value on `depot-web` selects Caddy's console and
+authorization target. The `REDIS_HOST` and `REDIS_PORT` values on `depot-sync`
+and `admin-ui` select Redis. The supplied manifest sets these targets to
+`127.0.0.1` and the in-Pod ports. They are platform settings in
+`kubernetes/deployment.yaml`, not product settings in the admin console. Keep
+both Redis consumers aligned if the target changes.
+
 ## Secret paths
 
 The `secrets-state` claim contains four consumer directories. A whole-tree

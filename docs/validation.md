@@ -30,8 +30,8 @@ boundary, protected Redis, fixed mount contracts, version mismatch safe-stop
 wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
 single-writer sync behavior, sync safe-stop on a version mismatch, log
 retention, SFTP identity and host keys, Range serving, packaging, rejection of
-release tags that disagree with the Compose or Kubernetes defaults, idempotent release
-publication, and license isolation.
+release tags that disagree with the Compose or Kubernetes defaults,
+idempotent release publication, and license isolation.
 
 CI renders the Kubernetes manifests, validates them against strict Kubernetes
 schemas, and asserts the storage, secret-path, ingress, and single-Pod network
