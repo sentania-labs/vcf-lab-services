@@ -6,9 +6,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `tests/make-stub-vcfdt.sh` for local and CI validation.
 - Run `tests/test_sync.sh`, `tests/test_scheduler.sh`,
   `tests/test_install_checks.sh`, `tests/test_compose.sh`,
-  `tests/test_release.sh`, `tests/test_sftp.sh`, `tests/test_kubernetes.sh`, the
-  UI unit test documented in `docs/validation.md`, and the live Range check
-  before release. Use `tests/test_kubernetes_live.sh` for a real cluster proof.
+  `tests/test_compose_boot.sh`, `tests/test_release.sh`, `tests/test_sftp.sh`,
+  `tests/test_kubernetes.sh`, the UI unit test documented in
+  `docs/validation.md`, and the live Range check before release. Use
+  `tests/test_kubernetes_live.sh` for a real cluster proof.
   `tests/test_install_checks.sh` is a regression guard for the retained
   depot-adoption scripts in `scripts/`, not a gate for a reachable operator
   path: the GUI-first prototype removed their installer entry point, and

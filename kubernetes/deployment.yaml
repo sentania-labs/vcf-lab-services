@@ -24,7 +24,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: volume-permissions
-          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.3
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.4
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -78,7 +78,7 @@ spec:
             - name: redis-tmp
               mountPath: /volumes/redis-tmp
         - name: bootstrap
-          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.3
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.4
           imagePullPolicy: IfNotPresent
           command: [python, /app/bootstrap.py]
           env:
@@ -144,7 +144,7 @@ spec:
             - name: caddy-tmp
               mountPath: /tmp
         - name: depot-sync
-          image: ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.3
+          image: ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.4
           imagePullPolicy: IfNotPresent
           env:
             - name: SETTINGS_FILE
@@ -203,7 +203,7 @@ spec:
             - name: sync-tmp
               mountPath: /tmp
         - name: sftp-backup
-          image: ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.3
+          image: ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.4
           imagePullPolicy: IfNotPresent
           env:
             - name: SETTINGS_FILE
@@ -240,7 +240,7 @@ spec:
             - name: sftp-run
               mountPath: /run
         - name: admin-ui
-          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.3
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.4
           imagePullPolicy: IfNotPresent
           env:
             - name: DEPOT_DIR

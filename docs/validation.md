@@ -16,6 +16,10 @@ docker build -t vcf-services-ui:local -f Dockerfile.ui .
 docker build -t vcf-services-sftp:local -f Dockerfile.sftp .
 docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:local \
   python tests/test_ui.py
+VCF_SERVICES_UI_IMAGE=vcf-services-ui:local \
+VCF_SERVICES_SYNC_IMAGE=vcf-services-sync-base:local \
+VCF_SERVICES_SFTP_IMAGE=vcf-services-sftp:local \
+  ./tests/test_compose_boot.sh
 ```
 
 The UI test covers first-person ownership, login, live depot authentication,
@@ -32,6 +36,14 @@ single-writer sync behavior, sync safe-stop on a version mismatch, log
 retention, SFTP identity and host keys, Range serving, packaging, rejection of
 release tags that disagree with the Compose or Kubernetes defaults,
 idempotent release publication, and license isolation.
+
+`tests/test_compose_boot.sh` uses an isolated project, container names, network,
+and fresh volumes without publishing host ports. It can run beside an installed
+appliance without reconciling or removing the appliance containers. The test
+starts the complete Compose appliance with locally built images and requires
+each long-running service to become healthy or running. The one-shot bootstrap
+service must exit successfully. The normal GitHub-hosted CI job runs this proof
+with a real Docker daemon after building the three product images.
 
 CI renders the Kubernetes manifests, validates them against strict Kubernetes
 schemas, and asserts the storage, secret-path, ingress, and single-Pod network

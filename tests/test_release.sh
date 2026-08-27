@@ -5,9 +5,9 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 work_dir="$(mktemp -d /tmp/vcf-services-release-test.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
 
-version=v0.2.3
+version=v0.2.4
 repository=ghcr.io/example/vcf-lab-services
-if "$project_dir/scripts/verify-compose-version.sh" v0.2.0 \
+if "$project_dir/scripts/verify-compose-version.sh" v0.2.3 \
 	"$project_dir/docker-compose.yml" > /dev/null 2>&1; then
 	echo "release validation accepted a tag that differs from Compose" >&2
 	exit 1
@@ -16,7 +16,7 @@ fi
 	"$project_dir/docker-compose.yml" >/dev/null
 bad_kubernetes="$work_dir/deployment-wrong-version.yaml"
 cp "$project_dir/kubernetes/deployment.yaml" "$bad_kubernetes"
-sed -i '0,/ui:v0.2.3/s//ui:v0.2.1/' "$bad_kubernetes"
+sed -i '0,/ui:v0.2.4/s//ui:v0.2.1/' "$bad_kubernetes"
 if "$project_dir/scripts/verify-compose-version.sh" "$version" \
 	"$project_dir/docker-compose.yml" "$bad_kubernetes" > /dev/null 2>&1; then
 	echo "release validation accepted a Kubernetes image that differs from the tag" >&2
