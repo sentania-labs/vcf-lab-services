@@ -77,6 +77,30 @@ diagnose() {
 }
 trap diagnose EXIT
 
+base_config="$work_dir/base-config.json"
+test_config="$work_dir/test-config.json"
+docker compose -f "$project_dir/docker-compose.yml" config --format json > "$base_config"
+"${compose[@]}" config --format json > "$test_config"
+python3 - "$base_config" "$test_config" <<'PY'
+import json
+import sys
+
+services = ("bootstrap", "depot-web", "depot-sync", "sftp-backup", "admin-ui", "redis")
+with open(sys.argv[1], encoding="utf-8") as stream:
+    base = json.load(stream)
+with open(sys.argv[2], encoding="utf-8") as stream:
+    test = json.load(stream)
+
+if not base.get("name") or not test.get("name") or base["name"] == test["name"]:
+    raise SystemExit("FAIL: Compose boot test project name is not isolated")
+
+for service in services:
+    base_name = base.get("services", {}).get(service, {}).get("container_name")
+    test_name = test.get("services", {}).get(service, {}).get("container_name")
+    if not base_name or not test_name or base_name == test_name:
+        raise SystemExit(f"FAIL: Compose boot test container is not isolated: {service}")
+PY
+
 started=true
 "${compose[@]}" up -d
 
