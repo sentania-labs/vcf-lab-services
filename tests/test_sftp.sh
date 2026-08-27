@@ -39,6 +39,18 @@ docker run --rm --entrypoint /bin/sh -v "$backup_volume:/mnt/backup" "$image" \
 	-c 'chown 1003:1003 /mnt/backup'
 docker run --rm --user 1003:1003 --entrypoint /bin/sh -v "$backup_volume:/mnt/backup" "$image" \
 	-c 'mkdir -p /mnt/backup/sddc-manager /mnt/backup/nsx /mnt/backup/vcenter'
+docker run --rm --entrypoint /bin/sh -v "$backup_volume:/mnt/backup" "$image" \
+	-c 'printf "populated backup sentinel\n" > /mnt/backup/vcenter/restart-sentinel && \
+		chown 2222:2222 /mnt/backup/vcenter/restart-sentinel'
+docker run --rm --entrypoint /usr/local/bin/sftp-own-backup.sh \
+	-v "$backup_volume:/mnt/backup:rw" -v "$key_volume:/etc/ssh/keys:rw" \
+	"$image" 1003 1003 >/dev/null \
+	|| fail "ordinary restart ownership check failed"
+restart_sentinel_owner="$(docker run --rm --entrypoint /bin/sh \
+	-v "$backup_volume:/mnt/backup:ro" "$image" \
+	-c 'stat -c "%u:%g" /mnt/backup/vcenter/restart-sentinel')"
+[ "$restart_sentinel_owner" = "2222:2222" ] \
+	|| fail "ordinary restart recursively re-owned populated backup content (saw $restart_sentinel_owner)"
 
 snapshot_key_volume() {
 	docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:ro" "$image" -c '

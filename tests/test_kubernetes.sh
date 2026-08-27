@@ -33,7 +33,14 @@ grep -q 'value: 127.0.0.1:8080' "$rendered" \
 [ "$(grep -c 'readOnlyRootFilesystem: true' "$rendered")" -eq 6 ] \
 	|| fail "read-only root filesystems are not enforced where supported"
 grep -q 'name: volume-permissions' "$rendered" \
-	|| fail "fsGroup volume ownership setup is missing"
+	|| fail "explicit volume ownership setup is missing"
+! grep -q 'fsGroup:' "$rendered" \
+	|| fail "Pod-wide fsGroup would contend with SFTP backup ownership"
+permissions_block="$(sed -n '/name: volume-permissions/,/name: bootstrap/p' "$rendered")"
+! grep -q 'name: backup-store' <<< "$permissions_block" \
+	|| fail "volume-permissions must not mount or re-own the backup claim"
+grep -q '/volumes/depot' <<< "$permissions_block" \
+	|| fail "volume-permissions does not initialize application-owned volume roots"
 for annotation in proxy-body-size proxy-read-timeout proxy-send-timeout proxy-request-buffering; do
 	grep -q "nginx.ingress.kubernetes.io/$annotation" "$rendered" \
 		|| fail "ingress upload annotation $annotation is missing"

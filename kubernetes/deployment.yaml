@@ -20,8 +20,6 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       securityContext:
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       initContainers:
@@ -31,7 +29,20 @@ spec:
           command:
             - sh
             - -ec
-            - chown -R 1000:1000 /config /etc/vcf-services/secrets
+            - |
+              chown -R 1000:1000 /config /etc/vcf-services/secrets
+              chown 1000:1000 \
+                /volumes/depot \
+                /volumes/vcfdt-state \
+                /volumes/vcfdt-tool \
+                /volumes/sync-state \
+                /volumes/caddy-data \
+                /volumes/caddy-config \
+                /volumes/caddy-tmp \
+                /volumes/sync-tmp \
+                /volumes/ui-tmp \
+                /volumes/redis-data \
+                /volumes/redis-tmp
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -44,6 +55,28 @@ spec:
               mountPath: /config
             - name: secrets-state
               mountPath: /etc/vcf-services/secrets
+            - name: depot-store
+              mountPath: /volumes/depot
+            - name: vcfdt-state
+              mountPath: /volumes/vcfdt-state
+            - name: vcfdt-tool
+              mountPath: /volumes/vcfdt-tool
+            - name: sync-state
+              mountPath: /volumes/sync-state
+            - name: caddy-data
+              mountPath: /volumes/caddy-data
+            - name: caddy-config
+              mountPath: /volumes/caddy-config
+            - name: caddy-tmp
+              mountPath: /volumes/caddy-tmp
+            - name: sync-tmp
+              mountPath: /volumes/sync-tmp
+            - name: ui-tmp
+              mountPath: /volumes/ui-tmp
+            - name: redis-data
+              mountPath: /volumes/redis-data
+            - name: redis-tmp
+              mountPath: /volumes/redis-tmp
         - name: bootstrap
           image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.2
           imagePullPolicy: IfNotPresent

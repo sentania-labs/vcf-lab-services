@@ -37,6 +37,11 @@ CI renders the Kubernetes manifests, validates them against strict Kubernetes
 schemas, and asserts the storage, secret-path, ingress, and single-Pod network
 contracts in the rendered output. Unit and container tests separately prove
 that bootstrap and SFTP return fsGroup-style private-file modes to `0600`.
+The manifest test also rejects Pod-wide `fsGroup` and any backup mount in the
+volume-permissions init container. The SFTP test uses populated backup content
+to prove an ordinary restart takes the constant-time ownership path without
+recursively changing stored files. A deliberate GUI UID:GID change remains the
+only operation that recursively migrates backup ownership.
 
 `tests/test_kubernetes_live.sh` is the command-line runtime proof for a
 disposable kind cluster after the three local product images have been tagged
@@ -51,7 +56,10 @@ the Pod, and verifies private secrets and SFTP host keys return to `0600`.
 This throwaway kind proof establishes that the manifests are valid and the
 appliance boots. It does not verify real storage classes, Longhorn, NFS,
 shared-storage access modes, load balancers, or other cluster-specific
-behavior. Those remain deployment-environment validation responsibilities.
+behavior. It also does not exercise ownership startup cost on a populated
+backup store. That guarantee comes from the manifest ownership contract and
+the populated-store SFTP regression test. Those remain deployment-environment
+validation responsibilities.
 
 `tests/test_install_checks.sh` is a regression guard, not a gate for a
 reachable operator path. It exercises the retained depot-adoption scripts

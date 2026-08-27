@@ -75,16 +75,25 @@ its existing volume or claim at the new path. The on-volume directory layout
 does not change.
 
 The bootstrap init container also corrects known private secret files to mode
-`0600` on every start. Kubernetes `fsGroup` can add group-write bits while
-mounting a claim. SFTP performs the same correction for existing private host
-keys before starting sshd.
+`0600` on every start. Storage plugins or an earlier deployment using
+`fsGroup` can add group-write bits while mounting a claim. SFTP performs the
+same correction for existing private host keys before starting sshd.
 
 The admin console, sync, Redis, and Caddy runtime containers are forced to a
-non-root UID with read-only root filesystems. A short volume-permissions init
-container runs as root before the non-root bootstrap so existing claim content
-can be returned to the application UID. The SFTP supervisor retains its
-existing root runtime because it applies the GUI-selected UID:GID and updates
-the container account before sshd drops each session to that identity.
+non-root UID with read-only root filesystems. The Pod deliberately does not set
+`fsGroup`. A short volume-permissions init container runs as root before the
+non-root bootstrap, recursively corrects only the small config and secret
+trees, and sets the roots of the other application-owned volumes to UID:GID
+`1000:1000`. It does not mount or change `backup-store`.
+
+The SFTP supervisor is the sole owner of backup-volume permissions. It retains
+its existing root runtime because it applies the GUI-selected UID:GID and
+updates the container account before sshd drops each session to that identity.
+On startup it compares the backup root ownership with the selected identity. A
+matching root takes the constant-time path and does not walk populated backup
+content. A deliberate UID:GID change performs the one required recursive
+ownership migration. Because Kubernetes never applies Pod-wide `fsGroup` to
+the claim, ordinary restarts and upgrades cannot trigger ownership ping-pong.
 
 ## Storage sharing and placement
 
@@ -103,6 +112,11 @@ consumer relationships:
 | `secrets-state` | `bootstrap`, then `admin-ui` | `depot-sync`, `sftp-backup`, `redis` through scoped subPaths | Shared credentials with per-consumer exposure |
 | `caddy-config` | `depot-web` only | none | Caddy runtime state, single consumer |
 | `sftp-host-keys` | `sftp-backup` only | none | Stable SFTP identity, single consumer |
+
+`backup-store` ownership belongs only to the SFTP supervisor. It is excluded
+from the volume-permissions init container and from Pod-wide `fsGroup`
+processing, so a normal Pod recreation does not recursively re-own a populated
+backup tree.
 
 The multi-consumer mounts are required by the current product behavior. Some
 console read mounts, such as backup storage status and Caddy CA download, are
