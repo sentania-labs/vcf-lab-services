@@ -76,11 +76,13 @@ consumer sees only its own subdirectory. Do not add the stored prefix again to
 a path in a subPath-mounted container.
 
 Compose upgrades retain the existing `vcf-services-secrets` named volume and
-remount that same root at `/etc/vcf-services/secrets`. Existing owner, Redis,
-activation, SFTP, and session secrets are reused in place, with no copy and no
-regeneration. A custom deployment upgrading from `/run/secrets` should remount
-its existing volume or claim at the new path. The on-volume directory layout
-does not change.
+remount that same root at `/run/vcf-services-secrets`, outside the read-only
+configuration mount. Kubernetes continues to mount the claim at
+`/etc/vcf-services/secrets`. Existing owner, Redis, activation, SFTP, and
+session secrets are reused in place, with no copy or regeneration. A custom
+deployment upgrading from `/run/secrets` should remount its existing volume or
+claim at the platform's current path. The on-volume directory layout does not
+change.
 
 The bootstrap init container also corrects known private secret files to mode
 `0600` on every start. Storage plugins or an earlier deployment using
