@@ -28,8 +28,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$work_dir/config" "$work_dir/secrets"
 printf 'BACKUP_ENABLED="true"\nSFTP_UID_GID="1003:1003"\n' > "$work_dir/config/settings.env"
-printf 'sftp-test-password\n' > "$work_dir/secrets/password"
-chmod 0600 "$work_dir/secrets/password"
+printf 'sftp-test-password\n' > "$work_dir/secrets/sftp-password"
+chmod 0600 "$work_dir/secrets/sftp-password"
 printf 'backup payload\n' > "$work_dir/payload.txt"
 
 docker build -q -f "$project_dir/Dockerfile.sftp" -t "$image" "$project_dir" >/dev/null
@@ -39,6 +39,18 @@ docker run --rm --entrypoint /bin/sh -v "$backup_volume:/mnt/backup" "$image" \
 	-c 'chown 1003:1003 /mnt/backup'
 docker run --rm --user 1003:1003 --entrypoint /bin/sh -v "$backup_volume:/mnt/backup" "$image" \
 	-c 'mkdir -p /mnt/backup/sddc-manager /mnt/backup/nsx /mnt/backup/vcenter'
+docker run --rm --entrypoint /bin/sh -v "$backup_volume:/mnt/backup" "$image" \
+	-c 'printf "populated backup sentinel\n" > /mnt/backup/vcenter/restart-sentinel && \
+		chown 2222:2222 /mnt/backup/vcenter/restart-sentinel'
+docker run --rm --entrypoint /usr/local/bin/sftp-own-backup.sh \
+	-v "$backup_volume:/mnt/backup:rw" -v "$key_volume:/etc/ssh/keys:rw" \
+	"$image" 1003 1003 >/dev/null \
+	|| fail "ordinary restart ownership check failed"
+restart_sentinel_owner="$(docker run --rm --entrypoint /bin/sh \
+	-v "$backup_volume:/mnt/backup:ro" "$image" \
+	-c 'stat -c "%u:%g" /mnt/backup/vcenter/restart-sentinel')"
+[ "$restart_sentinel_owner" = "2222:2222" ] \
+	|| fail "ordinary restart recursively re-owned populated backup content (saw $restart_sentinel_owner)"
 
 snapshot_key_volume() {
 	docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:ro" "$image" -c '
@@ -56,7 +68,7 @@ docker run -d --name "$container" \
 	-v "$backup_volume:/mnt/backup:rw" \
 	-v "$key_volume:/etc/ssh/keys:rw" \
 	-v "$work_dir/config:/config:ro" \
-	-v "$work_dir/secrets:/run/sftp-secrets:ro" \
+	-v "$work_dir/secrets:/etc/vcf-services/secrets:ro" \
 	"$image" >/dev/null
 deadline=$((SECONDS + 15))
 while [ "$SECONDS" -lt "$deadline" ]; do
@@ -79,7 +91,7 @@ start_server() {
 		-v "$backup_volume:/mnt/backup:rw" \
 		-v "$key_volume:/etc/ssh/keys:rw" \
 		-v "$work_dir/config:/config:ro" \
-		-v "$work_dir/secrets:/run/sftp-secrets:ro" \
+		-v "$work_dir/secrets:/etc/vcf-services/secrets:ro" \
 		"$image" >/dev/null
 	deadline=$((SECONDS + 60))
 	while [ "$SECONDS" -lt "$deadline" ]; do
@@ -217,9 +229,15 @@ SSHPASS=sftp-test-password docker run --rm --network host --entrypoint /bin/sh \
 	|| fail "upload failed after the UID:GID change"
 
 docker rm -f "$container" >/dev/null
+docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:rw" "$image" \
+	-c 'chmod 0660 /keys/ssh_host_*_key'
 start_server || fail "recreated SFTP container did not become healthy"
 after_hash="$(docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:ro" "$image" \
 	-c 'sha256sum /keys/ssh_host_*_key | sort')"
 [ "$before_hash" = "$after_hash" ] || fail "host keys changed across container recreation"
+private_key_modes="$(docker run --rm --entrypoint /bin/sh -v "$key_volume:/keys:ro" "$image" \
+	-c 'stat -c "%a" /keys/ssh_host_ed25519_key /keys/ssh_host_rsa_key /keys/ssh_host_ecdsa_key')"
+[ "$private_key_modes" = $'600\n600\n600' ] \
+	|| fail "fsGroup-style bits were not removed from existing private host keys"
 
 echo "SFTP backup runtime tests passed"

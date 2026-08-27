@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vcf-services
+  namespace: vcf-services
+  labels:
+    app.kubernetes.io/name: vcf-services
+spec:
+  selector:
+    app.kubernetes.io/name: vcf-services
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP

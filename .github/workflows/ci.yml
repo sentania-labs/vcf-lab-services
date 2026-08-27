@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   checks:
-    name: Shell, tests, Compose, and images
+    name: Shell, tests, manifests, Compose, and images
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -34,6 +34,7 @@ jobs:
           ./tests/test_compose.sh
           ./tests/test_release.sh
           ./tests/test_sftp.sh
+          ./tests/test_kubernetes.sh
 
       - name: Validate Compose rendering
         run: docker compose config --quiet
@@ -79,3 +80,56 @@ jobs:
 
       - name: Run UI unit tests in the built image
         run: docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:ci python tests/test_ui.py
+
+  kubernetes-live:
+    name: Boot appliance in disposable kind cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install pinned kind
+        env:
+          KIND_VERSION: v0.32.0
+          KIND_LINUX_AMD64_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+        run: |
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/kind" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64"
+          echo "$KIND_LINUX_AMD64_SHA256  $RUNNER_TEMP/kind" | sha256sum --check
+          chmod 0755 "$RUNNER_TEMP/kind"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Build license-safe product images
+        env:
+          SOURCE_URL: https://github.com/${{ github.repository }}
+        run: |
+          version="sha-${GITHUB_SHA::12}"
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.ui \
+            --tag vcf-services-ui:ci .
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.sync-base \
+            --tag vcf-services-sync-base:ci .
+          docker build --pull \
+            --build-arg "VCF_SERVICES_VERSION=$version" \
+            --build-arg "VCF_SERVICES_REVISION=$GITHUB_SHA" \
+            --build-arg "VCF_SERVICES_SOURCE=$SOURCE_URL" \
+            --file Dockerfile.sftp \
+            --tag vcf-services-sftp:ci .
+
+      - name: Run repository Kubernetes live proof
+        env:
+          VCF_KUBERNETES_REQUIRE_RESTART_EVIDENCE: "true"
+        run: ./tests/test_kubernetes_live.sh
+
+      - name: Remove temporary kind binary
+        if: always()
+        run: rm -f "$RUNNER_TEMP/kind"

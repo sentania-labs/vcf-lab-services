@@ -32,7 +32,9 @@ grep -q -- '- "2222:22"' docker-compose.yml || fail "SFTP must listen on host po
 grep -q 'container_name: vcf-services-bootstrap' docker-compose.yml || fail "bootstrap service missing"
 grep -q 'condition: service_completed_successfully' docker-compose.yml || fail "services do not wait for bootstrap"
 grep -q 'config_state:/config:rw' docker-compose.yml || fail "console lacks writable file-backed config"
-grep -q 'secrets_state:/run/secrets:rw' docker-compose.yml || fail "console lacks writable protected secrets"
+grep -q 'secrets_state:/etc/vcf-services/secrets:rw' docker-compose.yml \
+	|| fail "console lacks writable protected secrets at the safe path"
+! grep -q '/run/secrets' docker-compose.yml || fail "Compose still uses the platform-reserved secrets path"
 grep -q 'requirepass' ui/bootstrap.py || fail "bootstrap does not protect Redis"
 ! grep -q 'requirepass' docker-compose.yml || fail "Redis password material appears in Compose"
 grep -q '.vcf-services-version' ui/bootstrap.py || fail "bootstrap does not mark config versions"
@@ -50,9 +52,10 @@ grep -q 'name: vcf-services-vcfdt-state' docker-compose.yml || fail "machine ID 
 grep -q 'name: vcf-services-sftp-host-keys' docker-compose.yml || fail "SFTP host-key volume renamed"
 
 grep -q 'tls internal' caddy/Caddyfile || fail "first boot does not provide internal TLS"
-grep -q 'ask http://admin-ui:8080/tls/allow' caddy/Caddyfile \
+grep -q 'ask http://{$ADMIN_UI_UPSTREAM:admin-ui:8080}/tls/allow' caddy/Caddyfile \
 	|| fail "on-demand internal TLS has no issuance guard"
-grep -q 'forward_auth admin-ui:8080' caddy/Caddyfile || fail "depot requests do not use live console credentials"
+grep -q 'forward_auth {$ADMIN_UI_UPSTREAM:admin-ui:8080}' caddy/Caddyfile \
+	|| fail "depot requests do not use the configurable console upstream"
 grep -q 'handle_path /admin/\*' caddy/Caddyfile || fail "admin console route missing"
 grep -q 'handle /umds-patch-store/\*' caddy/Caddyfile || fail "open UMDS route missing"
 
@@ -96,4 +99,12 @@ for name in 'vcf-services:sync:requests' 'vcf-services:sync:status' \
 done
 
 docker compose config --quiet
+single_pod_render="$(REDIS_HOST=127.0.0.1 ADMIN_UI_UPSTREAM=127.0.0.1:8080 docker compose config)"
+[ "$(grep -c 'REDIS_HOST: 127.0.0.1' <<< "$single_pod_render")" -eq 2 ] \
+	|| fail "Redis host environment override did not reach both consumers"
+grep -q 'ADMIN_UI_UPSTREAM: 127.0.0.1:8080' <<< "$single_pod_render" \
+	|| fail "Caddy upstream environment override did not render"
+docker run --rm -e ADMIN_UI_UPSTREAM=127.0.0.1:8080 \
+	-v "$project_dir/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+	caddy:2.10.0-alpine caddy validate --config /etc/caddy/Caddyfile >/dev/null
 echo "compose and architecture contract tests passed"

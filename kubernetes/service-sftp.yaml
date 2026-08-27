@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vcf-services-sftp
+  namespace: vcf-services
+  labels:
+    app.kubernetes.io/name: vcf-services
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: vcf-services
+  ports:
+    - name: sftp
+      port: 22
+      targetPort: sftp
+      protocol: TCP

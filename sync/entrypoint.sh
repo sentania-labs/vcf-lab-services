@@ -3,14 +3,14 @@ set -euo pipefail
 
 settings_file="${SETTINGS_FILE:-/etc/vcf-services/settings.env}"
 STATE_DIR="${STATE_DIR:-/state}"
-AUTH_FILE="${AUTH_FILE:-/run/secrets/activation-code.txt}"
+AUTH_FILE="${AUTH_FILE:-/etc/vcf-services/secrets/activation-code.txt}"
 TOOL_ROOT="${TOOL_ROOT:-/opt/vcfdt}"
 VCFDT_TOOL_STORE="${VCFDT_TOOL_STORE:-}"
 SYNC_COMMAND="${SYNC_COMMAND:-/usr/local/bin/sync.sh}"
 POLL_SECONDS="${POLL_SECONDS:-10}"
 REDIS_HOST="${REDIS_HOST:-}"
 REDIS_PORT="${REDIS_PORT:-6379}"
-REDIS_PASSWORD_FILE="${REDIS_PASSWORD_FILE:-/run/secrets/redis/password}"
+REDIS_PASSWORD_FILE="${REDIS_PASSWORD_FILE:-/etc/vcf-services/secrets/redis-password}"
 VERSION_STATUS_FILE="${VERSION_STATUS_FILE:-/etc/vcf-services/.vcf-services-version-status.json}"
 
 REQUEST_QUEUE="vcf-services:sync:requests"

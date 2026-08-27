@@ -8,10 +8,10 @@ services:
     command: ["python", "/app/bootstrap.py"]
     environment:
       CONFIG_DIR: /config
-      SECRETS_DIR: /secrets
+      SECRETS_DIR: /etc/vcf-services/secrets
     volumes:
       - config_state:/config:rw
-      - secrets_state:/secrets:rw
+      - secrets_state:/etc/vcf-services/secrets:rw
     networks:
       - control
 
@@ -20,6 +20,8 @@ services:
     image: caddy:2.10.0-alpine
     restart: unless-stopped
     init: true
+    environment:
+      ADMIN_UI_UPSTREAM: ${ADMIN_UI_UPSTREAM:-admin-ui:8080}
     ports:
       - "443:443"
     volumes:
@@ -47,10 +49,10 @@ services:
       SETTINGS_FILE: /etc/vcf-services/settings.env
       STATE_DIR: /state
       DEPOT_DIR: /depot
-      AUTH_FILE: /run/secrets/activation-code.txt
-      REDIS_HOST: redis
+      AUTH_FILE: /etc/vcf-services/secrets/activation-code.txt
+      REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: "6379"
-      REDIS_PASSWORD_FILE: /run/secrets/redis-password
+      REDIS_PASSWORD_FILE: /etc/vcf-services/secrets/redis-password
       TOOL_ROOT: /opt/vcfdt/current
       VCFDT_TOOL_STORE: /opt/vcfdt
     volumes:
@@ -61,7 +63,7 @@ services:
       - config_state:/etc/vcf-services:ro
       - type: volume
         source: secrets_state
-        target: /run/secrets
+        target: /etc/vcf-services/secrets
         read_only: true
         volume:
           subpath: sync
@@ -84,7 +86,7 @@ services:
     init: true
     environment:
       SETTINGS_FILE: /config/settings.env
-      SFTP_PASSWORD_FILE: /run/secrets/sftp-password
+      SFTP_PASSWORD_FILE: /etc/vcf-services/secrets/sftp-password
     ports:
       - "2222:22"
     volumes:
@@ -93,7 +95,7 @@ services:
       - config_state:/config:ro
       - type: volume
         source: secrets_state
-        target: /run/secrets
+        target: /etc/vcf-services/secrets
         read_only: true
         volume:
           subpath: sftp
@@ -122,14 +124,14 @@ services:
       DEPOT_DIR: /depot
       STATE_DIR: /state
       SETTINGS_FILE: /config/settings.env
-      REDIS_HOST: redis
+      REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: "6379"
-      REDIS_PASSWORD_FILE: /run/secrets/ui/redis-password
+      REDIS_PASSWORD_FILE: /etc/vcf-services/secrets/ui/redis-password
       VCFDT_STORE: /opt/vcfdt
-      AUTH_FILE: /run/secrets/ui/auth.json
-      ACTIVATION_CODE_FILE: /run/secrets/sync/activation-code.txt
-      SFTP_PASSWORD_FILE: /run/secrets/sftp/sftp-password
-      FLASK_SECRET_FILE: /run/secrets/ui/flask-secret
+      AUTH_FILE: /etc/vcf-services/secrets/ui/auth.json
+      ACTIVATION_CODE_FILE: /etc/vcf-services/secrets/sync/activation-code.txt
+      SFTP_PASSWORD_FILE: /etc/vcf-services/secrets/sftp/sftp-password
+      FLASK_SECRET_FILE: /etc/vcf-services/secrets/ui/flask-secret
     volumes:
       - depot_store:/depot:ro
       - backup_store:/mnt/backup:ro
@@ -138,7 +140,7 @@ services:
       - vcfdt_state:/root/.local/share/vmware/vdt:rw
       - sync_state:/state:ro
       - config_state:/config:rw
-      - secrets_state:/run/secrets:rw
+      - secrets_state:/etc/vcf-services/secrets:rw
     networks:
       - control
     healthcheck:

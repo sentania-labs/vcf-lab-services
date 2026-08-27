@@ -6,8 +6,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `tests/make-stub-vcfdt.sh` for local and CI validation.
 - Run `tests/test_sync.sh`, `tests/test_scheduler.sh`,
   `tests/test_install_checks.sh`, `tests/test_compose.sh`,
-  `tests/test_release.sh`, `tests/test_sftp.sh`, the UI unit test documented in
-  `docs/validation.md`, and the live Range check before release.
+  `tests/test_release.sh`, `tests/test_sftp.sh`, `tests/test_kubernetes.sh`, the
+  UI unit test documented in `docs/validation.md`, and the live Range check
+  before release. Use `tests/test_kubernetes_live.sh` for a real cluster proof.
   `tests/test_install_checks.sh` is a regression guard for the retained
   depot-adoption scripts in `scripts/`, not a gate for a reachable operator
   path: the GUI-first prototype removed their installer entry point, and
@@ -21,6 +22,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   persistent named volumes created by direct Compose startup. Never use
   `docker compose down -v` during normal operations. The console mounts the
   tool read-write and the sync service mounts it read-only.
+- Keep the single-Pod Kubernetes path and its RWO storage, scoped secrets, and
+  ingress contract aligned with `docs/kubernetes.md`. CI validates it with
+  the render, schema, and contract assertions in `tests/test_kubernetes.sh`.
 - The admin console and sync service exchange jobs only over the internal
   password-protected Redis bus defined in `docs/redis-contract.md`. No
   container mounts the Docker socket and macvlan networking is out of scope.
