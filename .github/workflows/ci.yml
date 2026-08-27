@@ -81,6 +81,9 @@ jobs:
       - name: Run UI unit tests in the built image
         run: docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:ci python tests/test_ui.py
 
+      - name: Boot appliance with Compose
+        run: ./tests/test_compose_boot.sh
+
   kubernetes-live:
     name: Boot appliance in disposable kind cluster
     runs-on: ubuntu-latest

@@ -14,14 +14,17 @@ product_files=(docker-compose.yml compose.sh install.sh caddy/Caddyfile Dockerfi
 ! grep -Eq 'STORAGE_MODE|NFS_|driver_opts|DEPOT_VOLUME_(TYPE|OPTIONS|DEVICE)|BACKUP_VOLUME_(TYPE|OPTIONS|DEVICE)' \
 	-- "${product_files[@]}" || fail "product-managed storage configuration remains"
 
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.3' docker-compose.yml \
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.4' docker-compose.yml \
 	|| fail "UI does not default to the release image"
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.3' docker-compose.yml \
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.4' docker-compose.yml \
 	|| fail "sync does not default to the release image"
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.3' docker-compose.yml \
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.4' docker-compose.yml \
 	|| fail "SFTP does not default to the release image"
-./scripts/verify-compose-version.sh v0.2.3 >/dev/null \
-	|| fail "Compose defaults do not match v0.2.3"
+./scripts/verify-compose-version.sh v0.2.4 >/dev/null \
+	|| fail "Compose defaults do not match v0.2.4"
+if ./scripts/verify-compose-version.sh v0.2.3 >/dev/null 2>&1; then
+	fail "release validation accepted the immutable v0.2.3 tag"
+fi
 ! grep -q '^ *build:' docker-compose.yml || fail "Compose still builds a product image"
 
 published_services="$(awk '/^  [A-Za-z0-9_-]+:$/ {service=$1} /^    ports:/ {print service}' docker-compose.yml)"
@@ -32,9 +35,13 @@ grep -q -- '- "2222:22"' docker-compose.yml || fail "SFTP must listen on host po
 grep -q 'container_name: vcf-services-bootstrap' docker-compose.yml || fail "bootstrap service missing"
 grep -q 'condition: service_completed_successfully' docker-compose.yml || fail "services do not wait for bootstrap"
 grep -q 'config_state:/config:rw' docker-compose.yml || fail "console lacks writable file-backed config"
-grep -q 'secrets_state:/etc/vcf-services/secrets:rw' docker-compose.yml \
+grep -q 'secrets_state:/run/vcf-services-secrets:rw' docker-compose.yml \
 	|| fail "console lacks writable protected secrets at the safe path"
 ! grep -q '/run/secrets' docker-compose.yml || fail "Compose still uses the platform-reserved secrets path"
+! grep -q '/etc/vcf-services/secrets' docker-compose.yml \
+	|| fail "Compose secrets remain nested beneath the sync config mount"
+[ "$(grep -c '/run/vcf-services-secrets' docker-compose.yml)" -eq 13 ] \
+	|| fail "not every Compose secret reference uses the non-nested mount path"
 grep -q 'requirepass' ui/bootstrap.py || fail "bootstrap does not protect Redis"
 ! grep -q 'requirepass' docker-compose.yml || fail "Redis password material appears in Compose"
 grep -q '.vcf-services-version' ui/bootstrap.py || fail "bootstrap does not mark config versions"

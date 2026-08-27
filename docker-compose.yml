@@ -3,15 +3,15 @@ name: vcf-services
 services:
   bootstrap:
     container_name: vcf-services-bootstrap
-    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.3}
+    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.4}
     restart: "no"
     command: ["python", "/app/bootstrap.py"]
     environment:
       CONFIG_DIR: /config
-      SECRETS_DIR: /etc/vcf-services/secrets
+      SECRETS_DIR: /run/vcf-services-secrets
     volumes:
       - config_state:/config:rw
-      - secrets_state:/etc/vcf-services/secrets:rw
+      - secrets_state:/run/vcf-services-secrets:rw
     networks:
       - control
 
@@ -43,16 +43,16 @@ services:
 
   depot-sync:
     container_name: vcf-services-sync
-    image: ${VCF_SERVICES_SYNC_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.3}
+    image: ${VCF_SERVICES_SYNC_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.4}
     restart: unless-stopped
     environment:
       SETTINGS_FILE: /etc/vcf-services/settings.env
       STATE_DIR: /state
       DEPOT_DIR: /depot
-      AUTH_FILE: /etc/vcf-services/secrets/activation-code.txt
+      AUTH_FILE: /run/vcf-services-secrets/activation-code.txt
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: "6379"
-      REDIS_PASSWORD_FILE: /etc/vcf-services/secrets/redis-password
+      REDIS_PASSWORD_FILE: /run/vcf-services-secrets/redis-password
       TOOL_ROOT: /opt/vcfdt/current
       VCFDT_TOOL_STORE: /opt/vcfdt
     volumes:
@@ -63,7 +63,7 @@ services:
       - config_state:/etc/vcf-services:ro
       - type: volume
         source: secrets_state
-        target: /etc/vcf-services/secrets
+        target: /run/vcf-services-secrets
         read_only: true
         volume:
           subpath: sync
@@ -81,12 +81,12 @@ services:
 
   sftp-backup:
     container_name: vcf-services-sftp
-    image: ${VCF_SERVICES_SFTP_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.3}
+    image: ${VCF_SERVICES_SFTP_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.4}
     restart: unless-stopped
     init: true
     environment:
       SETTINGS_FILE: /config/settings.env
-      SFTP_PASSWORD_FILE: /etc/vcf-services/secrets/sftp-password
+      SFTP_PASSWORD_FILE: /run/vcf-services-secrets/sftp-password
     ports:
       - "2222:22"
     volumes:
@@ -95,7 +95,7 @@ services:
       - config_state:/config:ro
       - type: volume
         source: secrets_state
-        target: /etc/vcf-services/secrets
+        target: /run/vcf-services-secrets
         read_only: true
         volume:
           subpath: sftp
@@ -113,7 +113,7 @@ services:
 
   admin-ui:
     container_name: vcf-services-ui
-    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.3}
+    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.4}
     restart: unless-stopped
     depends_on:
       redis:
@@ -126,12 +126,12 @@ services:
       SETTINGS_FILE: /config/settings.env
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: "6379"
-      REDIS_PASSWORD_FILE: /etc/vcf-services/secrets/ui/redis-password
+      REDIS_PASSWORD_FILE: /run/vcf-services-secrets/ui/redis-password
       VCFDT_STORE: /opt/vcfdt
-      AUTH_FILE: /etc/vcf-services/secrets/ui/auth.json
-      ACTIVATION_CODE_FILE: /etc/vcf-services/secrets/sync/activation-code.txt
-      SFTP_PASSWORD_FILE: /etc/vcf-services/secrets/sftp/sftp-password
-      FLASK_SECRET_FILE: /etc/vcf-services/secrets/ui/flask-secret
+      AUTH_FILE: /run/vcf-services-secrets/ui/auth.json
+      ACTIVATION_CODE_FILE: /run/vcf-services-secrets/sync/activation-code.txt
+      SFTP_PASSWORD_FILE: /run/vcf-services-secrets/sftp/sftp-password
+      FLASK_SECRET_FILE: /run/vcf-services-secrets/ui/flask-secret
     volumes:
       - depot_store:/depot:ro
       - backup_store:/mnt/backup:ro
@@ -140,7 +140,7 @@ services:
       - vcfdt_state:/root/.local/share/vmware/vdt:rw
       - sync_state:/state:ro
       - config_state:/config:rw
-      - secrets_state:/etc/vcf-services/secrets:rw
+      - secrets_state:/run/vcf-services-secrets:rw
     networks:
       - control
     healthcheck:
