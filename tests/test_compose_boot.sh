@@ -17,6 +17,24 @@ for image in "$VCF_SERVICES_UI_IMAGE" "$VCF_SERVICES_SYNC_IMAGE" "$VCF_SERVICES_
 done
 
 cat > "$override_file" <<EOF
+name: vcf-services-compose-test-${test_id}
+
+services:
+  bootstrap:
+    container_name: vcf-services-compose-test-${test_id}-bootstrap
+  depot-web:
+    container_name: vcf-services-compose-test-${test_id}-depot-web
+    ports: !override []
+  depot-sync:
+    container_name: vcf-services-compose-test-${test_id}-sync
+  sftp-backup:
+    container_name: vcf-services-compose-test-${test_id}-sftp
+    ports: !override []
+  admin-ui:
+    container_name: vcf-services-compose-test-${test_id}-ui
+  redis:
+    container_name: vcf-services-compose-test-${test_id}-redis
+
 volumes:
   depot_store:
     name: vcf-services-compose-test-${test_id}-depot
