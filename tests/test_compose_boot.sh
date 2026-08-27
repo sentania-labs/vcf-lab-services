@@ -44,7 +44,7 @@ compose=(docker compose -f "$project_dir/docker-compose.yml" -f "$override_file"
 started=false
 cleanup() {
 	if [ "$started" = true ]; then
-		"${compose[@]}" stop >/dev/null 2>&1 || true
+		"${compose[@]}" down --volumes >/dev/null 2>&1 || true
 	fi
 	rm -rf "$work_dir"
 }
