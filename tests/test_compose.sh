@@ -14,14 +14,14 @@ product_files=(docker-compose.yml compose.sh install.sh caddy/Caddyfile Dockerfi
 ! grep -Eq 'STORAGE_MODE|NFS_|driver_opts|DEPOT_VOLUME_(TYPE|OPTIONS|DEVICE)|BACKUP_VOLUME_(TYPE|OPTIONS|DEVICE)' \
 	-- "${product_files[@]}" || fail "product-managed storage configuration remains"
 
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.2' docker-compose.yml \
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.3' docker-compose.yml \
 	|| fail "UI does not default to the release image"
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.2' docker-compose.yml \
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.3' docker-compose.yml \
 	|| fail "sync does not default to the release image"
-grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.2' docker-compose.yml \
+grep -q 'ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.3' docker-compose.yml \
 	|| fail "SFTP does not default to the release image"
-./scripts/verify-compose-version.sh v0.2.2 >/dev/null \
-	|| fail "Compose defaults do not match v0.2.2"
+./scripts/verify-compose-version.sh v0.2.3 >/dev/null \
+	|| fail "Compose defaults do not match v0.2.3"
 ! grep -q '^ *build:' docker-compose.yml || fail "Compose still builds a product image"
 
 published_services="$(awk '/^  [A-Za-z0-9_-]+:$/ {service=$1} /^    ports:/ {print service}' docker-compose.yml)"
