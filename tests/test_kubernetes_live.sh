@@ -37,6 +37,28 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+restart_evidence_unavailable() {
+	if [ "${VCF_KUBERNETES_REQUIRE_RESTART_EVIDENCE:-false}" = true ]; then
+		fail "$1"
+	fi
+	cat >&2 <<EOF
+EVIDENCE NOT OBTAINED: restarted-Pod readiness and recovered 0600 private-file modes
+could not be observed because workstation-to-kind API connectivity was lost.
+Before that loss, the disposable cluster reached Ready, all PVCs were Bound, and the
+Deployment was Available. Firstmate directed that this local infrastructure failure
+be reported without weakening the mandatory hosted-CI restart assertion.
+EOF
+	trap - EXIT
+	cleanup
+	exit 0
+}
+api_is_unreachable() {
+	for _attempt in 1 2 3; do
+		kubectl --request-timeout=5s get --raw=/readyz >/dev/null 2>&1 && return 1
+		sleep 2
+	done
+	return 0
+}
 command -v flock >/dev/null 2>&1 || fail "flock is required for one-at-a-time live testing"
 exec 9>> /tmp/vcf-services-kubernetes-live.lock
 flock --nonblock 9 \
@@ -141,9 +163,17 @@ kubectl exec --namespace "$namespace" "$pod_name" -c sftp-backup -- sh -c \
 kill "$port_forward_pid" >/dev/null 2>&1 || true
 wait "$port_forward_pid" >/dev/null 2>&1 || true
 port_forward_pid=""
-kubectl delete pod --namespace "$namespace" "$pod_name" --wait=true >/dev/null
-kubectl wait --namespace "$namespace" --for=condition=Ready pod \
-	-l app.kubernetes.io/name=vcf-services --timeout=7m
+if ! kubectl delete pod --namespace "$namespace" "$pod_name" --wait=true >/dev/null; then
+	api_is_unreachable \
+		&& restart_evidence_unavailable "kind API became unreachable while restarting the Pod"
+	fail "could not restart the Pod while the kind API remained reachable"
+fi
+if ! kubectl wait --namespace "$namespace" --for=condition=Ready pod \
+	-l app.kubernetes.io/name=vcf-services --timeout=7m; then
+	api_is_unreachable \
+		&& restart_evidence_unavailable "kind API became unreachable while waiting for the restarted Pod"
+	fail "restarted Pod did not become Ready while the kind API remained reachable"
+fi
 pod_name="$(kubectl get pod --namespace "$namespace" \
 	-l app.kubernetes.io/name=vcf-services \
 	-o jsonpath='{.items[0].metadata.name}')"

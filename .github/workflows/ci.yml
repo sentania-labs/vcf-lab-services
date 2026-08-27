@@ -126,6 +126,8 @@ jobs:
             --tag vcf-services-sftp:ci .
 
       - name: Run repository Kubernetes live proof
+        env:
+          VCF_KUBERNETES_REQUIRE_RESTART_EVIDENCE: "true"
         run: ./tests/test_kubernetes_live.sh
 
       - name: Remove temporary kind binary
