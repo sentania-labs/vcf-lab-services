@@ -26,7 +26,9 @@ The UI test covers first-person ownership, login, live depot authentication,
 licensed archive staging, persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 setup completion, shared password replacement, sync dispatch, partial settings
-merges over the stored document, advisory tool version and Software Depot ID
+merges over the stored document, settings saved during a running sync being
+persisted and flagged for the next run while the tool-backed endpoints stay
+blocked, the tabbed console rendering every control, advisory tool version and Software Depot ID
 probes that preserve the last verified ID, and config version marker
 quarantine. The Compose test enforces release-pinned published-image defaults,
 first-boot state initialization, internal TLS, the platform-provided storage

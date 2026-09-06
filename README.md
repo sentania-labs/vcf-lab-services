@@ -41,9 +41,17 @@ The console then walks through:
    backup service state, SFTP identity, and download endpoints.
 5. Running a sync and inspecting live state, logs, and available versions.
 
+The console is organised into Setup, Sync, Settings, Backup, and Logs tabs.
 Every operator setting in this prototype remains editable in the console. The
 settings file is the storage contract inside the `vcf-services-config` volume,
 not an operator editing interface.
+
+Settings can be saved while a sync is running. The run in progress keeps the
+values it read when it started, and the console marks the saved values as
+applying to the next run. The download endpoint and token URL are the
+exception: the running sync reads them from the mounted tool, so those two wait
+until the run finishes. Tool upload and starting a sync keep their existing
+running-sync guards.
 
 ## Storage ownership
 

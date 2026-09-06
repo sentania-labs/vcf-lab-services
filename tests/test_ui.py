@@ -8,12 +8,59 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest import mock
+
+from jinja2 import FileSystemLoader
 
 
 APP_PATH = Path(__file__).parents[1] / "ui" / "app.py"
 BOOTSTRAP_PATH = Path(__file__).parents[1] / "ui" / "bootstrap.py"
+
+
+VOID_TAGS = {"input", "br", "hr", "img", "meta", "link", "source"}
+CONTROL_TAGS = {"input", "select", "button", "textarea", "a"}
+
+
+class ConsoleTabParser(HTMLParser):
+    """Collect the tab panels of the console and the controls inside each one."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.panels = []
+        self.controls = {}
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        panel = attributes.get("id")
+        if panel and panel.startswith("tab-"):
+            self.panels.append(panel)
+            self.controls.setdefault(panel, [])
+        if tag not in VOID_TAGS:
+            self.stack.append(panel if panel and panel.startswith("tab-") else None)
+        if tag in CONTROL_TAGS and attributes.get("id"):
+            current = next(
+                (name for name in reversed(self.stack) if name is not None), None
+            )
+            if current:
+                self.controls[current].append(attributes["id"])
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in VOID_TAGS:
+            self.stack.pop()
+
+    def handle_endtag(self, tag):
+        if tag not in VOID_TAGS and self.stack:
+            self.stack.pop()
+
+
+def parse_console_tabs(markup):
+    parser = ConsoleTabParser()
+    parser.feed(markup)
+    return parser.panels, parser.controls
 
 
 class UiApiTests(unittest.TestCase):
@@ -59,6 +106,7 @@ class UiApiTests(unittest.TestCase):
             "FLASK_SECRET_FILE": str(self.secrets / "flask-secret"),
             "VCFDT_STORE": str(self.tool_store),
             "SOFTWARE_DEPOT_ID_FILE": str(root / "software-depot-id"),
+            "SETTINGS_PENDING_FILE": str(root / ".settings-pending.json"),
             "VERSION_MARKER_FILE": str(root / ".vcf-services-version"),
             "VERSION_STATUS_FILE": str(root / ".vcf-services-version-status.json"),
             "VCF_SERVICES_VERSION": "v0.2.1",
@@ -69,6 +117,11 @@ class UiApiTests(unittest.TestCase):
             spec = importlib.util.spec_from_file_location("vcf_services_ui", APP_PATH)
             self.module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(self.module)
+        # The module is loaded by path, so Flask resolves its root to the
+        # working directory. Point the loader at the real template folder.
+        self.module.app.jinja_loader = FileSystemLoader(
+            str(APP_PATH.parent / "templates")
+        )
         self.client = self.module.app.test_client()
 
     def tearDown(self):
@@ -415,6 +468,107 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         response = self.post("/api/setup/complete")
         self.assertEqual(response.status_code, 200)
         self.assertIn('SETUP_COMPLETE="true"', self.settings.read_text())
+
+    def test_settings_save_during_a_running_sync_applies_to_the_next_run(self):
+        self.claim()
+        self.write_state()
+        self.upload_tool()
+        self.write_state(running=True, armed=True, startedAt="2026-09-06T10:00:00Z")
+        body = self.valid_settings()
+        body["depotEndpoint"] = "dl.broadcom.com"
+        body["tokenUrl"] = "https://eapi.broadcom.com/vcf/generateToken"
+        response = self.post("/api/settings", json=body)
+        self.assertEqual(response.status_code, 200)
+        saved = response.get_json()
+        self.assertTrue(saved["appliesToNextRun"])
+        self.assertIn("cronSchedule", saved["pendingFields"])
+        self.assertEqual(saved["cronSchedule"], "0 2 * * 6")
+        settings_text = self.settings.read_text()
+        self.assertIn('CRON_SCHEDULE="0 2 * * 6"', settings_text)
+        self.assertIn('VKR_OS="photon"', settings_text)
+        properties = (
+            self.tool_store / "current" / "conf" / "application-prodv2.properties"
+        ).read_text()
+        self.assertIn("lcm.depot.adapter.host=dl.broadcom.com", properties)
+
+        status = self.get("/api/status").get_json()
+        self.assertTrue(status["appliesToNextRun"])
+        self.assertIn("cronSchedule", status["pendingFields"])
+
+        blocked = self.post(
+            "/api/settings", json={"depotEndpoint": "downloads.example.test"}
+        )
+        self.assertEqual(blocked.status_code, 409)
+        self.assertIn("depotEndpoint", blocked.get_json()["error"])
+        self.assertIn(
+            'DEPOT_ENDPOINT="dl.broadcom.com"', self.settings.read_text()
+        )
+
+        self.write_state(running=False, armed=True)
+        idle = self.get("/api/settings").get_json()
+        self.assertFalse(idle["appliesToNextRun"])
+        self.assertEqual(idle["pendingFields"], [])
+        applied = self.post(
+            "/api/settings", json={"depotEndpoint": "downloads.example.test"}
+        )
+        self.assertEqual(applied.status_code, 200)
+        self.assertFalse(applied.get_json()["appliesToNextRun"])
+        properties = (
+            self.tool_store / "current" / "conf" / "application-prodv2.properties"
+        ).read_text()
+        self.assertIn("lcm.depot.adapter.host=downloads.example.test", properties)
+
+    def test_console_tabs_render_every_control(self):
+        self.claim()
+        page = self.get("/")
+        self.assertEqual(page.status_code, 200)
+        panels, controls = parse_console_tabs(page.get_data(as_text=True))
+        self.assertEqual(
+            panels,
+            ["tab-setup", "tab-sync", "tab-settings", "tab-backup", "tab-logs"],
+        )
+        expected = {
+            "tab-setup": {
+                "vcfdt-archive",
+                "vcfdt-upload",
+                "activation-code",
+                "save-activation",
+                "storage-confirmed",
+                "finish-setup",
+                "download-ca",
+                "current-password",
+                "new-password",
+                "save-password",
+            },
+            "tab-sync": {"sync-btn", "refresh-remote"},
+            "tab-settings": {
+                "vcf-version",
+                "sku",
+                "cron",
+                "timezone",
+                "ceip",
+                "esx-mode",
+                "log-retention",
+                "depot-endpoint",
+                "token-url",
+                "vkr-match",
+                "vkr-os",
+                "save-settings",
+            },
+            "tab-backup": {"backup-enabled", "uidgid", "save-backup"},
+            "tab-logs": set(),
+        }
+        self.assertEqual({name: set(ids) for name, ids in controls.items()}, expected)
+        for name, ids in controls.items():
+            self.assertEqual(len(ids), len(set(ids)), f"duplicate ids in {name}")
+        body = page.get_data(as_text=True)
+        for target in self.module.VALID_TARGETS:
+            self.assertIn(f'class="run-target" value="{target}"', body)
+            self.assertIn(f'class="settings-target" value="{target}"', body)
+        self.assertIn('id="settings-pending"', body)
+        self.assertIn('id="backup-pending"', body)
+        self.assertIn('id="log"', body)
+        self.assertIn('id="versions"', body)
 
     def test_concurrent_settings_writes_do_not_drop_updates(self):
         keys = [f"CONCURRENT_TEST_KEY_{index}" for index in range(8)]

@@ -45,6 +45,9 @@ VERSION_STATUS_FILE = Path(
 SOFTWARE_DEPOT_ID_FILE = Path(
     os.environ.get("SOFTWARE_DEPOT_ID_FILE", "/config/software-depot-id")
 )
+SETTINGS_PENDING_FILE = Path(
+    os.environ.get("SETTINGS_PENDING_FILE", "/config/.settings-pending.json")
+)
 CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
 SECRETS_ROOT = "/etc/vcf-services/secrets"
@@ -73,6 +76,28 @@ STATUS_KEY = "vcf-services:sync:status"
 LOG_KEY = "vcf-services:sync:log"
 VERSIONS_KEY = "vcf-services:sync:versions"
 VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr"]
+# settings.env keys the console owns, paired with their JSON field names.
+SETTING_ENV_FIELDS = {
+    "BACKUP_ENABLED": "backupEnabled",
+    "CEIP": "ceip",
+    "CRON_SCHEDULE": "cronSchedule",
+    "DEPOT_ENDPOINT": "depotEndpoint",
+    "ESX_MODE": "esxMode",
+    "LOG_RETENTION": "logRetention",
+    "SFTP_UID_GID": "uidGid",
+    "SKU": "sku",
+    "STORAGE_CONFIRMED": "storageConfirmed",
+    "SYNC_TARGETS": "syncTargets",
+    "TOKEN_URL": "tokenUrl",
+    "TZ": "timezone",
+    "VCF_VERSION": "vcfVersion",
+    "VKR_MATCH": "vkrMatch",
+    "VKR_OS": "vkrOs",
+}
+# The download tool re-reads its own properties file while a run is in flight,
+# so these two are the only settings a running sync can still observe. Every
+# other setting is snapshotted by sync.sh when the run starts.
+LIVE_TOOL_FIELDS = {"depotEndpoint", "tokenUrl"}
 BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
 TOOL_VERSION_VALUE = (
     r"v?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?"
@@ -678,6 +703,68 @@ def _int_setting(value, fallback):
         return fallback
 
 
+def _running_sync_id(state):
+    """Identify the in-flight run, or None when no sync is running."""
+    if not state.get("running", False):
+        return None
+    return str(state.get("startedAt") or "unknown-run")
+
+
+def _record_pending_settings(fields, run_id):
+    known = set(fields)
+    existing = _pending_settings({"running": True, "startedAt": run_id})
+    known.update(existing["pendingFields"])
+    document = {"syncStartedAt": run_id, "fields": sorted(known)}
+    SETTINGS_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        prefix=f"{SETTINGS_PENDING_FILE.name}.", dir=SETTINGS_PENDING_FILE.parent
+    )
+    try:
+        os.fchmod(handle, 0o640)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(document) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, SETTINGS_PENDING_FILE)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _live_tool_conflict(fields):
+    return (
+        "the running sync is still reading these from the mounted tool: "
+        + ", ".join(fields)
+        + ". Change them once the run finishes; every other setting saves now."
+    )
+
+
+def _clear_pending_settings():
+    try:
+        SETTINGS_PENDING_FILE.unlink()
+    except OSError:
+        pass
+
+
+def _pending_settings(state=None):
+    """Report settings saved during the run that is still in flight."""
+    state = _state() if state is None else state
+    run_id = _running_sync_id(state)
+    try:
+        document = json.loads(SETTINGS_PENDING_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        document = None
+    if not isinstance(document, dict) or run_id is None:
+        return {"appliesToNextRun": False, "pendingFields": []}
+    if document.get("syncStartedAt") != run_id:
+        return {"appliesToNextRun": False, "pendingFields": []}
+    fields = [field for field in document.get("fields", []) if isinstance(field, str)]
+    return {"appliesToNextRun": bool(fields), "pendingFields": fields}
+
+
 def _activation_configured():
     try:
         return bool(ACTIVATION_CODE_FILE.read_text().strip())
@@ -981,6 +1068,7 @@ def status():
             "vcfdtInstalled": tool_info["installed"],
             "vcfdtVersion": tool_info["version"],
             "vcfdtUploadedAt": tool_info.get("uploadedAt"),
+            **_pending_settings(state),
         }
     )
 
@@ -1068,7 +1156,7 @@ def log():
 
 @app.get("/api/settings")
 def settings():
-    return jsonify(_settings_doc())
+    return jsonify({**_settings_doc(), **_pending_settings()})
 
 
 @app.post("/api/settings")
@@ -1076,23 +1164,7 @@ def update_settings():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"error": "a JSON settings document is required"}), 400
-    allowed_fields = {
-        "backupEnabled",
-        "ceip",
-        "cronSchedule",
-        "depotEndpoint",
-        "esxMode",
-        "logRetention",
-        "sku",
-        "storageConfirmed",
-        "syncTargets",
-        "timezone",
-        "tokenUrl",
-        "uidGid",
-        "vcfVersion",
-        "vkrMatch",
-        "vkrOs",
-    }
+    allowed_fields = set(SETTING_ENV_FIELDS.values())
     unknown_fields = sorted(set(body) - allowed_fields)
     if unknown_fields:
         return jsonify(
@@ -1171,23 +1243,48 @@ def update_settings():
         "VKR_MATCH": vkr_match,
         "VKR_OS": vkr_os,
     }
-    if _state().get("running", False) and any(
-        _settings().get(key) != value for key, value in updates.items()
-    ):
-        return jsonify({"error": "wait for the running sync to finish before changing settings"}), 409
+    stored = _settings()
+    before = _settings_doc(stored)
+    after = _settings_doc({**stored, **updates})
+    changed = sorted(
+        field for field in SETTING_ENV_FIELDS.values() if before[field] != after[field]
+    )
+    live_tool_changes = [field for field in changed if field in LIVE_TOOL_FIELDS]
+    run_id = _running_sync_id(_state())
+    if run_id is not None and live_tool_changes:
+        return jsonify({"error": _live_tool_conflict(live_tool_changes)}), 409
     try:
-        with _tool_update_lock():
-            if _state().get("running", False):
-                return jsonify({"error": "wait for the running sync to finish before changing settings"}), 409
+        if live_tool_changes:
+            with _tool_update_lock():
+                # The exclusive tool lock cannot be taken while a sync holds its
+                # shared lock, so a run that started since the check above keeps
+                # the endpoints it read.
+                run_id = _running_sync_id(_state())
+                if run_id is not None:
+                    return jsonify({"error": _live_tool_conflict(live_tool_changes)}), 409
+                _write_settings(updates)
+                current = VCFDT_STORE / "current"
+                if current.is_dir():
+                    _patch_tool_endpoints(current)
+        else:
             _write_settings(updates)
-            current = VCFDT_STORE / "current"
-            if current.is_dir():
-                _patch_tool_endpoints(current)
     except BlockingIOError:
         return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
     except OSError as exc:
         return jsonify({"error": f"could not save settings: {exc}"}), 500
-    return jsonify({**_settings_doc(), "saved": True})
+    try:
+        if run_id is None:
+            _clear_pending_settings()
+        elif changed:
+            _record_pending_settings(changed, run_id)
+    except OSError as exc:
+        return jsonify({"error": f"could not record the pending settings: {exc}"}), 500
+    pending = (
+        {"appliesToNextRun": False, "pendingFields": []}
+        if run_id is None
+        else _pending_settings({"running": True, "startedAt": run_id})
+    )
+    return jsonify({**_settings_doc(), **pending, "saved": True})
 
 
 @app.post("/api/password")
