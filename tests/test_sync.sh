@@ -48,6 +48,34 @@ log_count="$(find "$work_dir/state" -maxdepth 1 -type f -name 'run-*.log' | wc -
 [ "$log_count" -eq 3 ]
 test -L "$work_dir/state/latest.log"
 
+# settings.env is read after the run lock is taken, and a key the console left
+# blank still falls back to its default.
+printf 'SYNC_TARGETS="patches"\nCEIP=""\nLOG_RETENTION=""\n' > "$work_dir/settings.env"
+SETTINGS_FILE="$work_dir/settings.env" \
+DEPOT_DIR="$work_dir/depot" \
+STATE_DIR="$work_dir/state" \
+AUTH_FILE="$work_dir/secrets/activation-code.txt" \
+TOOL_ROOT="$work_dir/tool" \
+"$project_dir/sync/sync.sh" > "$work_dir/from-settings.log"
+grep -q '>>> vcf-patches' "$work_dir/from-settings.log"
+[ "$(grep -c '>>> ' "$work_dir/from-settings.log")" -eq 1 ]
+grep -q 'sync finished overall rc=0' "$work_dir/from-settings.log"
+
+# A run holds the settings snapshot lock from before it reads settings.env
+# until it exits, which is how the console tells a save that applies to this
+# run from one that applies to the next.
+snapshot_lock="$work_dir/state/settings-snapshot.lock"
+STUB_SLEEP=2 run_sync esx > "$work_dir/snapshot-lock.log" &
+snapshot_pid=$!
+sleep 0.5
+test -e "$snapshot_lock"
+if flock -n -s "$snapshot_lock" true 2>/dev/null; then
+	echo "FAIL: the running sync did not hold $snapshot_lock" >&2
+	exit 1
+fi
+wait "$snapshot_pid"
+flock -n -s "$snapshot_lock" true
+
 stub_bin="$work_dir/bin"
 mkdir -p "$stub_bin"
 cat > "$stub_bin/redis-cli" <<'STUB'

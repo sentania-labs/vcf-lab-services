@@ -235,7 +235,7 @@
         <div class="field"><label for="backup-enabled">Backup service</label><label class="choice"><input id="backup-enabled" type="checkbox"> Enable SFTP on port 2222</label></div>
         <div class="field"><label for="uidgid">SFTP UID:GID</label><input id="uidgid" placeholder="1003:1003"></div>
       </div>
-      <p class="help">A UID:GID change re-owns stored backup content on the next backup service start.</p>
+      <p class="help">While the backup service is enabled it re-reads these two settings every few seconds, so both take effect at once: turning the service off ends current SFTP sessions, and a UID:GID change re-owns stored backup content.</p>
       <div class="row" style="margin-top:12px"><button id="save-backup">Save backup settings</button><span id="backup-flash" class="muted"></span></div>
     </section>
   </div>
@@ -307,6 +307,14 @@ function showTab(name) {
 document.querySelectorAll('.tab-button').forEach(button => {
   button.onclick = () => showTab(button.dataset.tab);
 });
+
+function saveMessage(result) {
+  const pending=result.appliesToNextRun ? (result.pendingFields||[]) : [];
+  const live=result.appliedNow||[];
+  if(!pending.length) return 'Saved and active';
+  if(live.length) return `Saved. ${live.join(', ')} took effect now, the rest applies to the next run`;
+  return 'Saved, applies to the next run';
+}
 
 function showPending(status) {
   const fields=status?.appliesToNextRun ? (status.pendingFields||[]) : [];
@@ -394,7 +402,7 @@ async function saveSettings(flashId){
   $(flashId).textContent='Saving';
   try {
     const result=await api('api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(settingsPayload())});
-    $(flashId).textContent=result.appliesToNextRun ? 'Saved, applies to the next run' : 'Saved and active';
+    $(flashId).textContent=saveMessage(result);
     showPending(result);
     populateSetup(await api('api/bootstrap'));
   } catch(error){$(flashId).textContent=error.message;}

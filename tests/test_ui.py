@@ -1,3 +1,4 @@
+import fcntl
 import importlib.util
 import io
 import json
@@ -517,6 +518,66 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             self.tool_store / "current" / "conf" / "application-prodv2.properties"
         ).read_text()
         self.assertIn("lcm.depot.adapter.host=downloads.example.test", properties)
+
+    def test_settings_saved_before_a_run_publishes_its_state_wait_for_next_run(self):
+        self.claim()
+        self.write_state()
+        self.upload_tool()
+        lock_path = self.state_dir / "settings-snapshot.lock"
+        lock_path.touch()
+        body = self.valid_settings()
+        body["depotEndpoint"] = "dl.broadcom.com"
+        body["tokenUrl"] = "https://eapi.broadcom.com/vcf/generateToken"
+        # A run holds the snapshot lock from before it reads settings.env until
+        # it exits, so a save that lands before the run publishes running state
+        # is still reported as applying to the next run.
+        with open(lock_path, "r", encoding="utf-8") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            response = self.post("/api/settings", json=body)
+            self.assertEqual(response.status_code, 200)
+            saved = response.get_json()
+            self.assertTrue(saved["appliesToNextRun"])
+            self.assertIn("cronSchedule", saved["pendingFields"])
+            self.assertIn('CRON_SCHEDULE="0 2 * * 6"', self.settings.read_text())
+            self.assertTrue(self.get("/api/status").get_json()["appliesToNextRun"])
+            blocked = self.post(
+                "/api/settings", json={"depotEndpoint": "downloads.example.test"}
+            )
+            self.assertEqual(blocked.status_code, 409)
+            self.assertIn("depotEndpoint", blocked.get_json()["error"])
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        idle = self.get("/api/settings").get_json()
+        self.assertFalse(idle["appliesToNextRun"])
+        self.assertEqual(idle["pendingFields"], [])
+
+    def test_live_backup_settings_are_not_reported_as_next_run(self):
+        self.claim()
+        self.write_state()
+        self.upload_tool()
+        self.write_state(running=True, armed=True, startedAt="2026-09-06T11:00:00Z")
+        # The SFTP service re-reads these every few seconds, so they are live.
+        live_only = self.post(
+            "/api/settings", json={"backupEnabled": True, "uidGid": "1500:1500"}
+        )
+        self.assertEqual(live_only.status_code, 200)
+        saved = live_only.get_json()
+        self.assertEqual(saved["appliedNow"], ["backupEnabled", "uidGid"])
+        self.assertFalse(saved["appliesToNextRun"])
+        self.assertEqual(saved["pendingFields"], [])
+        settings_text = self.settings.read_text()
+        self.assertIn('BACKUP_ENABLED="true"', settings_text)
+        self.assertIn('SFTP_UID_GID="1500:1500"', settings_text)
+
+        body = self.valid_settings()
+        body["depotEndpoint"] = "dl.broadcom.com"
+        body["tokenUrl"] = "https://eapi.broadcom.com/vcf/generateToken"
+        mixed = self.post("/api/settings", json=body).get_json()
+        self.assertEqual(mixed["appliedNow"], ["uidGid"])
+        self.assertTrue(mixed["appliesToNextRun"])
+        self.assertIn("cronSchedule", mixed["pendingFields"])
+        self.assertNotIn("uidGid", mixed["pendingFields"])
+        self.assertNotIn("backupEnabled", mixed["pendingFields"])
+        self.assertIn('SFTP_UID_GID="1004:1005"', self.settings.read_text())
 
     def test_console_tabs_render_every_control(self):
         self.claim()
