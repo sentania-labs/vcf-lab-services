@@ -11,26 +11,48 @@ The sync image contains the scheduler and runtime dependencies, never the
 licensed VCF Download Tool. The operator supplies that archive through the
 console, which stores it on a mounted disposable volume.
 
-The highest semantic release also owns the `latest` image tags for operators
-who deliberately select them. The Compose defaults are pinned to the concrete
-release version, so a source checkout and its default images remain the tested
-pair even when publication is delayed or fails. Each GitHub release bundle
-also includes a `.env` that pins Compose to the same exact release tags.
+## Cutting a release
 
-Preparing a release starts by changing all product image defaults in
-`docker-compose.yml` and `kubernetes/deployment.yaml` to the intended tag. That
-change lands before the tag is pushed, so the tag names images the workflow is
-about to build. The release workflow runs
-`scripts/verify-compose-version.sh` before building or packaging and fails when
-any Compose or Kubernetes default differs from the pushed tag. For the next
-release, repeat the same version bump before tagging.
+1. Merge the work to `main`.
+2. Tag the merged commit locally: `git tag v0.2.6` (any `vMAJOR.MINOR.PATCH`).
+3. Push the tag: `git push origin v0.2.6`.
+
+The workflow does the rest: it runs the full CI gate, builds and publishes the
+three images for exactly that tag, proves the published images boot from the
+release bundle, and creates or updates the GitHub release with the bundle. No
+version-bump commit lands before the tag, and no file in the repo names the
+version being released.
+
+The workflow refuses two things before it builds anything: a tag that is not
+shaped like `vMAJOR.MINOR.PATCH`, and a tag whose commit is not reachable from
+`origin/main` (a tag pushed from an unmerged branch). That check lives in
+`scripts/verify-release-tag.sh` and is exercised by `tests/test_release.sh`.
+
+## Where pinning belongs
+
+This repo builds the product; it is not a deployment repo. The checked-in
+image defaults in `docker-compose.yml` and `kubernetes/deployment.yaml` track
+the `latest` tags so a source checkout starts the newest release for
+quickstart and testing. Deployments pin. The `VCF_SERVICES_UI_IMAGE`,
+`VCF_SERVICES_SYNC_IMAGE`, and `VCF_SERVICES_SFTP_IMAGE` Compose variables and
+the Kubernetes image fields are where an exact release tag (and digest where
+wanted) goes, which is how `lab-deployment` consumes this product.
+
+The highest semantic release owns the `latest` image tags, so re-releasing an
+older line never moves `latest` backwards. Each GitHub release bundle carries
+a `.env` that pins Compose to the exact release tags, and `install.sh` runs
+from that bundle, so an operator who downloads a release always starts the
+tagged images rather than `latest`.
 
 After publishing and anonymously pulling the tagged images, the workflow runs
-`scripts/verify-published-quickstart.sh` on clean named volumes. This executes
-the README `docker compose up -d` command with no image overrides, then proves
-claim, tool upload, registration, a partial settings update, and an
-authenticated HTTPS Range response over the live API. The GitHub release is
-not created unless this published-image proof passes.
+`scripts/verify-published-quickstart.sh` on clean named volumes. This packages
+the release bundle for the tag, extracts it, and executes the README
+`docker compose up -d` command inside it with no image overrides beyond the
+bundle's own pinned `.env`, then proves the containers run the exact tagged
+images pulled from GHCR, followed by claim, tool upload, registration, a
+partial settings update, and an authenticated HTTPS Range response over the
+live API. The GitHub release is not created unless this published-image proof
+passes.
 
 Tool archive validation, shared by the upload and depot install paths, is
 structural: the archive must contain the expected

@@ -34,6 +34,17 @@ grep -q 'value: 127.0.0.1:8080' "$rendered" \
 	|| fail "read-only root filesystems are not enforced where supported"
 grep -q 'name: volume-permissions' "$rendered" \
 	|| fail "explicit volume ownership setup is missing"
+# The checked-in manifests build the product and track latest; deployments pin.
+[ "$(grep -c 'image: ghcr.io/sentania-labs/vcf-lab-services/ui:latest' "$rendered")" -eq 3 ] \
+	|| fail "volume setup, bootstrap, and UI do not default to the latest published UI image"
+grep -q 'image: ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest' "$rendered" \
+	|| fail "sync does not default to the latest published image"
+grep -q 'image: ghcr.io/sentania-labs/vcf-lab-services/sftp:latest' "$rendered" \
+	|| fail "SFTP does not default to the latest published image"
+! grep -Eq 'vcf-lab-services/(ui|sync-base|sftp):v[0-9]' "$rendered" \
+	|| fail "a Kubernetes default still pins a concrete release tag; pinning belongs in deployments"
+[ "$(grep -c 'Deployments must pin an exact release tag' "$project_dir/kubernetes/deployment.yaml")" -eq 5 ] \
+	|| fail "every Kubernetes product image needs the pin-in-deployment note"
 ! grep -q 'fsGroup:' "$rendered" \
 	|| fail "Pod-wide fsGroup would contend with SFTP backup ownership"
 permissions_block="$(sed -n '/name: volume-permissions/,/name: bootstrap/p' "$rendered")"

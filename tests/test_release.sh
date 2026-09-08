@@ -7,26 +7,49 @@ trap 'rm -rf "$work_dir"' EXIT
 
 version=v0.2.5
 repository=ghcr.io/example/vcf-lab-services
-if "$project_dir/scripts/verify-compose-version.sh" v0.2.3 \
-	"$project_dir/docker-compose.yml" > /dev/null 2>&1; then
-	echo "release validation accepted a tag that differs from Compose" >&2
+
+# Release tag gate: a well formed tag on main passes, a tag on a stray branch
+# or a malformed tag is refused. Exercised in a throwaway repository.
+gate_repo="$work_dir/gate-repo"
+git init -q -b main "$gate_repo"
+git -C "$gate_repo" -c user.name=test -c user.email=test@example.invalid \
+	commit -q --allow-empty -m "first"
+git -C "$gate_repo" tag v1.0.0
+git -C "$gate_repo" -c user.name=test -c user.email=test@example.invalid \
+	commit -q --allow-empty -m "second"
+git -C "$gate_repo" -c user.name=test -c user.email=test@example.invalid \
+	tag -a v1.0.1 -m "annotated release tag"
+git -C "$gate_repo" checkout -q -b stray
+git -C "$gate_repo" -c user.name=test -c user.email=test@example.invalid \
+	commit -q --allow-empty -m "unmerged"
+git -C "$gate_repo" tag v1.0.2
+git -C "$gate_repo" tag release-candidate
+git -C "$gate_repo" checkout -q main
+(cd "$gate_repo" && "$project_dir/scripts/verify-release-tag.sh" v1.0.0 main >/dev/null)
+(cd "$gate_repo" && "$project_dir/scripts/verify-release-tag.sh" v1.0.1 main >/dev/null)
+if (cd "$gate_repo" && "$project_dir/scripts/verify-release-tag.sh" v1.0.2 main >/dev/null 2>&1); then
+	echo "release tag gate accepted a tag that is not on main" >&2
 	exit 1
 fi
-"$project_dir/scripts/verify-compose-version.sh" "$version" \
-	"$project_dir/docker-compose.yml" >/dev/null
-bad_kubernetes="$work_dir/deployment-wrong-version.yaml"
-cp "$project_dir/kubernetes/deployment.yaml" "$bad_kubernetes"
-sed -i '0,/ui:v0.2.5/s//ui:v0.2.1/' "$bad_kubernetes"
-if "$project_dir/scripts/verify-compose-version.sh" "$version" \
-	"$project_dir/docker-compose.yml" "$bad_kubernetes" > /dev/null 2>&1; then
-	echo "release validation accepted a Kubernetes image that differs from the tag" >&2
+if (cd "$gate_repo" && "$project_dir/scripts/verify-release-tag.sh" release-candidate main >/dev/null 2>&1); then
+	echo "release tag gate accepted a tag that is not vMAJOR.MINOR.PATCH" >&2
 	exit 1
 fi
+if (cd "$gate_repo" && "$project_dir/scripts/verify-release-tag.sh" v9.9.9 main >/dev/null 2>&1); then
+	echo "release tag gate accepted a tag that does not exist" >&2
+	exit 1
+fi
+grep -q 'verify-release-tag.sh "\$GITHUB_REF_NAME" origin/main' \
+	"$project_dir/.github/workflows/release.yml"
+! grep -q 'verify-compose-version' "$project_dir/.github/workflows/release.yml"
 grep -q 'verify-published-quickstart.sh.*GITHUB_REF_NAME' \
 	"$project_dir/.github/workflows/release.yml"
 grep -q '^docker compose up -d$' \
 	"$project_dir/scripts/verify-published-quickstart.sh"
-! grep -Eq 'VCF_SERVICES_(UI|SYNC|SFTP)_IMAGE=' \
+# The quickstart proof runs from the release bundle; it never sets an image override itself.
+! grep -Eq '^[[:space:]]*(export[[:space:]]+)?VCF_SERVICES_(UI|SYNC|SFTP)_IMAGE=' \
+	"$project_dir/scripts/verify-published-quickstart.sh"
+grep -q 'package-release.sh" "\$version" "\$bundle_work"' \
 	"$project_dir/scripts/verify-published-quickstart.sh"
 "$project_dir/scripts/package-release.sh" "$version" "$work_dir" "$repository" >/dev/null
 

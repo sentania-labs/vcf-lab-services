@@ -25,6 +25,12 @@ image build:
 docker compose up -d
 ```
 
+A source checkout defaults to the `latest` published images, which is right
+for a quickstart or a test. A deployment should pin an exact release tag
+instead: download a GitHub release bundle, whose `.env` already pins that
+tag, or set `VCF_SERVICES_UI_IMAGE`, `VCF_SERVICES_SYNC_IMAGE`, and
+`VCF_SERVICES_SFTP_IMAGE` yourself. See [docs/releasing.md](docs/releasing.md).
+
 Browse to `https://<host>/admin/`. Caddy creates an internal certificate on the
 first boot, so the browser warns until the local Caddy CA is trusted.
 

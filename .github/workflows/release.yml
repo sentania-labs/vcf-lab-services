@@ -28,10 +28,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A release is any vMAJOR.MINOR.PATCH tag whose commit is already on main.
+      # No version bump lands before the tag: the checked-in defaults track latest
+      # and the release bundle pins the exact tag being built here.
       - name: Validate release tag
         run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          ./scripts/verify-compose-version.sh "$GITHUB_REF_NAME"
+          git fetch --no-tags origin main
+          ./scripts/verify-release-tag.sh "$GITHUB_REF_NAME" origin/main
 
       - name: Decide whether this tag owns the latest tags
         id: latest
@@ -147,7 +150,7 @@ jobs:
           DOCKER_CONFIG="$anonymous_config" docker pull "$image_root/sftp:$version"
 
       - name: Prove the published README quickstart and API path
-        run: ./scripts/verify-published-quickstart.sh "$GITHUB_REF_NAME"
+        run: ./scripts/verify-published-quickstart.sh "$GITHUB_REF_NAME" "ghcr.io/${GITHUB_REPOSITORY,,}"
 
   release:
     name: Create GitHub release
@@ -163,7 +166,6 @@ jobs:
       - name: Validate release tag
         run: |
           [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          ./scripts/verify-compose-version.sh "$GITHUB_REF_NAME"
 
       - name: Package installer entry point
         run: |
