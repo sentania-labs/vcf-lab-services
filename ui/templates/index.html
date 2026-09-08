@@ -431,7 +431,7 @@ function decomposeCron(cron){
   if(!/^\d{1,2}$/.test(minute)||!/^\d{1,2}$/.test(hour)||Number(minute)>59||Number(hour)>23||dom!=='*'||month!=='*') return {mode:'custom'};
   if(dow==='*') return {mode:'daily',hour:Number(hour),minute:Number(minute)};
   if(!/^\d(,\d)*$/.test(dow)) return {mode:'custom'};
-  const days=[...new Set(dow.split(',').map(Number).map(day=>day===7?0:day))];
+  const days=[...new Set(dow.split(',').map(Number))];
   if(days.some(day=>day>6)) return {mode:'custom'};
   return {mode:'weekly',hour:Number(hour),minute:Number(minute),days};
 }
