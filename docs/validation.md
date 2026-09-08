@@ -64,10 +64,12 @@ without) to see the Setup tab list and install the stub versions.
 `tests/test_compose_boot.sh` uses an isolated project, container names, network,
 and fresh volumes without publishing host ports. It can run beside an installed
 appliance without reconciling or removing the appliance containers. The test
-starts the complete Compose appliance with locally built images and requires
-each long-running service to become healthy or running. The one-shot bootstrap
-service must exit successfully. The normal GitHub-hosted CI job runs this proof
-with a real Docker daemon after building the three product images.
+starts the complete Compose appliance with locally built images, requires each
+long-running service to become healthy or running, installs and activates the
+stub tool, and runs a sync that rewrites its telemetry flag through the shared
+tool mount. The one-shot bootstrap service must exit successfully. The normal
+GitHub-hosted CI job runs this proof with a real Docker daemon after building
+the three product images.
 
 CI renders the Kubernetes manifests, validates them against strict Kubernetes
 schemas, and asserts the storage, secret-path, ingress, and single-Pod network

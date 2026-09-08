@@ -101,9 +101,12 @@ named volumes. The most important small volumes are:
   secrets.
 - `vcf-services-sftp-host-keys`, the stable consumer fingerprints.
 
-The `vcf-services-vcfdt-tool` volume is disposable. Restore it from the Setup
-tab by installing a tool archive already mirrored in the depot, or by
-uploading the licensed archive again.
+The `vcf-services-vcfdt-tool` volume is disposable. Both the console and sync
+service mount it read-write: the console installs the licensed tool, and the
+tool rewrites its telemetry flag during every sync. Tool installation and sync
+share an update lock, so they cannot modify the volume at the same time.
+Restore it from the Setup tab by installing a tool archive already mirrored in
+the depot, or by uploading the licensed archive again.
 
 The config volume carries the product version that created it. If an unmarked
 or differently marked config volume is found, the console stays reachable but

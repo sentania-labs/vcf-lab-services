@@ -143,5 +143,42 @@ while true; do
 	sleep 2
 done
 
+stub_archive="$work_dir/vcf-download-tool-0.0.0-stub.tar.gz"
+"$project_dir/tests/make-stub-vcfdt.sh" "$stub_archive" >/dev/null
+ui_container="$("${compose[@]}" ps -q admin-ui)"
+sync_container="$("${compose[@]}" ps -q depot-sync)"
+docker cp "$stub_archive" "$ui_container:/tmp/vcf-download-tool-stub.tar.gz" >/dev/null
+docker exec "$ui_container" curl --fail --silent --show-error --insecure \
+	--cookie-jar /tmp/vcf-services-test-cookies \
+	-H 'Content-Type: application/json' \
+	-d '{"username":"vcf","password":"compose boot proof"}' \
+	https://depot-web/admin/api/claim >/dev/null
+docker exec "$ui_container" curl --fail --silent --show-error --insecure \
+	--cookie /tmp/vcf-services-test-cookies \
+	-F 'archive=@/tmp/vcf-download-tool-stub.tar.gz;filename=vcf-download-tool-0.0.0-stub.tar.gz' \
+	https://depot-web/admin/api/vcfdt >/dev/null
+docker exec "$ui_container" curl --fail --silent --show-error --insecure \
+	--cookie /tmp/vcf-services-test-cookies \
+	-H 'Content-Type: application/json' \
+	-d '{"activationCode":"compose-boot-test-code"}' \
+	https://depot-web/admin/api/registration >/dev/null
+docker exec "$ui_container" sh -c \
+	"printf '%s\\n' waiting-for-sync > /opt/vcfdt/current/conf/telemetry/telemetry.flag"
+
+deadline=$((SECONDS + 60))
+until docker exec "$sync_container" grep -qx written \
+	/opt/vcfdt/current/conf/telemetry/telemetry.flag >/dev/null 2>&1; do
+	if [ "$SECONDS" -ge "$deadline" ]; then
+		echo "FAIL: Compose sync did not complete the telemetry write proof" >&2
+		exit 1
+	fi
+	docker exec "$sync_container" /usr/local/bin/sync.sh patches >/dev/null || true
+	sleep 1
+done
+docker exec "$sync_container" jq -e \
+	'.running == false and .lastRun.patches.status == "OK"' /state/state.json >/dev/null
+docker exec "$sync_container" grep -qx written \
+	/opt/vcfdt/current/conf/telemetry/telemetry.flag
+
 "${compose[@]}" ps --all
-echo "Compose boot test passed: every service is healthy, running, or completed successfully"
+echo "Compose boot test passed: services started and the mounted tool wrote its telemetry flag during sync"

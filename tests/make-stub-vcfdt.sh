@@ -7,11 +7,16 @@ output="${1:-vcf-download-tool-0.0.0-stub.tar.gz}"
 stub_version="${STUB_VERSION:-0.0.0.0.20000000}"
 work_dir="$(mktemp -d /tmp/vcf-services-stub.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
-mkdir -p "$work_dir/vcf-download-tool-stub/bin" "$work_dir/vcf-download-tool-stub/conf"
+mkdir -p "$work_dir/vcf-download-tool-stub/bin" \
+	"$work_dir/vcf-download-tool-stub/conf/telemetry"
 
 cat > "$work_dir/vcf-download-tool-stub/bin/vcf-download-tool" <<'STUB'
 #!/bin/bash
 set -euo pipefail
+
+tool_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+printf '%s\n' "${STUB_TELEMETRY_VALUE:-written}" \
+	> "$tool_root/conf/telemetry/telemetry.flag"
 
 state_dir="${HOME}/.local/share/vmware/vdt"
 mkdir -p "$state_dir"
@@ -63,6 +68,10 @@ echo "stub completed target $target"
 STUB
 sed -i "s/0\.0\.0\.0\.20000000/$stub_version/g" "$work_dir/vcf-download-tool-stub/bin/vcf-download-tool"
 chmod 0755 "$work_dir/vcf-download-tool-stub/bin/vcf-download-tool"
+cat > "$work_dir/vcf-download-tool-stub/conf/application-prod.properties" <<'PROPERTIES'
+lcm.depot.adapter.host=dl.broadcom.com
+lcm.access_token.broadcom.authorization.server.url=https://eapi.broadcom.com/vcf/generateToken
+PROPERTIES
 cat > "$work_dir/vcf-download-tool-stub/conf/application-prodv2.properties" <<'PROPERTIES'
 lcm.depot.adapter.host=dl.broadcom.com
 lcm.access_token.broadcom.authorization.server.url=https://eapi.broadcom.com/vcf/generateToken

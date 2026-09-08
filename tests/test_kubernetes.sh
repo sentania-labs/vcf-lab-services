@@ -52,6 +52,12 @@ permissions_block="$(sed -n '/name: volume-permissions/,/name: bootstrap/p' "$re
 	|| fail "volume-permissions must not mount or re-own the backup claim"
 grep -q '/volumes/depot' <<< "$permissions_block" \
 	|| fail "volume-permissions does not initialize application-owned volume roots"
+sync_block="$(sed -n '/name: depot-sync/,/name: sftp-backup/p' "$rendered")"
+sync_tool_mount="$(grep -A2 'mountPath: /opt/vcfdt' <<< "$sync_block")"
+grep -q 'name: vcfdt-tool' <<< "$sync_tool_mount" \
+	|| fail "sync tool volume is not mounted at /opt/vcfdt"
+! grep -q 'readOnly: true' <<< "$sync_tool_mount" \
+	|| fail "sync tool volume must be writable for the licensed telemetry flag"
 for annotation in proxy-body-size proxy-read-timeout proxy-send-timeout proxy-request-buffering; do
 	grep -q "nginx.ingress.kubernetes.io/$annotation" "$rendered" \
 		|| fail "ingress upload annotation $annotation is missing"
