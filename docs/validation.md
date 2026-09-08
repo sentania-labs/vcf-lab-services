@@ -47,7 +47,8 @@ first-boot state initialization, internal TLS, the platform-provided storage
 boundary, protected Redis, fixed mount contracts, version mismatch safe-stop
 wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
 single-writer sync behavior, sync safe-stop on a version mismatch, log
-retention, tool-version run state and post-success release promotion, lifecycle
+retention, tool-version run state, post-success release promotion, retention
+after a successful VKR-only run with non-tool provenance, lifecycle
 script behavior through a stub Compose command, SFTP identity and host keys,
 Range serving, packaging, the release
 tag gate (well formed tags on main pass, malformed or unmerged tags are

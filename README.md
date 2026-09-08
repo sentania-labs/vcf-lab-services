@@ -77,12 +77,14 @@ Two groups of settings behave differently:
 Tool installation (from the depot or by upload) and starting a sync keep
 their existing running-sync guards. Replacing the tool retains the prior
 extracted release and exposes a rollback button on Setup. The retained release
-is removed only after the replacement completes a fully successful sync. If a
+is removed only after a fully successful sync that includes at least one
+successful tool-backed target (`esx`, `install`, `upgrade`, or `patches`). A
+VKR-only run keeps the retained release because it uses a separate helper. If a
 replacement has not synced successfully, installing another release keeps only
 the current and immediately previous releases. To roll back, wait for any sync
 to finish, open Setup, and select **Roll back to previous**. This swaps the two
-tool releases without restoring depot content. The newly active tool's next
-fully successful sync removes the retained release; a failed sync keeps it.
+tool releases without restoring depot content. The same retention rule applies
+after rollback; a failed sync keeps the retained release.
 
 ## Storage ownership
 
