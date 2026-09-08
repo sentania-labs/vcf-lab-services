@@ -7,6 +7,9 @@ state.
 
 ## Deploy
 
+Choose images using [the pinning contract](releasing.md#where-pinning-belongs)
+before applying the manifests.
+
 The defaults require a dynamic default StorageClass and request 1 TiB for the
 depot. Review the sizes in `kubernetes/storage.yaml`, and add a `storageClassName`
 to each claim when the cluster has no suitable default. Client TLS terminates at

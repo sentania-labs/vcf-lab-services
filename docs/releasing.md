@@ -20,10 +20,10 @@ console, which stores it on a mounted disposable volume.
 The workflow does the rest: it runs the full CI gate, builds and publishes the
 three images for exactly that tag, proves the published images boot from the
 release bundle, and creates or updates the GitHub release with the bundle. No
-version-bump commit lands before the tag, and no file in the repo names the
-version being released.
+version-bump commit or PR is required before the tag.
 
-The workflow refuses two things before it builds anything: a tag that is not
+After the CI gate, the publish job refuses two things before building release
+images: a tag that is not
 shaped like `vMAJOR.MINOR.PATCH`, and a tag whose commit is not reachable from
 `origin/main` (a tag pushed from an unmerged branch). That check lives in
 `scripts/verify-release-tag.sh` and is exercised by `tests/test_release.sh`.
@@ -33,8 +33,9 @@ shaped like `vMAJOR.MINOR.PATCH`, and a tag whose commit is not reachable from
 This repo builds the product; it is not a deployment repo. The checked-in
 image defaults in `docker-compose.yml` and `kubernetes/deployment.yaml` track
 the `latest` tags so a source checkout starts the newest release for
-quickstart and testing. Those defaults always pull so a reused checkout does
-not silently keep an older local image. Deployments pin both the image and an
+quickstart and testing. Compose pulls on `docker compose up`; Kubernetes
+checks for the image when a container starts. Reapplying unchanged Kubernetes
+manifests does not restart existing Pods. Deployments pin both the image and an
 appropriate pull policy. The `VCF_SERVICES_UI_IMAGE`,
 `VCF_SERVICES_SYNC_IMAGE`, and `VCF_SERVICES_SFTP_IMAGE` Compose variables and
 `VCF_SERVICES_PULL_POLICY`, plus the Kubernetes image and `imagePullPolicy`
@@ -43,9 +44,11 @@ the product with an exact release tag and a digest where wanted.
 
 The highest semantic release owns the `latest` image tags, so re-releasing an
 older line never moves `latest` backwards. Each GitHub release bundle carries
-a `.env` that pins Compose to the exact release tags, and `install.sh` runs
-from that bundle, so an operator who downloads a release always starts the
-tagged images rather than `latest`.
+a `.env` that pins Compose and a staged `kubernetes/deployment.yaml` whose
+five product image references pin the exact release tag. Kubernetes does not
+read the Compose `.env`. Packaging leaves the source manifests unchanged.
+`install.sh` runs from the bundle, so an operator using its supplied image
+settings starts the tagged images rather than `latest`.
 
 After publishing and anonymously pulling the tagged images, the workflow runs
 `scripts/verify-published-quickstart.sh` on clean named volumes. This packages
@@ -97,5 +100,6 @@ docker build -t vcf-services-sync-base:local -f Dockerfile.sync-base .
 
 For the required pre-release live proof, build and tag candidate images with
 local override names, then start an isolated Compose project using those image
-environment variables. This local validation build is for release verification
-only. Operators never build an image.
+environment variables and `VCF_SERVICES_PULL_POLICY=never` to use the local
+images. This local validation build is for release verification only. Operators never
+build an image.
