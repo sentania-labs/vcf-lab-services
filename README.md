@@ -52,7 +52,9 @@ applying to the next run. A run takes the `settings-snapshot.lock` file in its
 state volume before it reads `settings.env` and holds it until it exits, and
 the console holds the same lock while it writes, so a save is classified
 against the run's real snapshot rather than against the run state the sync
-publishes a moment later.
+publishes a moment later. The run also names itself in `settings-snapshot.run`
+before it takes that lock, so the "next run" notice is tied to one specific run
+and is retired once that run ends.
 
 Two groups of settings behave differently:
 

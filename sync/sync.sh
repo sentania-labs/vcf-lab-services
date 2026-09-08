@@ -107,6 +107,18 @@ fi
 # applying to the next run. The kernel releases the lock when this process ends.
 snapshot_lock="$STATE_DIR/settings-snapshot.lock"
 [ -e "$snapshot_lock" ] || : > "$snapshot_lock"
+# Publish this run's identity before the lock is taken, so a console that sees
+# the lock held always reads an identity at least as new as that lock. The
+# console tags a save with the identity it reads and only reports the save as
+# pending while that same run still holds the snapshot.
+snapshot_run_file="$STATE_DIR/settings-snapshot.run"
+snapshot_run_id="run-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
+if snapshot_run_tmp="$(mktemp "$STATE_DIR/settings-snapshot.run.XXXXXX")"; then
+	printf '%s\n' "$snapshot_run_id" > "$snapshot_run_tmp"
+	mv "$snapshot_run_tmp" "$snapshot_run_file"
+else
+	log "WARNING: could not record the run identity in $snapshot_run_file"
+fi
 if exec 6<"$snapshot_lock" && flock -x 6; then
 	:
 else

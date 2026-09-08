@@ -55,6 +55,13 @@ SETTINGS_PENDING_FILE = Path(
 SYNC_SNAPSHOT_LOCK = Path(
     os.environ.get("SYNC_SNAPSHOT_LOCK", str(STATE / "settings-snapshot.lock"))
 )
+# sync.sh writes this file before it takes the snapshot lock, so an identity
+# read here is never older than the lock state observed with it. It names the
+# run a pending save belongs to, including in the moment before the run has
+# published its running state.
+SYNC_SNAPSHOT_RUN_FILE = Path(
+    os.environ.get("SYNC_SNAPSHOT_RUN_FILE", str(STATE / "settings-snapshot.run"))
+)
 CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
 SECRETS_ROOT = "/etc/vcf-services/secrets"
@@ -720,6 +727,24 @@ def _running_sync_id(state):
     return str(state.get("startedAt") or "unknown-run")
 
 
+def _snapshot_run_id(state=None):
+    """Identify the run that owns the settings snapshot right now.
+
+    Only meaningful while a run holds the snapshot lock: the file keeps the
+    last run's identity afterwards, which is what makes a marker left by a
+    finished run distinguishable from one saved during the current run.
+    """
+    try:
+        recorded = SYNC_SNAPSHOT_RUN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        recorded = ""
+    if recorded:
+        return recorded
+    # A sync image that predates the identity file falls back to the published
+    # run state, which is absent in the gap before the run publishes it.
+    return _running_sync_id(_state() if state is None else state)
+
+
 def _sync_snapshot_active(state=None):
     """Report whether a sync run already holds the settings.env snapshot.
 
@@ -792,10 +817,8 @@ def _pending_document_fields(document):
 def _record_pending_settings(fields, run_id):
     known = set(fields)
     existing = _read_pending_document()
-    if existing is not None:
-        recorded = existing.get("syncStartedAt")
-        if recorded is None or run_id is None or recorded == run_id:
-            known.update(_pending_document_fields(existing))
+    if existing is not None and existing.get("syncStartedAt") == run_id:
+        known.update(_pending_document_fields(existing))
     document = {"syncStartedAt": run_id, "fields": sorted(known)}
     SETTINGS_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
     handle, temp_name = tempfile.mkstemp(
@@ -839,9 +862,9 @@ def _pending_settings(state=None, in_flight=None):
     document = _read_pending_document()
     if document is None or not in_flight:
         return {"appliesToNextRun": False, "pendingFields": []}
-    recorded = document.get("syncStartedAt")
-    run_id = _running_sync_id(state)
-    if recorded is not None and run_id is not None and recorded != run_id:
+    if document.get("syncStartedAt") != _snapshot_run_id(state):
+        # The marker belongs to a run that has finished. The current run read
+        # these values at its own start, so they are in use, not pending.
         return {"appliesToNextRun": False, "pendingFields": []}
     fields = _pending_document_fields(document)
     return {"appliesToNextRun": bool(fields), "pendingFields": fields}
@@ -1341,7 +1364,7 @@ def update_settings():
             if snapshot_taken and live_tool_changes:
                 return jsonify({"error": _live_tool_conflict(live_tool_changes)}), 409
             state = _state()
-            run_id = _running_sync_id(state) if snapshot_taken else None
+            run_id = _snapshot_run_id(state) if snapshot_taken else None
             if live_tool_changes:
                 with _tool_update_lock():
                     # The exclusive tool lock cannot be taken while a sync holds

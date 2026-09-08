@@ -550,6 +550,48 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertFalse(idle["appliesToNextRun"])
         self.assertEqual(idle["pendingFields"], [])
 
+    def test_a_pending_save_does_not_carry_into_the_next_run(self):
+        self.claim()
+        self.write_state()
+        self.upload_tool()
+        lock_path = self.state_dir / "settings-snapshot.lock"
+        lock_path.touch()
+        run_file = self.state_dir / "settings-snapshot.run"
+        body = self.valid_settings()
+        body["depotEndpoint"] = "dl.broadcom.com"
+        body["tokenUrl"] = "https://eapi.broadcom.com/vcf/generateToken"
+        # sync.sh names the run before it takes the lock, so a save that lands
+        # in the gap before the run publishes its state is still tagged with
+        # that run.
+        run_file.write_text("run-one\n")
+        with open(lock_path, "r", encoding="utf-8") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            saved = self.post("/api/settings", json=body).get_json()
+            self.assertTrue(saved["appliesToNextRun"])
+            self.assertIn("cronSchedule", saved["pendingFields"])
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+        # The second run reads those values at its own start, so they are in
+        # use rather than waiting for a later run.
+        run_file.write_text("run-two\n")
+        with open(lock_path, "r", encoding="utf-8") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            self.write_state(
+                running=True, armed=True, startedAt="2026-09-06T12:00:00Z"
+            )
+            status = self.get("/api/status").get_json()
+            self.assertFalse(status["appliesToNextRun"])
+            self.assertEqual(status["pendingFields"], [])
+            settings_view = self.get("/api/settings").get_json()
+            self.assertFalse(settings_view["appliesToNextRun"])
+            self.assertEqual(settings_view["pendingFields"], [])
+            # A save made during the second run is pending for that run only.
+            body["logRetention"] = 42
+            during = self.post("/api/settings", json=body).get_json()
+            self.assertTrue(during["appliesToNextRun"])
+            self.assertEqual(during["pendingFields"], ["logRetention"])
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
     def test_live_backup_settings_are_not_reported_as_next_run(self):
         self.claim()
         self.write_state()
