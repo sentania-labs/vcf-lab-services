@@ -55,12 +55,20 @@ every state write:
   "startedAt": "2026-08-13T00:00:00Z",
   "finishedAt": "2026-08-13T00:10:00Z",
   "targets": "esx patches",
-  "lastRun": {"esx": {"status": "OK", "finishedAt": "2026-08-13T00:05:00Z"}}
+  "lastRun": {"esx": {"status": "OK", "finishedAt": "2026-08-13T00:05:00Z", "toolVersion": "9.1.2", "toolReleaseId": "example-release-id"}}
 }
 ```
 
 Consumers must fall back to reading `state.json` from the sync state volume
 when the key is absent, because the bus is not persistent.
+
+`lastRun` is the source of tool provenance, recorded separately for each target
+after its attempt, including failures. `toolVersion` and `toolReleaseId` come
+from the active extracted release's metadata, with `unknown` when unavailable.
+Targets not attempted retain their earlier records. Older records may omit
+these fields. A failed attempt identifies the tool used, not a guarantee that
+all content for that target was replaced. Consumers derive summaries from
+these rows rather than a single depot-wide version.
 
 When the config volume fails its version check at startup, the scheduler
 refuses to dispatch and publishes the same shape with `running` and `armed`

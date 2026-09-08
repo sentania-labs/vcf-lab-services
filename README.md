@@ -79,7 +79,10 @@ their existing running-sync guards. Replacing the tool retains the prior
 extracted release and exposes a rollback button on Setup. The retained release
 is removed only after the replacement completes a fully successful sync. If a
 replacement has not synced successfully, installing another release keeps only
-the current and immediately previous releases.
+the current and immediately previous releases. To roll back, wait for any sync
+to finish, open Setup, and select **Roll back to previous**. This swaps the two
+tool releases without restoring depot content. The newly active tool's next
+fully successful sync removes the retained release; a failed sync keeps it.
 
 ## Storage ownership
 
@@ -113,8 +116,11 @@ Restore it from the Setup tab by installing a tool archive already mirrored in
 the depot, or by uploading the licensed archive again.
 
 The config volume carries separate product release and config schema markers.
-An older schema is migrated forward in order after its small files are copied
-to a timestamped directory under `/config/migration-backups`. Existing setting
+An older schema is migrated forward in order. Every release marker change on
+an existing config volume also takes this migration path, even when the schema
+is unchanged. Before migration, top-level config files up to 1 MiB each are
+copied to a timestamped directory under `/config/migration-backups`; this copy
+does not include other volumes or nested directories. Existing setting
 values and identity are preserved, new keys receive shipped defaults, and the
 result plus recovery path is shown on Setup. A release refuses to use config
 written by a newer release or schema and leaves the console reachable with a
@@ -145,6 +151,12 @@ later targets still run after a failure, state is written atomically, and only
 the newest configured run logs are retained. Until an activation code is
 saved, the stack stays healthy but sync reports `not armed`.
 
+The Sync tab shows the tool version and outcome for each target's last run.
+Setup's **Depot content produced by** summary is derived from those same rows,
+so mixed versions and failed attempts remain visible. Older records without a
+tool version display `unknown`. The persisted fields are defined in the
+[sync status contract](docs/redis-contract.md#status-shape-vcf-servicessyncstatus).
+
 The download host and token URL are generic advanced settings. Production
 defaults are already present. Changing them patches the mounted tool only when
 no sync is running, with no image build or container recreation.
@@ -165,8 +177,7 @@ Docker daemon and Compose v2, pulls the published images, starts Compose, and
 verifies the live HTTPS health endpoint. `./install.sh --upgrade` pulls the
 selected release and force-recreates the services without removing any volume.
 It is safe to rerun. No current settings change requires an image rebuild. The
-licensed tool is replaced separately from Setup, where rollback is available
-until its first successful sync.
+licensed tool replacement and rollback follow the Setup procedure above.
 
 `./uninstall.sh` removes this stack's containers, network, and images, but
 retains every named volume and reports each retained volume and mount path.

@@ -7,6 +7,10 @@ function element() {
     textContent: '', value: '', hidden: false,
     get innerHTML() { return this.markup ?? this.textContent.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'); },
     set innerHTML(value) { this.markup = value; },
+    insertAdjacentHTML(position, value) {
+      if (position !== 'beforeend') throw new Error(`Unsupported insertion: ${position}`);
+      this.innerHTML += value;
+    },
   };
 }
 function getElementById(id) {
