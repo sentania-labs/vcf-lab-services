@@ -331,7 +331,10 @@ class UiApiTests(unittest.TestCase):
         self.claim()
         self.write_state()
         archive = self.tar_tool(
-            profiles={"application-prod.properties": "unrelated.setting=true\n"}
+            profiles={
+                "application-prod.properties": "unrelated.setting=true\n",
+                "application-lab.properties": "lcm.depot.adapter.host=lab.example.test\n",
+            }
         )
         response = self.post(
             "/api/vcfdt",
@@ -701,7 +704,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             self.assertIn("lcm.depot.adapter.host=downloads.example.test", properties)
             self.assertNotEqual(path.stat().st_ino, original_inodes[path])
 
-    def test_settings_patches_other_application_profile_with_endpoint_key(self):
+    def test_settings_leaves_non_production_profile_untouched(self):
         self.claim()
         self.write_state()
         archive = self.tar_tool(
@@ -730,11 +733,52 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(
             saved.get_json()["patchedFiles"],
             [
-                "conf/application-lab.properties",
                 "conf/application-prod.properties",
                 "conf/application-prodv2.properties",
             ],
         )
+        lab_profile = self.tool_store / "current" / "conf" / "application-lab.properties"
+        self.assertEqual(
+            lab_profile.read_text(),
+            "unrelated.setting=true\nlcm.depot.adapter.host=old.example.test\n",
+        )
+
+    def test_settings_write_failure_restores_profiles_and_settings(self):
+        self.claim()
+        self.write_state()
+        self.upload_tool()
+        conf = self.tool_store / "current" / "conf"
+        profiles = sorted(conf.glob("application-prod*.properties"))
+        originals = {path: path.read_bytes() for path in profiles}
+        modes = {path: path.stat().st_mode for path in profiles}
+        settings_before = self.settings.read_bytes()
+        replace = os.replace
+        for failed_path in (profiles[1], self.settings):
+            with self.subTest(failed_path=failed_path.name):
+                replaced = []
+
+                def fail_write(source, destination):
+                    destination = Path(destination)
+                    if destination == failed_path:
+                        raise OSError("injected write failure")
+                    replace(source, destination)
+                    replaced.append(destination)
+
+                with mock.patch.object(self.module.os, "replace", side_effect=fail_write):
+                    response = self.post("/api/settings", json=self.valid_settings())
+                self.assertEqual(response.status_code, 500)
+                self.assertIn("injected write failure", response.get_json()["error"])
+                self.assertIn(profiles[0], replaced)
+                for path in profiles:
+                    self.assertEqual(path.read_bytes(), originals[path])
+                    self.assertEqual(path.stat().st_mode, modes[path])
+                self.assertEqual(self.settings.read_bytes(), settings_before)
+                self.assertEqual(sorted(conf.glob(".*")), [])
+                settings = self.get("/api/settings").get_json()
+                self.assertEqual(settings["depotEndpoint"], "dl.broadcom.com")
+                self.assertEqual(
+                    settings["tokenUrl"], "https://eapi.broadcom.com/vcf/generateToken"
+                )
 
     def test_settings_no_key_error_preserves_stored_endpoints(self):
         self.claim()

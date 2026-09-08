@@ -15,7 +15,7 @@ cat > "$work_dir/vcf-download-tool-stub/bin/vcf-download-tool" <<'STUB'
 set -euo pipefail
 
 tool_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-printf '%s\n' "${STUB_TELEMETRY_VALUE:-written}" \
+printf '%s\n' 'written' \
 	> "$tool_root/conf/telemetry/telemetry.flag"
 
 state_dir="${HOME}/.local/share/vmware/vdt"

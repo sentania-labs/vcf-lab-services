@@ -405,6 +405,7 @@ def _archive_kind(filename):
     raise ToolArchiveError("choose a .tar.gz, .tgz, or .zip VCF Download Tool archive")
 
 
+@contextmanager
 def _patch_tool_endpoints(tool_root, settings=None):
     settings = _settings() if settings is None else settings
     replacements = {
@@ -418,53 +419,70 @@ def _patch_tool_endpoints(tool_root, settings=None):
     conf_dir = tool_root / "conf"
     candidates = sorted(
         path
-        for path in conf_dir.glob("application*.properties")
+        for path in conf_dir.glob("application-prod*.properties")
         if path.is_file() and not path.is_symlink()
     )
-    for properties in candidates:
-        original = properties.read_text()
-        updated = []
-        found_here = False
-        for line in original.splitlines():
-            key = line.split("=", 1)[0].strip()
-            if key in replacements:
-                updated.append(f"{key}={replacements[key]}")
-                found_here = True
-                found_any = True
-            else:
-                updated.append(line)
-        if not found_here:
-            continue
-        updated_text = "\n".join(updated) + "\n"
-        if updated_text == original:
-            continue
-        mode = properties.stat().st_mode & 0o777
-        handle, temp_name = tempfile.mkstemp(
-            prefix=f".{properties.name}.", dir=properties.parent
-        )
-        try:
-            os.fchmod(handle, mode)
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                stream.write(updated_text)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp_name, properties)
-        except Exception:
+    backups = []
+    replaced = []
+    try:
+        for properties in candidates:
+            original = properties.read_text()
+            updated = []
+            found_here = False
+            for line in original.splitlines():
+                key = line.split("=", 1)[0].strip()
+                if key in replacements:
+                    updated.append(f"{key}={replacements[key]}")
+                    found_here = True
+                    found_any = True
+                else:
+                    updated.append(line)
+            if not found_here:
+                continue
+            updated_text = "\n".join(updated) + "\n"
+            if updated_text == original:
+                continue
+            backup_handle, backup_name = tempfile.mkstemp(
+                prefix=f".{properties.name}.rollback.", dir=properties.parent
+            )
+            os.close(backup_handle)
+            backups.append(backup_name)
+            shutil.copy2(properties, backup_name)
+            mode = properties.stat().st_mode & 0o777
+            handle, temp_name = tempfile.mkstemp(
+                prefix=f".{properties.name}.", dir=properties.parent
+            )
             try:
-                os.close(handle)
-            except OSError:
-                pass
-            try:
-                os.unlink(temp_name)
-            except OSError:
-                pass
-            raise
-        changed.append(str(properties.relative_to(tool_root)))
-    if not found_any:
-        raise ToolArchiveError(
-            "no VCF Download Tool endpoint keys were found in conf/application*.properties"
-        )
-    return changed
+                os.fchmod(handle, mode)
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write(updated_text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp_name, properties)
+                replaced.append((properties, backup_name))
+            except Exception:
+                try:
+                    os.close(handle)
+                except OSError:
+                    pass
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
+                raise
+            changed.append(str(properties.relative_to(tool_root)))
+        if not found_any:
+            raise ToolArchiveError(
+                "no VCF Download Tool endpoint keys were found in conf/application-prod*.properties"
+            )
+        yield changed
+    except Exception:
+        for properties, backup_name in reversed(replaced):
+            os.replace(backup_name, properties)
+        raise
+    finally:
+        for backup_name in backups:
+            Path(backup_name).unlink(missing_ok=True)
 
 
 def _find_tool_root(extracted):
@@ -596,7 +614,8 @@ def _install_tool_archive(archive_path, filename, source):
         else:
             _extract_zip(archive_path, extracted)
         tool_root = _find_tool_root(extracted)
-        patched_files = _patch_tool_endpoints(tool_root)
+        with _patch_tool_endpoints(tool_root) as patched_files:
+            pass
         version = _probe_tool_version(tool_root)
         metadata = {
             "version": version if version else "unverified",
@@ -1645,10 +1664,12 @@ def update_settings():
                         ), 409
                     current = VCFDT_STORE / "current"
                     if current.is_dir():
-                        patched_files = _patch_tool_endpoints(
+                        with _patch_tool_endpoints(
                             current, {**stored, **updates}
-                        )
-                    _write_settings(updates)
+                        ) as patched_files:
+                            _write_settings(updates)
+                    else:
+                        _write_settings(updates)
             else:
                 _write_settings(updates)
             if not snapshot_taken:
