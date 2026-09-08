@@ -24,11 +24,10 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: volume-permissions
-          # This repo builds the product. Its checked-in default tracks latest for quickstart
-          # and testing only. Deployments must pin an exact release tag (and digest where wanted),
-          # as lab-deployment does, for example with kustomize images overrides.
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
           image: ghcr.io/sentania-labs/vcf-lab-services/ui:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - sh
             - -ec
@@ -81,11 +80,10 @@ spec:
             - name: redis-tmp
               mountPath: /volumes/redis-tmp
         - name: bootstrap
-          # This repo builds the product. Its checked-in default tracks latest for quickstart
-          # and testing only. Deployments must pin an exact release tag (and digest where wanted),
-          # as lab-deployment does, for example with kustomize images overrides.
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
           image: ghcr.io/sentania-labs/vcf-lab-services/ui:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command: [python, /app/bootstrap.py]
           env:
             - name: CONFIG_DIR
@@ -150,11 +148,10 @@ spec:
             - name: caddy-tmp
               mountPath: /tmp
         - name: depot-sync
-          # This repo builds the product. Its checked-in default tracks latest for quickstart
-          # and testing only. Deployments must pin an exact release tag (and digest where wanted),
-          # as lab-deployment does, for example with kustomize images overrides.
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
           image: ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: SETTINGS_FILE
               value: /config/settings.env
@@ -212,11 +209,10 @@ spec:
             - name: sync-tmp
               mountPath: /tmp
         - name: sftp-backup
-          # This repo builds the product. Its checked-in default tracks latest for quickstart
-          # and testing only. Deployments must pin an exact release tag (and digest where wanted),
-          # as lab-deployment does, for example with kustomize images overrides.
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
           image: ghcr.io/sentania-labs/vcf-lab-services/sftp:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: SETTINGS_FILE
               value: /config/settings.env
@@ -252,11 +248,10 @@ spec:
             - name: sftp-run
               mountPath: /run
         - name: admin-ui
-          # This repo builds the product. Its checked-in default tracks latest for quickstart
-          # and testing only. Deployments must pin an exact release tag (and digest where wanted),
-          # as lab-deployment does, for example with kustomize images overrides.
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
           image: ghcr.io/sentania-labs/vcf-lab-services/ui:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: DEPOT_DIR
               value: /depot

@@ -90,9 +90,10 @@ kind load docker-image --name "$cluster_name" \
 rendered="$work_dir/rendered.yaml"
 kubectl kustomize "$project_dir/kubernetes" \
 	| sed -E \
-		-e 's#ghcr.io/sentania-labs/vcf-lab-services/ui:v[0-9]+\.[0-9]+\.[0-9]+#vcf-services-ui:ci#g' \
-		-e 's#ghcr.io/sentania-labs/vcf-lab-services/sync-base:v[0-9]+\.[0-9]+\.[0-9]+#vcf-services-sync-base:ci#g' \
-		-e 's#ghcr.io/sentania-labs/vcf-lab-services/sftp:v[0-9]+\.[0-9]+\.[0-9]+#vcf-services-sftp:ci#g' \
+		-e 's#ghcr.io/sentania-labs/vcf-lab-services/ui:latest#vcf-services-ui:ci#g' \
+		-e 's#ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest#vcf-services-sync-base:ci#g' \
+		-e 's#ghcr.io/sentania-labs/vcf-lab-services/sftp:latest#vcf-services-sftp:ci#g' \
+		-e 's#imagePullPolicy: Always#imagePullPolicy: IfNotPresent#g' \
 	> "$rendered"
 [ "$(grep -c 'image: vcf-services-ui:ci' "$rendered")" -eq 3 ] \
 	|| fail "live manifest did not select all three local UI image consumers"
@@ -100,6 +101,8 @@ grep -q 'image: vcf-services-sync-base:ci' "$rendered" \
 	|| fail "live manifest did not select the local sync image"
 grep -q 'image: vcf-services-sftp:ci' "$rendered" \
 	|| fail "live manifest did not select the local SFTP image"
+[ "$(grep -c 'imagePullPolicy: IfNotPresent' "$rendered")" -eq 7 ] \
+	|| fail "live manifest did not retain the locally loaded images"
 
 kubectl apply --server-side --field-manager=vcf-services-live-test \
 	-f "$rendered" >/dev/null

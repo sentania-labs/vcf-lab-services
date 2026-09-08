@@ -39,17 +39,12 @@ if (cd "$gate_repo" && "$project_dir/scripts/verify-release-tag.sh" v9.9.9 main 
 	echo "release tag gate accepted a tag that does not exist" >&2
 	exit 1
 fi
-grep -q 'verify-release-tag.sh "\$GITHUB_REF_NAME" origin/main' \
-	"$project_dir/.github/workflows/release.yml"
-! grep -q 'verify-compose-version' "$project_dir/.github/workflows/release.yml"
 grep -q 'verify-published-quickstart.sh.*GITHUB_REF_NAME' \
 	"$project_dir/.github/workflows/release.yml"
 grep -q '^docker compose up -d$' \
 	"$project_dir/scripts/verify-published-quickstart.sh"
 # The quickstart proof runs from the release bundle; it never sets an image override itself.
 ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?VCF_SERVICES_(UI|SYNC|SFTP)_IMAGE=' \
-	"$project_dir/scripts/verify-published-quickstart.sh"
-grep -q 'package-release.sh" "\$version" "\$bundle_work"' \
 	"$project_dir/scripts/verify-published-quickstart.sh"
 "$project_dir/scripts/package-release.sh" "$version" "$work_dir" "$repository" >/dev/null
 

@@ -14,24 +14,27 @@ product_files=(docker-compose.yml compose.sh install.sh caddy/Caddyfile Dockerfi
 ! grep -Eq 'STORAGE_MODE|NFS_|driver_opts|DEPOT_VOLUME_(TYPE|OPTIONS|DEVICE)|BACKUP_VOLUME_(TYPE|OPTIONS|DEVICE)' \
 	-- "${product_files[@]}" || fail "product-managed storage configuration remains"
 
-# The source checkout builds the product, so its defaults track latest and the
-# override variables stay in place for deployments and release bundles to pin.
-[ "$(grep -c 'image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:latest}' docker-compose.yml)" -eq 2 ] \
+# The rendered source checkout defaults track latest and always pull it.
+default_render="$(env -u VCF_SERVICES_UI_IMAGE -u VCF_SERVICES_SYNC_IMAGE \
+	-u VCF_SERVICES_SFTP_IMAGE -u VCF_SERVICES_PULL_POLICY docker compose config)"
+[ "$(grep -c 'image: ghcr.io/sentania-labs/vcf-lab-services/ui:latest' <<< "$default_render")" -eq 2 ] \
 	|| fail "bootstrap and UI do not default to the latest published image through VCF_SERVICES_UI_IMAGE"
-grep -q 'image: ${VCF_SERVICES_SYNC_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest}' docker-compose.yml \
+grep -q 'image: ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest' <<< "$default_render" \
 	|| fail "sync does not default to the latest published image through VCF_SERVICES_SYNC_IMAGE"
-grep -q 'image: ${VCF_SERVICES_SFTP_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sftp:latest}' docker-compose.yml \
+grep -q 'image: ghcr.io/sentania-labs/vcf-lab-services/sftp:latest' <<< "$default_render" \
 	|| fail "SFTP does not default to the latest published image through VCF_SERVICES_SFTP_IMAGE"
-! grep -Eq 'vcf-lab-services/(ui|sync-base|sftp):v[0-9]' docker-compose.yml \
+! grep -Eq 'vcf-lab-services/(ui|sync-base|sftp):v[0-9]' <<< "$default_render" \
 	|| fail "a Compose default still pins a concrete release tag; pinning belongs in deployments"
-[ "$(grep -c 'Deployments must pin an exact release tag' docker-compose.yml)" -eq 4 ] \
-	|| fail "every Compose image default needs the pin-in-deployment note"
+[ "$(grep -c 'pull_policy: always' <<< "$default_render")" -eq 4 ] \
+	|| fail "the four product services do not always refresh the latest image"
 pinned_render="$(VCF_SERVICES_UI_IMAGE=example/ui:v9.9.9 VCF_SERVICES_SYNC_IMAGE=example/sync:v9.9.9 \
-	VCF_SERVICES_SFTP_IMAGE=example/sftp:v9.9.9 docker compose config)"
+	VCF_SERVICES_SFTP_IMAGE=example/sftp:v9.9.9 VCF_SERVICES_PULL_POLICY=never docker compose config)"
 [ "$(grep -c 'image: example/ui:v9.9.9' <<< "$pinned_render")" -eq 2 ] \
 	|| fail "VCF_SERVICES_UI_IMAGE override did not reach bootstrap and the UI"
 grep -q 'image: example/sync:v9.9.9' <<< "$pinned_render" || fail "VCF_SERVICES_SYNC_IMAGE override did not render"
 grep -q 'image: example/sftp:v9.9.9' <<< "$pinned_render" || fail "VCF_SERVICES_SFTP_IMAGE override did not render"
+[ "$(grep -c 'pull_policy: never' <<< "$pinned_render")" -eq 4 ] \
+	|| fail "VCF_SERVICES_PULL_POLICY override did not reach the four product services"
 ! grep -q '^ *build:' docker-compose.yml || fail "Compose still builds a product image"
 
 published_services="$(awk '/^  [A-Za-z0-9_-]+:$/ {service=$1} /^    ports:/ {print service}' docker-compose.yml)"

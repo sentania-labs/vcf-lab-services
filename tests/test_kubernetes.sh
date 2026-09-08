@@ -43,8 +43,8 @@ grep -q 'image: ghcr.io/sentania-labs/vcf-lab-services/sftp:latest' "$rendered" 
 	|| fail "SFTP does not default to the latest published image"
 ! grep -Eq 'vcf-lab-services/(ui|sync-base|sftp):v[0-9]' "$rendered" \
 	|| fail "a Kubernetes default still pins a concrete release tag; pinning belongs in deployments"
-[ "$(grep -c 'Deployments must pin an exact release tag' "$project_dir/kubernetes/deployment.yaml")" -eq 5 ] \
-	|| fail "every Kubernetes product image needs the pin-in-deployment note"
+[ "$(grep -c 'imagePullPolicy: Always' "$rendered")" -eq 5 ] \
+	|| fail "the five product containers do not always refresh the latest image"
 ! grep -q 'fsGroup:' "$rendered" \
 	|| fail "Pod-wide fsGroup would contend with SFTP backup ownership"
 permissions_block="$(sed -n '/name: volume-permissions/,/name: bootstrap/p' "$rendered")"

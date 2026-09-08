@@ -33,10 +33,13 @@ shaped like `vMAJOR.MINOR.PATCH`, and a tag whose commit is not reachable from
 This repo builds the product; it is not a deployment repo. The checked-in
 image defaults in `docker-compose.yml` and `kubernetes/deployment.yaml` track
 the `latest` tags so a source checkout starts the newest release for
-quickstart and testing. Deployments pin. The `VCF_SERVICES_UI_IMAGE`,
+quickstart and testing. Those defaults always pull so a reused checkout does
+not silently keep an older local image. Deployments pin both the image and an
+appropriate pull policy. The `VCF_SERVICES_UI_IMAGE`,
 `VCF_SERVICES_SYNC_IMAGE`, and `VCF_SERVICES_SFTP_IMAGE` Compose variables and
-the Kubernetes image fields are where an exact release tag (and digest where
-wanted) goes, which is how `lab-deployment` consumes this product.
+`VCF_SERVICES_PULL_POLICY`, plus the Kubernetes image and `imagePullPolicy`
+fields, carry that deployment policy. This is how `lab-deployment` consumes
+the product with an exact release tag and a digest where wanted.
 
 The highest semantic release owns the `latest` image tags, so re-releasing an
 older line never moves `latest` backwards. Each GitHub release bundle carries
