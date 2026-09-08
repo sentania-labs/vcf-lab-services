@@ -647,6 +647,10 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             "tab-settings": {
                 "vcf-version",
                 "sku",
+                "schedule-mode",
+                "schedule-hour",
+                "schedule-minute",
+                "cron-advanced",
                 "cron",
                 "timezone",
                 "ceip",
@@ -670,6 +674,15 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             self.assertIn(f'class="settings-target" value="{target}"', body)
         self.assertIn('id="settings-pending"', body)
         self.assertIn('id="backup-pending"', body)
+        # The schedule picker: one weekday box per day, the next-run readout,
+        # and the raw cron input kept behind the advanced toggle.
+        self.assertEqual(body.count('class="schedule-weekday"'), 7)
+        for day in range(7):
+            self.assertIn(f'class="schedule-weekday" value="{day}"', body)
+        self.assertIn('id="schedule-weekdays"', body)
+        self.assertIn('id="schedule-next"', body)
+        self.assertIn('id="cron-wrap" hidden', body)
+        self.assertIn("api/schedule/preview", body)
         self.assertIn('id="log"', body)
         self.assertIn('id="versions"', body)
 
@@ -812,6 +825,49 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         next_run = datetime.fromisoformat(body["nextRun"])
         self.assertEqual(next_run.utcoffset(), timedelta(hours=14))
         self.assertTrue(body["armed"])
+
+    def test_schedule_preview_uses_configured_timezone_and_validates(self):
+        self.claim()
+        self.settings.write_text(
+            self.settings.read_text().replace('TZ="UTC"', 'TZ="Pacific/Kiritimati"')
+        )
+        preview = self.get("/api/schedule/preview?cron=30+6+*+*+1,3")
+        self.assertEqual(preview.status_code, 200)
+        body = preview.get_json()
+        self.assertEqual(body["cron"], "30 6 * * 1,3")
+        self.assertEqual(body["timezone"], "Pacific/Kiritimati")
+        next_run = datetime.fromisoformat(body["nextRun"])
+        self.assertEqual(next_run.utcoffset(), timedelta(hours=14))
+        self.assertEqual((next_run.hour, next_run.minute), (6, 30))
+        self.assertIn(next_run.isoweekday(), {1, 3})
+        # An unsaved timezone edit previews in that zone rather than the stored one.
+        override = self.get(
+            "/api/schedule/preview?cron=0+3+*+*+*&timezone=America/Chicago"
+        ).get_json()
+        self.assertEqual(override["timezone"], "America/Chicago")
+        self.assertIn(
+            datetime.fromisoformat(override["nextRun"]).utcoffset(),
+            {timedelta(hours=-5), timedelta(hours=-6)},
+        )
+        self.assertEqual(
+            self.get("/api/schedule/preview?cron=0+3+*+*&timezone=UTC").status_code,
+            400,
+        )
+        self.assertEqual(
+            self.get("/api/schedule/preview?cron=0+99+*+*+*").status_code, 400
+        )
+        self.assertEqual(
+            self.get("/api/schedule/preview?cron=0+3+*+*+*&timezone=Mars/Olympus").status_code,
+            400,
+        )
+        # Nothing is written by a preview.
+        self.assertIn('CRON_SCHEDULE="0 3 * * 0"', self.settings.read_text())
+
+    def test_schedule_preview_requires_owner(self):
+        self.assertEqual(self.get("/api/schedule/preview?cron=0+3+*+*+*").status_code, 403)
+        self.claim()
+        self.post("/api/logout")
+        self.assertEqual(self.get("/api/schedule/preview?cron=0+3+*+*+*").status_code, 401)
 
     def test_versions_parse_bus_document(self):
         self.claim()

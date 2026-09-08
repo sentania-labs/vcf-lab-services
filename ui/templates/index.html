@@ -69,6 +69,11 @@
   .tab-button { background:transparent; border:1px solid var(--line); color:var(--muted); }
   .tab-button.active { background:var(--accent); border-color:var(--accent); color:white; }
   .tabpanel { display:grid; gap:18px; min-width:0; }
+  .schedule { background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .schedule > label { margin-bottom:8px; }
+  .time { flex-wrap:nowrap; gap:6px; } .time select { width:auto; min-width:64px; }
+  .cron-field { flex:1 1 220px; }
+  .cron-field input { font-family:ui-monospace,monospace; }
   [hidden] { display:none !important; }
   @media (max-width:760px) { .two { grid-template-columns:1fr; } .steps { grid-template-columns:1fr; }
     .step { border-top:0; border-left:3px solid var(--line); padding:4px 0 4px 9px; } header { padding:0 16px; } main { padding:16px; } }
@@ -208,8 +213,30 @@
       <div class="formgrid">
         <div class="field"><label for="vcf-version">VCF version filter</label><input id="vcf-version" placeholder="9.1.0"></div>
         <div class="field"><label for="sku">SKU</label><select id="sku"><option>VCF</option><option>VVF</option></select></div>
-        <div class="field"><label for="cron">Recurring schedule</label><input id="cron" placeholder="0 3 * * 0"></div>
         <div class="field"><label for="timezone">Timezone</label><input id="timezone" placeholder="UTC"></div>
+        <div class="field full schedule" id="schedule">
+          <label>Recurring schedule</label>
+          <div class="formgrid">
+            <div class="field"><label for="schedule-mode">Repeat</label>
+              <select id="schedule-mode"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="custom">Custom cron</option></select></div>
+            <div class="field" id="schedule-time"><label for="schedule-hour">Time of day (configured timezone)</label>
+              <div class="row time"><select id="schedule-hour"></select><span class="muted">:</span><select id="schedule-minute"></select></div></div>
+          </div>
+          <div class="field" id="schedule-weekdays" style="margin-top:10px"><label>On these weekdays</label><div class="targets">
+            <label class="choice"><input type="checkbox" class="schedule-weekday" value="1"> Mon</label>
+            <label class="choice"><input type="checkbox" class="schedule-weekday" value="2"> Tue</label>
+            <label class="choice"><input type="checkbox" class="schedule-weekday" value="3"> Wed</label>
+            <label class="choice"><input type="checkbox" class="schedule-weekday" value="4"> Thu</label>
+            <label class="choice"><input type="checkbox" class="schedule-weekday" value="5"> Fri</label>
+            <label class="choice"><input type="checkbox" class="schedule-weekday" value="6"> Sat</label>
+            <label class="choice"><input type="checkbox" class="schedule-weekday" value="0"> Sun</label>
+          </div></div>
+          <div class="row" style="margin-top:10px">
+            <label class="choice"><input id="cron-advanced" type="checkbox"> Advanced: cron</label>
+            <div class="field cron-field" id="cron-wrap" hidden><input id="cron" placeholder="0 3 * * 0" aria-label="Cron expression"></div>
+          </div>
+          <p class="help" id="schedule-next">Next run: loading</p>
+        </div>
         <div class="field"><label for="ceip">CEIP</label><select id="ceip"><option>DISABLE</option><option>ENABLE</option></select></div>
         <div class="field"><label for="esx-mode">ESX target mode</label><select id="esx-mode"><option value="download">download</option><option value="metadata">metadata</option></select></div>
         <div class="field"><label for="log-retention">Run logs to retain</label><input id="log-retention" type="number" min="1" max="1000"></div>
@@ -337,7 +364,7 @@ function populateSetup(data) {
   $('backup-storage').textContent=storageText(data.storage.backup);
   $('storage-confirmed').checked=settings.storageConfirmed;
   $('vcf-version').value=settings.vcfVersion; $('sku').value=settings.sku;
-  $('cron').value=settings.cronSchedule; $('timezone').value=settings.timezone;
+  loadSchedule(settings.cronSchedule); $('timezone').value=settings.timezone;
   $('ceip').value=settings.ceip; $('backup-enabled').checked=settings.backupEnabled;
   $('uidgid').value=settings.uidGid; $('depot-endpoint').value=settings.depotEndpoint;
   $('token-url').value=settings.tokenUrl; $('esx-mode').value=settings.esxMode;
@@ -388,8 +415,93 @@ $('save-activation').onclick=async()=>{
   catch(error){$('activation-flash').textContent=error.message;}
 };
 
+// Schedule picker. The stored setting stays the five-field CRON_SCHEDULE
+// string; the picker only composes and decomposes it. Daily and weekly shapes
+// are a fixed minute and hour with wildcard day-of-month and month; anything
+// else opens in Custom mode with the raw string.
+let savedNextRun=null, savedCron=null, previewNextRun=null, previewError=null, previewTimer=null;
+const pad=value=>String(value).padStart(2,'0');
+for (let hour=0; hour<24; hour++) $('schedule-hour').insertAdjacentHTML('beforeend',`<option value="${hour}">${pad(hour)}</option>`);
+for (let minute=0; minute<60; minute++) $('schedule-minute').insertAdjacentHTML('beforeend',`<option value="${minute}">${pad(minute)}</option>`);
+
+function decomposeCron(cron){
+  const fields=String(cron||'').trim().split(/\s+/);
+  if(fields.length!==5) return {mode:'custom'};
+  const [minute,hour,dom,month,dow]=fields;
+  if(!/^\d{1,2}$/.test(minute)||!/^\d{1,2}$/.test(hour)||Number(minute)>59||Number(hour)>23||dom!=='*'||month!=='*') return {mode:'custom'};
+  if(dow==='*') return {mode:'daily',hour:Number(hour),minute:Number(minute)};
+  if(!/^\d(,\d)*$/.test(dow)) return {mode:'custom'};
+  const days=[...new Set(dow.split(',').map(Number).map(day=>day===7?0:day))];
+  if(days.some(day=>day>6)) return {mode:'custom'};
+  return {mode:'weekly',hour:Number(hour),minute:Number(minute),days};
+}
+
+function composeCron(){
+  const mode=$('schedule-mode').value;
+  if(mode==='custom') return $('cron').value.trim();
+  const minute=$('schedule-minute').value, hour=$('schedule-hour').value;
+  if(mode==='daily') return `${minute} ${hour} * * *`;
+  const days=[...document.querySelectorAll('.schedule-weekday:checked')].map(box=>Number(box.value)).sort((a,b)=>a-b);
+  return `${minute} ${hour} * * ${days.length?days.join(','):'*'}`;
+}
+
+function loadSchedule(cron){
+  savedCron=cron;
+  const shape=decomposeCron(cron);
+  $('schedule-mode').value=shape.mode;
+  if(shape.mode!=='custom'){ $('schedule-hour').value=shape.hour; $('schedule-minute').value=shape.minute; }
+  document.querySelectorAll('.schedule-weekday').forEach(box=>{ box.checked=shape.mode==='weekly'&&shape.days.includes(Number(box.value)); });
+  $('cron').value=cron;
+  if(shape.mode==='custom') $('cron-advanced').checked=true;
+  previewNextRun=null; previewError=null;
+  renderSchedule();
+}
+
+function renderSchedule(){
+  const mode=$('schedule-mode').value, advanced=$('cron-advanced').checked||mode==='custom';
+  $('schedule-time').hidden=mode==='custom';
+  $('schedule-weekdays').hidden=mode!=='weekly';
+  $('cron-wrap').hidden=!advanced;
+  $('cron').readOnly=mode!=='custom';
+  if(mode!=='custom') $('cron').value=composeCron();
+  renderScheduleNext();
+}
+
+function renderScheduleNext(){
+  const node=$('schedule-next'); const cron=composeCron();
+  node.className='help';
+  if(cron===savedCron){ node.textContent=`Next run: ${fmt(savedNextRun)}`; return; }
+  if(previewError){ node.textContent=previewError; node.className='help error'; return; }
+  node.textContent=previewNextRun ? `Next run after save: ${fmt(previewNextRun)}` : 'Next run after save: calculating';
+}
+
+async function previewSchedule(){
+  const cron=composeCron(); if(cron===savedCron) return;
+  try {
+    const query=new URLSearchParams({cron, timezone:$('timezone').value.trim()});
+    const result=await api(`api/schedule/preview?${query}`);
+    if(composeCron()!==cron) return;
+    previewNextRun=result.nextRun; previewError=null;
+  } catch(error){ previewNextRun=null; previewError=error.message; }
+  renderScheduleNext();
+}
+
+function scheduleChanged(){
+  previewNextRun=null; previewError=null; renderSchedule();
+  clearTimeout(previewTimer); previewTimer=setTimeout(previewSchedule,300);
+}
+
+$('schedule-mode').onchange=()=>{
+  if($('schedule-mode').value==='weekly'&&!document.querySelector('.schedule-weekday:checked')) document.querySelector('.schedule-weekday[value="0"]').checked=true;
+  scheduleChanged();
+};
+['schedule-hour','schedule-minute','timezone'].forEach(id=>{ $(id).onchange=scheduleChanged; });
+$('cron').oninput=scheduleChanged;
+document.querySelectorAll('.schedule-weekday').forEach(box=>{ box.onchange=scheduleChanged; });
+$('cron-advanced').onchange=()=>{ if(!$('cron-advanced').checked&&$('schedule-mode').value==='custom') $('cron-advanced').checked=true; renderSchedule(); };
+
 function settingsPayload(){ return {
-  vcfVersion:$('vcf-version').value, sku:$('sku').value, cronSchedule:$('cron').value,
+  vcfVersion:$('vcf-version').value, sku:$('sku').value, cronSchedule:composeCron(),
   timezone:$('timezone').value, ceip:$('ceip').value, backupEnabled:$('backup-enabled').checked,
   uidGid:$('uidgid').value, depotEndpoint:$('depot-endpoint').value, tokenUrl:$('token-url').value,
   esxMode:$('esx-mode').value, logRetention:$('log-retention').value,
@@ -422,6 +534,7 @@ async function poll(){
     const status=await api('api/status'); const running=status.running, armed=status.armed;
     $('st-state').innerHTML=running?'<span class="pill run">running</span>':armed?'<span class="pill ok">armed, idle</span>':'<span class="pill bad">not armed</span>';
     $('st-current').textContent=status.currentTarget||'none'; $('st-next').textContent=fmt(status.nextRun); $('st-tool').textContent=status.vcfdtVersion;
+    savedNextRun=status.nextRun; renderScheduleNext();
     $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}</span></div></div>`;}).join('');
     showPending(status);
     $('sync-btn').disabled=running||!armed; $('refresh-remote').disabled=running||!armed; $('vcfdt-upload').disabled=running;

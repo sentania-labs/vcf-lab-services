@@ -25,13 +25,16 @@ VCF_SERVICES_SFTP_IMAGE=vcf-services-sftp:local \
 The UI test covers first-person ownership, login, live depot authentication,
 licensed archive staging, persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
+the schedule preview endpoint computing an unsaved schedule's next run in
+the configured or supplied timezone and rejecting bad input,
 setup completion, shared password replacement, sync dispatch, partial settings
 merges over the stored document, settings saved during a running sync being
 persisted and flagged for the next run while the tool-backed endpoints stay
 blocked, a save that lands under the run's settings snapshot lock before the
 run publishes its state still being flagged for the next run, the live backup
 service settings being reported as applied now instead of deferred, the tabbed
-console rendering every control, advisory tool version and Software Depot ID
+console rendering every control including the daily, weekly, and custom cron
+schedule picker with its next-run readout, advisory tool version and Software Depot ID
 probes that preserve the last verified ID, and config version marker
 quarantine. The Compose test enforces release-pinned published-image defaults,
 first-boot state initialization, internal TLS, the platform-provided storage
