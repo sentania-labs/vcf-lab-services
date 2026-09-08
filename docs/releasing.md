@@ -32,20 +32,21 @@ claim, tool upload, registration, a partial settings update, and an
 authenticated HTTPS Range response over the live API. The GitHub release is
 not created unless this published-image proof passes.
 
-Tool upload validation is structural: the archive must contain the expected
+Tool archive validation, shared by the upload and depot install paths, is
+structural: the archive must contain the expected
 binary layout, but the `--version` shape check is deliberately advisory. The
 version parser is confirmed against licensed VCF Download Tool output for
 `9.1.0.0.25371089`: it scans past the banner, prefers the labelled `Version:`
 line, and accepts the bare dotted version as a fallback. The probe remains
 advisory by design so a future output-format change does not reject a valid
-upload. An unexpected or failed version probe still installs the archive and
+archive. An unexpected or failed version probe still installs the archive and
 marks its version as unverified in the console. The published-quickstart proof
 exercises both paths: the CI stub emits licensed-shaped `--version` output
 (banner, `Version:` line, bare version, log-file line) and the proof asserts
 the parsed version matches the stub exactly, then uploads an unparseable stub
 and asserts it installs as unverified without disturbing the saved Software
 Depot ID. A failed or implausible
-Software Depot ID probe never blocks the upload and never replaces the last
+Software Depot ID probe never blocks the install and never replaces the last
 verified saved ID; the registration screen reports the probe failure.
 
 The release bundle contains only the Compose and Kubernetes definitions, Caddy

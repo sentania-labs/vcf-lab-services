@@ -38,9 +38,7 @@ VERSION_MARKER_FILE = Path(
     os.environ.get("VERSION_MARKER_FILE", "/config/.vcf-services-version")
 )
 VERSION_STATUS_FILE = Path(
-    os.environ.get(
-        "VERSION_STATUS_FILE", "/config/.vcf-services-version-status.json"
-    )
+    os.environ.get("VERSION_STATUS_FILE", "/config/.vcf-services-version-status.json")
 )
 SOFTWARE_DEPOT_ID_FILE = Path(
     os.environ.get("SOFTWARE_DEPOT_ID_FILE", "/config/software-depot-id")
@@ -76,9 +74,7 @@ FLASK_SECRET_FILE = Path(
     os.environ.get("FLASK_SECRET_FILE", f"{SECRETS_ROOT}/flask-secret")
 )
 CADDY_CA_FILE = Path(
-    os.environ.get(
-        "CADDY_CA_FILE", "/caddy-data/caddy/pki/authorities/local/root.crt"
-    )
+    os.environ.get("CADDY_CA_FILE", "/caddy-data/caddy/pki/authorities/local/root.crt")
 )
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
@@ -116,9 +112,7 @@ LIVE_TOOL_FIELDS = {"depotEndpoint", "tokenUrl"}
 # effect at once and must never be reported as waiting for the next run.
 LIVE_SERVICE_FIELDS = {"backupEnabled", "uidGid"}
 BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
-TOOL_VERSION_VALUE = (
-    r"v?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?"
-)
+TOOL_VERSION_VALUE = r"v?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?"
 TOOL_VERSION_RE = re.compile(rf"^{TOOL_VERSION_VALUE}$", re.IGNORECASE)
 TOOL_VERSION_LABEL_RE = re.compile(
     rf"^Version\s*:\s*(?P<version>{TOOL_VERSION_VALUE})$", re.IGNORECASE
@@ -126,6 +120,14 @@ TOOL_VERSION_LABEL_RE = re.compile(
 SOFTWARE_DEPOT_ID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+# The sync tool mirrors its own distribution archives into this depot tree.
+# The tree is flat: PROD/COMP/VCFDT/vcf-download-tool-<version>.tar.gz with no
+# version subdirectories, and the listing and resolver accept only that layout.
+DEPOT_TOOL_DIR = DEPOT / "PROD" / "COMP" / "VCFDT"
+DEPOT_TOOL_ARCHIVE_RE = re.compile(
+    rf"^vcf-download-tool-(?P<version>{TOOL_VERSION_VALUE})\.(?:tar\.gz|tgz|zip)$",
+    re.IGNORECASE,
 )
 ARMING_INSTRUCTIONS = (
     "Register the Software Depot ID in the Broadcom download tool registration "
@@ -344,8 +346,15 @@ def _extract_tar(archive_path, destination):
                 if len(members) > MAX_ARCHIVE_MEMBERS:
                     raise ToolArchiveError("the archive contains too many files")
                 _safe_archive_path(member.name)
-                if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
-                    raise ToolArchiveError("the archive contains an unsupported file type")
+                if not (
+                    member.isfile()
+                    or member.isdir()
+                    or member.issym()
+                    or member.islnk()
+                ):
+                    raise ToolArchiveError(
+                        "the archive contains an unsupported file type"
+                    )
                 if member.issym() or member.islnk():
                     _safe_archive_path(member.linkname)
                 extracted_bytes += max(member.size, 0)
@@ -353,7 +362,7 @@ def _extract_tar(archive_path, destination):
                     raise ToolArchiveError("the expanded archive is too large")
             archive.extractall(destination, members=members, filter="data")
     except (tarfile.TarError, OSError) as exc:
-        raise ToolArchiveError("the uploaded file is not a readable tar.gz archive") from exc
+        raise ToolArchiveError("the archive is not a readable tar.gz archive") from exc
 
 
 def _extract_zip(archive_path, destination):
@@ -371,7 +380,9 @@ def _extract_zip(archive_path, destination):
                     raise ToolArchiveError("the archive contains duplicate paths")
                 seen.add(path)
                 if (member.external_attr >> 16) & 0o170000 == 0o120000:
-                    raise ToolArchiveError("the archive contains an unsupported symbolic link")
+                    raise ToolArchiveError(
+                        "the archive contains an unsupported symbolic link"
+                    )
                 extracted_bytes += max(member.file_size, 0)
                 if extracted_bytes > MAX_EXTRACTED_BYTES:
                     raise ToolArchiveError("the expanded archive is too large")
@@ -382,7 +393,7 @@ def _extract_zip(archive_path, destination):
                 if mode:
                     os.chmod(destination / path, mode)
     except (zipfile.BadZipFile, OSError) as exc:
-        raise ToolArchiveError("the uploaded file is not a readable zip archive") from exc
+        raise ToolArchiveError("the archive is not a readable zip archive") from exc
 
 
 def _archive_kind(filename):
@@ -415,7 +426,9 @@ def _patch_tool_endpoints(tool_root):
             found.add(key)
         else:
             updated.append(line)
-    updated.extend(f"{key}={value}" for key, value in replacements.items() if key not in found)
+    updated.extend(
+        f"{key}={value}" for key, value in replacements.items() if key not in found
+    )
     properties.write_text("\n".join(updated) + "\n")
 
 
@@ -488,7 +501,12 @@ def _probe_machine_id(tool_root):
 def _current_tool_info():
     current = VCFDT_STORE / "current"
     tool = current / "bin" / "vcf-download-tool"
-    if not current.is_dir() or not tool.is_file() or tool.is_symlink() or tool.stat().st_size == 0:
+    if (
+        not current.is_dir()
+        or not tool.is_file()
+        or tool.is_symlink()
+        or tool.stat().st_size == 0
+    ):
         return {"installed": False, "version": "not installed"}
     metadata = {}
     try:
@@ -500,6 +518,8 @@ def _current_tool_info():
         "version": metadata.get("version", "unknown"),
         "versionVerified": bool(metadata.get("versionVerified", "version" in metadata)),
         "uploadedAt": metadata.get("uploadedAt"),
+        "source": metadata.get("source", "upload"),
+        "sourceFile": metadata.get("sourceFile"),
     }
 
 
@@ -514,13 +534,17 @@ def _tool_update_lock():
         lock_file.close()
 
 
-def _install_tool(upload):
-    filename = Path(str(upload.filename or "").replace("\\", "/")).name
+def _install_tool_archive(archive_path, filename, source):
+    """Stage one validated archive as the new current release.
+
+    The archive is read in place. An upload has already been saved under the
+    tool store, and a depot archive is opened read-only where it sits under
+    the read-only depot mount. Nothing is ever written into the depot.
+    """
     archive_kind = _archive_kind(filename)
     release_id = uuid.uuid4().hex
     incoming = VCFDT_STORE / ".incoming" / release_id
     extracted = incoming / "extracted"
-    archive_path = incoming / "upload"
     releases = VCFDT_STORE / "releases"
     release_path = releases / release_id
     next_link = VCFDT_STORE / f".current-{release_id}"
@@ -530,9 +554,8 @@ def _install_tool(upload):
     old_target = None
     swapped = False
     try:
-        upload.save(archive_path)
         if archive_path.stat().st_size == 0:
-            raise ToolArchiveError("the uploaded archive is empty")
+            raise ToolArchiveError("the archive is empty")
         if archive_kind == "tar":
             _extract_tar(archive_path, extracted)
         else:
@@ -544,6 +567,8 @@ def _install_tool(upload):
             "version": version if version else "unverified",
             "versionVerified": version is not None,
             "uploadedAt": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "sourceFile": filename,
         }
         try:
             machine_id = _probe_machine_id(tool_root)
@@ -564,6 +589,146 @@ def _install_tool(upload):
             shutil.rmtree(release_path, ignore_errors=True)
         next_link.unlink(missing_ok=True)
         shutil.rmtree(incoming, ignore_errors=True)
+
+
+def _install_tool(upload):
+    filename = Path(str(upload.filename or "").replace("\\", "/")).name
+    _archive_kind(filename)
+    staging = VCFDT_STORE / ".incoming" / f"upload-{uuid.uuid4().hex}"
+    staging.mkdir(parents=True)
+    try:
+        archive_path = staging / "upload"
+        upload.save(archive_path)
+        return _install_tool_archive(archive_path, filename, "upload")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _archive_version(path):
+    match = DEPOT_TOOL_ARCHIVE_RE.fullmatch(path.name)
+    return None if match is None else match.group("version")
+
+
+def _version_sort_key(version):
+    parts = []
+    for part in re.split(r"[.+-]", (version or "").lstrip("vV")):
+        parts.append((0, int(part)) if part.isdigit() else (1, part.lower()))
+    return parts
+
+
+def _depot_tool_archives():
+    """List the tool archives the sync mirrored under PROD/COMP/VCFDT.
+
+    Only regular files directly under the VCFDT tree that still resolve inside
+    it after symlink resolution are offered.
+    """
+    root = DEPOT_TOOL_DIR
+    if not root.is_dir():
+        return []
+    try:
+        resolved_root = root.resolve(strict=True)
+        candidates = sorted(root.iterdir())
+    except OSError:
+        return []
+    installed = _current_tool_info()
+    entries = []
+    for path in candidates:
+        try:
+            _archive_kind(path.name)
+        except ToolArchiveError:
+            continue
+        try:
+            resolved = path.resolve(strict=True)
+            if not resolved.is_file() or not resolved.is_relative_to(resolved_root):
+                continue
+            stat = resolved.stat()
+        except OSError:
+            continue
+        version = _archive_version(path)
+        entries.append(
+            {
+                "path": path.name,
+                "filename": path.name,
+                "version": version or "unknown",
+                "versionKnown": version is not None,
+                "sizeBytes": stat.st_size,
+                "readable": os.access(resolved, os.R_OK),
+                "modifiedAt": datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc
+                ).isoformat(),
+                "installed": bool(
+                    installed["installed"]
+                    and (
+                        (
+                            installed.get("source") == "depot"
+                            and installed.get("sourceFile") == path.name
+                        )
+                        or (version is not None and version == installed["version"])
+                    )
+                ),
+            }
+        )
+    entries.sort(
+        key=lambda entry: (
+            entry["versionKnown"],
+            _version_sort_key(entry["version"]),
+            entry["modifiedAt"],
+        ),
+        reverse=True,
+    )
+    return entries
+
+
+def _resolve_depot_archive(value):
+    """Map an operator-chosen listing path back to a file inside the VCFDT tree."""
+    if not isinstance(value, str) or not value.strip():
+        raise ToolArchiveError("choose a VCF Download Tool archive from the depot")
+    if "\x00" in value:
+        raise ToolArchiveError("the chosen archive is not inside the depot VCFDT tree")
+    name = value.replace("\\", "/")
+    if "/" in name or name in {".", ".."}:
+        raise ToolArchiveError("the chosen archive is not inside the depot VCFDT tree")
+    try:
+        resolved_root = DEPOT_TOOL_DIR.resolve(strict=True)
+        candidate = (DEPOT_TOOL_DIR / name).resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        raise ToolArchiveError("the chosen archive is not in the depot") from exc
+    if candidate == resolved_root or not candidate.is_relative_to(resolved_root):
+        raise ToolArchiveError("the chosen archive is not inside the depot VCFDT tree")
+    if not candidate.is_file():
+        raise ToolArchiveError("the chosen depot entry is not an archive file")
+    _archive_kind(candidate.name)
+    if not os.access(candidate, os.R_OK):
+        raise ToolArchiveError(
+            "the console cannot read that depot archive; check its file mode"
+        )
+    return candidate
+
+
+def _replace_tool(install):
+    """Run one tool replacement under the guards shared by upload and depot."""
+    try:
+        with _tool_update_lock():
+            if _state().get("running", False):
+                return jsonify({"error": "wait for the running sync to finish"}), 409
+            metadata, old_target, machine_id = install()
+            if machine_id:
+                _remember_machine_id(machine_id)
+            else:
+                _machine_id_cache["value"] = None
+            if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
+                shutil.rmtree(old_target, ignore_errors=True)
+    except BlockingIOError:
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
+    except ToolArchiveError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError:
+        return jsonify(
+            {"error": "the tool could not be staged on its mounted volume"}
+        ), 500
+    return jsonify({"installed": True, **metadata}), 201
 
 
 @app.errorhandler(413)
@@ -901,7 +1066,7 @@ def _machine_id():
     tool = VCFDT_STORE / "current" / "bin" / "vcf-download-tool"
     if not tool.is_file():
         saved = _persisted_machine_id()
-        return saved, "Upload the VCF Download Tool before verifying its saved ID."
+        return saved, "Install the VCF Download Tool before verifying its saved ID."
     try:
         value = _probe_machine_id(tool.parent.parent)
         _remember_machine_id(value)
@@ -1028,7 +1193,11 @@ def auth_check():
     credentials = request.authorization
     if credentials and _verify_credentials(credentials.username, credentials.password):
         return "ok", 200
-    return "authentication required", 401, {"WWW-Authenticate": 'Basic realm="VCF Services"'}
+    return (
+        "authentication required",
+        401,
+        {"WWW-Authenticate": 'Basic realm="VCF Services"'},
+    )
 
 
 @app.get("/api/session")
@@ -1053,7 +1222,9 @@ def claim():
     if not isinstance(password, str) or len(password) < 12:
         return jsonify({"error": "use a password of at least 12 characters"}), 400
     if len(password) > 1024 or "\n" in password or "\r" in password:
-        return jsonify({"error": "the password must be one line and at most 1024 characters"}), 400
+        return jsonify(
+            {"error": "the password must be one line and at most 1024 characters"}
+        ), 400
 
     with _credential_update_lock():
         if _auth_doc() is not None:
@@ -1077,7 +1248,9 @@ def claim():
 @app.post("/api/login")
 def login():
     body = request.get_json(silent=True) or {}
-    if not _verify_credentials(str(body.get("username", "")), str(body.get("password", ""))):
+    if not _verify_credentials(
+        str(body.get("username", "")), str(body.get("password", ""))
+    ):
         return jsonify({"error": "the username or password is incorrect"}), 401
     session.clear()
     session["owner"] = body["username"]
@@ -1100,7 +1273,9 @@ def bootstrap_status():
             {
                 "claimed": True,
                 "authenticated": False,
-                "setupComplete": False if version_problem else settings["setupComplete"],
+                "setupComplete": False
+                if version_problem
+                else settings["setupComplete"],
                 "versionProblem": version_problem,
             }
         )
@@ -1229,24 +1404,31 @@ def upload_vcfdt():
     upload = request.files.get("archive")
     if upload is None or not upload.filename:
         return jsonify({"error": "choose a VCF Download Tool archive"}), 400
+    return _replace_tool(lambda: _install_tool(upload))
+
+
+@app.get("/api/vcfdt/depot")
+def vcfdt_depot_archives():
+    return jsonify(
+        {
+            "directory": str(DEPOT_TOOL_DIR),
+            "mounted": DEPOT_TOOL_DIR.is_dir(),
+            "installed": _current_tool_info(),
+            "archives": _depot_tool_archives(),
+        }
+    )
+
+
+@app.post("/api/vcfdt/depot")
+def install_vcfdt_from_depot():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
     try:
-        with _tool_update_lock():
-            if _state().get("running", False):
-                return jsonify({"error": "wait for the running sync to finish"}), 409
-            metadata, old_target, machine_id = _install_tool(upload)
-            if machine_id:
-                _remember_machine_id(machine_id)
-            else:
-                _machine_id_cache["value"] = None
-            if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
-                shutil.rmtree(old_target, ignore_errors=True)
-    except BlockingIOError:
-        return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
+        archive = _resolve_depot_archive(body.get("path"))
     except ToolArchiveError as exc:
         return jsonify({"error": str(exc)}), 400
-    except OSError:
-        return jsonify({"error": "the tool could not be saved to its mounted volume"}), 500
-    return jsonify({"installed": True, **metadata}), 201
+    return _replace_tool(lambda: _install_tool_archive(archive, archive.name, "depot"))
 
 
 @app.get("/api/registration")
@@ -1278,7 +1460,11 @@ def save_registration():
     if not isinstance(activation_code, str) or not activation_code.strip():
         return jsonify({"error": "enter the activation code from Broadcom"}), 400
     activation_code = activation_code.strip()
-    if len(activation_code) > 4096 or "\n" in activation_code or "\r" in activation_code:
+    if (
+        len(activation_code) > 4096
+        or "\n" in activation_code
+        or "\r" in activation_code
+    ):
         return jsonify({"error": "the activation code must be one line"}), 400
     try:
         _write_secret(ACTIVATION_CODE_FILE, activation_code + "\n")
@@ -1326,7 +1512,9 @@ def update_settings():
     targets = body["syncTargets"]
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "select at least one sync target"}), 400
-    if any(target not in VALID_TARGETS for target in targets) or len(set(targets)) != len(targets):
+    if any(target not in VALID_TARGETS for target in targets) or len(
+        set(targets)
+    ) != len(targets):
         return jsonify({"error": "the sync target selection is invalid"}), 400
     cron = str(body["cronSchedule"]).strip()
     cron_problem = _cron_problem(cron)
@@ -1349,11 +1537,15 @@ def update_settings():
     backup_enabled = body["backupEnabled"]
     storage_confirmed = body["storageConfirmed"]
     if not isinstance(backup_enabled, bool) or not isinstance(storage_confirmed, bool):
-        return jsonify({"error": "storage and backup selections must be true or false"}), 400
+        return jsonify(
+            {"error": "storage and backup selections must be true or false"}
+        ), 400
     uid_gid = str(body["uidGid"])
     match = re.fullmatch(r"([0-9]+):([0-9]+)", uid_gid)
     if not match or any(not 1 <= int(value) <= 2147483647 for value in match.groups()):
-        return jsonify({"error": "UID:GID must contain two non-root numeric values"}), 400
+        return jsonify(
+            {"error": "UID:GID must contain two non-root numeric values"}
+        ), 400
     esx_mode = str(body["esxMode"])
     if esx_mode not in {"download", "metadata"}:
         return jsonify({"error": "ESX mode must be download or metadata"}), 400
@@ -1365,8 +1557,10 @@ def update_settings():
         return jsonify({"error": "log retention must be from 1 through 1000"}), 400
     vkr_match = str(body["vkrMatch"]).strip()
     vkr_os = str(body["vkrOs"]).strip()
-    if len(vkr_match) > 200 or len(vkr_os) > 100 or any(
-        "\n" in value or "\r" in value for value in (vkr_match, vkr_os)
+    if (
+        len(vkr_match) > 200
+        or len(vkr_os) > 100
+        or any("\n" in value or "\r" in value for value in (vkr_match, vkr_os))
     ):
         return jsonify({"error": "VKr filters must be short single-line values"}), 400
     updates = {
@@ -1424,7 +1618,9 @@ def update_settings():
                 _record_pending_settings(deferred, run_id)
             pending = _pending_settings(state, in_flight=snapshot_taken)
     except BlockingIOError:
-        return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
     except OSError as exc:
         return jsonify({"error": f"could not save settings: {exc}"}), 500
     return jsonify(
@@ -1440,7 +1636,9 @@ def update_password():
     if not isinstance(new, str) or len(new) < 12:
         return jsonify({"error": "use a new password of at least 12 characters"}), 400
     if len(new) > 1024 or "\n" in new or "\r" in new:
-        return jsonify({"error": "the password must be one line and at most 1024 characters"}), 400
+        return jsonify(
+            {"error": "the password must be one line and at most 1024 characters"}
+        ), 400
     with _credential_update_lock():
         auth = _auth_doc()
         if not auth or not _verify_credentials(auth["username"], current):
@@ -1504,7 +1702,9 @@ def versions_remote():
             )
         except (redis_lib.RedisError, OSError) as exc:
             if doc is None:
-                return jsonify({"error": f"job bus unavailable: {exc}", "components": []}), 502
+                return jsonify(
+                    {"error": f"job bus unavailable: {exc}", "components": []}
+                ), 502
     if doc is None:
         return jsonify({"components": [], "pending": True}), 202
     if doc.get("error"):
@@ -1542,7 +1742,9 @@ def sync():
         return jsonify({"error": "select at least one valid target"}), 400
     state = _state()
     if not _activation_configured():
-        return jsonify({"error": f"not armed: activation code missing. {ARMING_INSTRUCTIONS}"}), 409
+        return jsonify(
+            {"error": f"not armed: activation code missing. {ARMING_INSTRUCTIONS}"}
+        ), 409
     if state.get("running"):
         return jsonify({"error": "a sync is already running"}), 409
     try:

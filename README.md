@@ -34,7 +34,9 @@ before exposing it more broadly.
 
 The console then walks through:
 
-1. Uploading and validating the portal-downloaded VCF Download Tool archive.
+1. Installing the licensed VCF Download Tool, either from an archive the sync
+   already mirrored under `PROD/COMP/VCFDT` in the depot or by uploading the
+   portal-downloaded archive. Both paths validate the archive the same way.
 2. Reading the persistent Software Depot ID and saving its activation code.
 3. Confirming the platform-provided depot and backup mounts.
 4. Choosing the VCF filter, SKU, targets, recurring schedule, timezone, CEIP,
@@ -69,7 +71,8 @@ Two groups of settings behave differently:
   reports them as applied now rather than as waiting for the next run, and
   turning backup off during a sync ends current SFTP sessions.
 
-Tool upload and starting a sync keep their existing running-sync guards.
+Tool installation (from the depot or by upload) and starting a sync keep
+their existing running-sync guards.
 
 ## Storage ownership
 
@@ -95,8 +98,9 @@ named volumes. The most important small volumes are:
   secrets.
 - `vcf-services-sftp-host-keys`, the stable consumer fingerprints.
 
-The `vcf-services-vcfdt-tool` volume is disposable. Restore it by uploading the
-licensed archive again.
+The `vcf-services-vcfdt-tool` volume is disposable. Restore it from the Setup
+tab by installing a tool archive already mirrored in the depot, or by
+uploading the licensed archive again.
 
 The config volume carries the product version that created it. If an unmarked
 or differently marked config volume is found, the console stays reachable but
@@ -162,8 +166,11 @@ Compose commands are the normal path.
 Deferred work is explicit:
 
 - Native in-product NFS configuration. Storage is platform-provided.
-- VCFDT self-upgrade from content already in the depot. Upload-driven atomic
-  replacement is present.
+- Keeping the previous tool release for rollback after a depot or upload
+  install. Installing or upgrading the tool from the depot's own
+  `PROD/COMP/VCFDT` tree is present and shares the upload path's atomic
+  release swap, but the replaced release is removed once the swap lands, so
+  rolling back means installing the previous version again from the depot.
 - Backup status by product and product release checking.
 - A console path for adopting an existing VCFDT depot and Software Depot ID.
   The adoption scripts remain in `scripts/`, but removing the installer left
