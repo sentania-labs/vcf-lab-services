@@ -24,8 +24,10 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: volume-permissions
-          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.5
-          imagePullPolicy: IfNotPresent
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:latest
+          imagePullPolicy: Always
           command:
             - sh
             - -ec
@@ -78,8 +80,10 @@ spec:
             - name: redis-tmp
               mountPath: /volumes/redis-tmp
         - name: bootstrap
-          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.5
-          imagePullPolicy: IfNotPresent
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:latest
+          imagePullPolicy: Always
           command: [python, /app/bootstrap.py]
           env:
             - name: CONFIG_DIR
@@ -144,8 +148,10 @@ spec:
             - name: caddy-tmp
               mountPath: /tmp
         - name: depot-sync
-          image: ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.5
-          imagePullPolicy: IfNotPresent
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+          image: ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest
+          imagePullPolicy: Always
           env:
             - name: SETTINGS_FILE
               value: /config/settings.env
@@ -203,8 +209,10 @@ spec:
             - name: sync-tmp
               mountPath: /tmp
         - name: sftp-backup
-          image: ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.5
-          imagePullPolicy: IfNotPresent
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+          image: ghcr.io/sentania-labs/vcf-lab-services/sftp:latest
+          imagePullPolicy: Always
           env:
             - name: SETTINGS_FILE
               value: /config/settings.env
@@ -240,8 +248,10 @@ spec:
             - name: sftp-run
               mountPath: /run
         - name: admin-ui
-          image: ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.5
-          imagePullPolicy: IfNotPresent
+          # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+          # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+          image: ghcr.io/sentania-labs/vcf-lab-services/ui:latest
+          imagePullPolicy: Always
           env:
             - name: DEPOT_DIR
               value: /depot

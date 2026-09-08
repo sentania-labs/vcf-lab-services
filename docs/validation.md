@@ -39,14 +39,17 @@ service settings being reported as applied now instead of deferred, the tabbed
 console rendering every control including the daily, weekly, and custom cron
 schedule picker with its next-run readout, advisory tool version and Software Depot ID
 probes that preserve the last verified ID, and config version marker
-quarantine. The Compose test enforces release-pinned published-image defaults,
+quarantine. The Compose test enforces the latest-tracking published-image defaults,
+their always-pull behavior, and their override variables,
 first-boot state initialization, internal TLS, the platform-provided storage
 boundary, protected Redis, fixed mount contracts, version mismatch safe-stop
 wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
 single-writer sync behavior, sync safe-stop on a version mismatch, log
-retention, SFTP identity and host keys, Range serving, packaging, rejection of
-release tags that disagree with the Compose or Kubernetes defaults,
-idempotent release publication, and license isolation.
+retention, SFTP identity and host keys, Range serving, packaging, the release
+tag gate (well formed tags on main pass, malformed or unmerged tags are
+refused), idempotent release publication, and license isolation. The
+Kubernetes manifest test also asserts that product images default to the
+latest tags with an always-pull policy.
 
 `tests/make-stub-depot.sh <dir> [version ...]` builds a stub depot tree that
 models the reference depot layout for the tool itself, a flat

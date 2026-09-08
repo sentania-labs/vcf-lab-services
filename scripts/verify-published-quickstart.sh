@@ -1,12 +1,21 @@
 #!/bin/bash
 set -euo pipefail
 
-version="${1:?usage: verify-published-quickstart.sh RELEASE_VERSION}"
+version="${1:?usage: verify-published-quickstart.sh RELEASE_VERSION [IMAGE_REPOSITORY]}"
+image_repository="${2:-ghcr.io/sentania-labs/vcf-lab-services}"
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-cd "$project_dir"
 
-"$project_dir/scripts/verify-compose-version.sh" "$version" \
-	"$project_dir/docker-compose.yml" >/dev/null
+# The source checkout defaults to the latest images, so the proof runs the
+# quickstart from the release bundle instead: its .env pins Compose to the
+# exact tag being released, which is what an operator downloads.
+bundle_work="$(mktemp -d /tmp/vcf-services-quickstart.XXXXXX)"
+"$project_dir/scripts/package-release.sh" "$version" "$bundle_work" "$image_repository" >/dev/null
+tar -xzf "$bundle_work/vcf-lab-services-$version.tar.gz" -C "$bundle_work"
+bundle_dir="$bundle_work/vcf-lab-services-$version"
+grep -qx "VCF_SERVICES_UI_IMAGE=$image_repository/ui:$version" "$bundle_dir/.env"
+grep -qx "VCF_SERVICES_SYNC_IMAGE=$image_repository/sync-base:$version" "$bundle_dir/.env"
+grep -qx "VCF_SERVICES_SFTP_IMAGE=$image_repository/sftp:$version" "$bundle_dir/.env"
+cd "$bundle_dir"
 
 volumes=(
 	vcf-services-depot-store
@@ -30,13 +39,15 @@ done
 started=false
 stop_stack() {
 	if [ "$started" = true ]; then
-		docker compose stop >/dev/null 2>&1 || true
+		(cd "$bundle_dir" && docker compose stop >/dev/null 2>&1) || true
 	fi
+	rm -rf "$bundle_work"
 }
 trap stop_stack EXIT
 
 started=true
-# This is the README quickstart. No image variable or tag override is allowed.
+# This is the README quickstart as shipped in the release bundle. The bundle's
+# .env pins the images; no image variable or tag override is set here.
 docker compose up -d
 
 deadline=$((SECONDS + 180))
@@ -56,14 +67,14 @@ for component in ui sync-base sftp; do
 		sync-base) container=vcf-services-sync ;;
 		sftp) container=vcf-services-sftp ;;
 	esac
-	expected_image="ghcr.io/sentania-labs/vcf-lab-services/$component:$version"
+	expected_image="$image_repository/$component:$version"
 	actual_image="$(docker inspect "$container" --format '{{.Config.Image}}')"
 	[ "$actual_image" = "$expected_image" ] || {
 		echo "ERROR: $container started $actual_image, expected $expected_image" >&2
 		exit 1
 	}
 	docker image inspect "$expected_image" --format '{{json .RepoDigests}}' \
-		| grep -q "ghcr.io/sentania-labs/vcf-lab-services/$component@sha256:" || {
+		| grep -q "$image_repository/$component@sha256:" || {
 		echo "ERROR: $expected_image has no digest proving it was pulled from GHCR" >&2
 		exit 1
 	}

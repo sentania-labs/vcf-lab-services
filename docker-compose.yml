@@ -3,7 +3,10 @@ name: vcf-services
 services:
   bootstrap:
     container_name: vcf-services-bootstrap
-    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.5}
+    # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+    # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:latest}
+    pull_policy: ${VCF_SERVICES_PULL_POLICY:-always}
     restart: "no"
     command: ["python", "/app/bootstrap.py"]
     environment:
@@ -43,7 +46,10 @@ services:
 
   depot-sync:
     container_name: vcf-services-sync
-    image: ${VCF_SERVICES_SYNC_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sync-base:v0.2.5}
+    # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+    # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+    image: ${VCF_SERVICES_SYNC_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest}
+    pull_policy: ${VCF_SERVICES_PULL_POLICY:-always}
     restart: unless-stopped
     environment:
       SETTINGS_FILE: /etc/vcf-services/settings.env
@@ -81,7 +87,10 @@ services:
 
   sftp-backup:
     container_name: vcf-services-sftp
-    image: ${VCF_SERVICES_SFTP_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sftp:v0.2.5}
+    # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+    # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+    image: ${VCF_SERVICES_SFTP_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/sftp:latest}
+    pull_policy: ${VCF_SERVICES_PULL_POLICY:-always}
     restart: unless-stopped
     init: true
     environment:
@@ -113,7 +122,10 @@ services:
 
   admin-ui:
     container_name: vcf-services-ui
-    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:v0.2.5}
+    # This repo builds the product, so this default tracks and always pulls latest for quickstart and
+    # testing. Deployments such as lab-deployment must pin a release tag, optional digest, and pull policy.
+    image: ${VCF_SERVICES_UI_IMAGE:-ghcr.io/sentania-labs/vcf-lab-services/ui:latest}
+    pull_policy: ${VCF_SERVICES_PULL_POLICY:-always}
     restart: unless-stopped
     depends_on:
       redis:

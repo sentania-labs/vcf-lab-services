@@ -10,6 +10,7 @@ test_id="${test_id//[^A-Za-z0-9_.-]/-}"
 export VCF_SERVICES_UI_IMAGE="${VCF_SERVICES_UI_IMAGE:-vcf-services-ui:ci}"
 export VCF_SERVICES_SYNC_IMAGE="${VCF_SERVICES_SYNC_IMAGE:-vcf-services-sync-base:ci}"
 export VCF_SERVICES_SFTP_IMAGE="${VCF_SERVICES_SFTP_IMAGE:-vcf-services-sftp:ci}"
+export VCF_SERVICES_PULL_POLICY="${VCF_SERVICES_PULL_POLICY:-never}"
 
 for image in "$VCF_SERVICES_UI_IMAGE" "$VCF_SERVICES_SYNC_IMAGE" "$VCF_SERVICES_SFTP_IMAGE"; do
 	docker image inspect "$image" >/dev/null 2>&1 \

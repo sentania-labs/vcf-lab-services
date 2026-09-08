@@ -14,7 +14,6 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 	echo "ERROR: image repository must be a lowercase GHCR repository path" >&2
 	exit 2
 }
-"$project_dir/scripts/verify-compose-version.sh" "$version" "$project_dir/docker-compose.yml"
 
 release_name="vcf-lab-services-$version"
 stage_dir="$(mktemp -d /tmp/vcf-services-release.XXXXXX)"
@@ -46,6 +45,11 @@ for file in "${files[@]}"; do
 	[ -f "$project_dir/$file" ] || { echo "ERROR: release file is missing: $file" >&2; exit 1; }
 	mkdir -p "$bundle_root/$(dirname "$file")"
 	cp "$project_dir/$file" "$bundle_root/$file"
+done
+
+for image in ui sync-base sftp; do
+	sed -i "s|image: ghcr.io/sentania-labs/vcf-lab-services/$image:latest$|image: $image_repository/$image:$version|" \
+		"$bundle_root/kubernetes/deployment.yaml"
 done
 
 cat > "$bundle_root/.release.env" <<EOF

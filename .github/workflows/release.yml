@@ -28,10 +28,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A release is any vMAJOR.MINOR.PATCH tag whose commit is already on main.
+      # No version bump lands before the tag: the checked-in defaults track latest
+      # and the release bundle pins the exact tag being built here.
       - name: Validate release tag
         run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          ./scripts/verify-compose-version.sh "$GITHUB_REF_NAME"
+          git fetch --no-tags origin main
+          ./scripts/verify-release-tag.sh "$GITHUB_REF_NAME" origin/main
 
       - name: Decide whether this tag owns the latest tags
         id: latest
@@ -53,7 +56,6 @@ jobs:
       - name: Build and verify publishable images
         env:
           SOURCE_URL: https://github.com/${{ github.repository }}
-          PUBLISH_LATEST: ${{ steps.latest.outputs.publish }}
         run: |
           image_root="ghcr.io/${GITHUB_REPOSITORY,,}"
           version="$GITHUB_REF_NAME"
@@ -79,28 +81,14 @@ jobs:
           test "$(docker image inspect "$image_root/ui:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
           test "$(docker image inspect "$image_root/sync-base:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
           test "$(docker image inspect "$image_root/sftp:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$version"
-          if [ "$PUBLISH_LATEST" = true ]; then
-            docker tag "$image_root/ui:$version" "$image_root/ui:latest"
-            docker tag "$image_root/sync-base:$version" "$image_root/sync-base:latest"
-            docker tag "$image_root/sftp:$version" "$image_root/sftp:latest"
-          fi
 
-      - name: Push product images
-        env:
-          PUBLISH_LATEST: ${{ steps.latest.outputs.publish }}
+      - name: Push versioned product images
         run: |
           image_root="ghcr.io/${GITHUB_REPOSITORY,,}"
           version="$GITHUB_REF_NAME"
           docker push "$image_root/ui:$version"
           docker push "$image_root/sync-base:$version"
           docker push "$image_root/sftp:$version"
-          if [ "$PUBLISH_LATEST" = true ]; then
-            docker push "$image_root/ui:latest"
-            docker push "$image_root/sync-base:latest"
-            docker push "$image_root/sftp:latest"
-          else
-            echo "Skipped the latest tags because a higher version is already published."
-          fi
 
       # This product is public and its installer pulls without credentials, so
       # all container packages are intentionally public. A package that GHCR
@@ -147,7 +135,17 @@ jobs:
           DOCKER_CONFIG="$anonymous_config" docker pull "$image_root/sftp:$version"
 
       - name: Prove the published README quickstart and API path
-        run: ./scripts/verify-published-quickstart.sh "$GITHUB_REF_NAME"
+        run: ./scripts/verify-published-quickstart.sh "$GITHUB_REF_NAME" "ghcr.io/${GITHUB_REPOSITORY,,}"
+
+      - name: Promote verified release to latest
+        if: steps.latest.outputs.publish == 'true'
+        run: |
+          image_root="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="$GITHUB_REF_NAME"
+          for component in ui sync-base sftp; do
+            docker tag "$image_root/$component:$version" "$image_root/$component:latest"
+            docker push "$image_root/$component:latest"
+          done
 
   release:
     name: Create GitHub release
@@ -163,7 +161,6 @@ jobs:
       - name: Validate release tag
         run: |
           [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          ./scripts/verify-compose-version.sh "$GITHUB_REF_NAME"
 
       - name: Package installer entry point
         run: |
