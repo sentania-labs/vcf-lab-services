@@ -162,6 +162,9 @@ handle_request() {
 
 init_state() {
 	mkdir -p "$STATE_DIR"
+	# The admin console opens this lock read only to tell whether a run already
+	# holds the settings.env snapshot, so it has to exist before the first run.
+	[ -e "$STATE_DIR/settings-snapshot.lock" ] || : > "$STATE_DIR/settings-snapshot.lock"
 	local armed=false tmp_state
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
 	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"

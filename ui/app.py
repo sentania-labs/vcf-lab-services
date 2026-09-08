@@ -45,6 +45,23 @@ VERSION_STATUS_FILE = Path(
 SOFTWARE_DEPOT_ID_FILE = Path(
     os.environ.get("SOFTWARE_DEPOT_ID_FILE", "/config/software-depot-id")
 )
+SETTINGS_PENDING_FILE = Path(
+    os.environ.get("SETTINGS_PENDING_FILE", "/config/.settings-pending.json")
+)
+# sync.sh holds this lock for the whole run and takes it before it reads
+# settings.env, so holding it around a save tells us whether the in-flight run
+# read the old values or will read the new ones. See the settings section of
+# README.md.
+SYNC_SNAPSHOT_LOCK = Path(
+    os.environ.get("SYNC_SNAPSHOT_LOCK", str(STATE / "settings-snapshot.lock"))
+)
+# sync.sh writes this file before it takes the snapshot lock, so an identity
+# read here is never older than the lock state observed with it. It names the
+# run a pending save belongs to, including in the moment before the run has
+# published its running state.
+SYNC_SNAPSHOT_RUN_FILE = Path(
+    os.environ.get("SYNC_SNAPSHOT_RUN_FILE", str(STATE / "settings-snapshot.run"))
+)
 CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
 SECRETS_ROOT = "/etc/vcf-services/secrets"
@@ -73,6 +90,31 @@ STATUS_KEY = "vcf-services:sync:status"
 LOG_KEY = "vcf-services:sync:log"
 VERSIONS_KEY = "vcf-services:sync:versions"
 VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr"]
+# settings.env keys the console owns, paired with their JSON field names.
+SETTING_ENV_FIELDS = {
+    "BACKUP_ENABLED": "backupEnabled",
+    "CEIP": "ceip",
+    "CRON_SCHEDULE": "cronSchedule",
+    "DEPOT_ENDPOINT": "depotEndpoint",
+    "ESX_MODE": "esxMode",
+    "LOG_RETENTION": "logRetention",
+    "SFTP_UID_GID": "uidGid",
+    "SKU": "sku",
+    "STORAGE_CONFIRMED": "storageConfirmed",
+    "SYNC_TARGETS": "syncTargets",
+    "TOKEN_URL": "tokenUrl",
+    "TZ": "timezone",
+    "VCF_VERSION": "vcfVersion",
+    "VKR_MATCH": "vkrMatch",
+    "VKR_OS": "vkrOs",
+}
+# The download tool re-reads its own properties file while a run is in flight,
+# so these two are the only settings a running sync can still observe. Every
+# other setting is snapshotted by sync.sh when the run starts.
+LIVE_TOOL_FIELDS = {"depotEndpoint", "tokenUrl"}
+# The SFTP backup service re-reads these every few seconds, so a save takes
+# effect at once and must never be reported as waiting for the next run.
+LIVE_SERVICE_FIELDS = {"backupEnabled", "uidGid"}
 BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
 TOOL_VERSION_VALUE = (
     r"v?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?"
@@ -678,6 +720,156 @@ def _int_setting(value, fallback):
         return fallback
 
 
+def _running_sync_id(state):
+    """Identify the in-flight run, or None when no sync is running."""
+    if not state.get("running", False):
+        return None
+    return str(state.get("startedAt") or "unknown-run")
+
+
+def _snapshot_run_id(state=None):
+    """Identify the run that owns the settings snapshot right now.
+
+    Only meaningful while a run holds the snapshot lock: the file keeps the
+    last run's identity afterwards, which is what makes a marker left by a
+    finished run distinguishable from one saved during the current run.
+    """
+    try:
+        recorded = SYNC_SNAPSHOT_RUN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        recorded = ""
+    if recorded:
+        return recorded
+    # A sync image that predates the identity file falls back to the published
+    # run state, which is absent in the gap before the run publishes it.
+    return _running_sync_id(_state() if state is None else state)
+
+
+def _sync_snapshot_active(state=None):
+    """Report whether a sync run already holds the settings.env snapshot.
+
+    A run holds the lock from before it reads settings.env until it exits, so
+    the kernel releases it even if the run is killed. The published state is
+    kept as a fallback for a sync image that predates the lock.
+    """
+    try:
+        handle = os.open(SYNC_SNAPSHOT_LOCK, os.O_RDONLY)
+    except OSError:
+        handle = None
+    if handle is not None:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        else:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            os.close(handle)
+    state = _state() if state is None else state
+    return bool(state.get("running", False))
+
+
+@contextmanager
+def _settings_snapshot_guard():
+    """Serialise a settings save against the point a run reads settings.env.
+
+    Yields True when a run already holds the snapshot, which means the save
+    applies to the next run. While this shared lock is held, a starting run
+    waits before reading settings.env, so a save can never land in the gap
+    between a run reading the file and publishing its running state.
+    """
+    try:
+        handle = os.open(SYNC_SNAPSHOT_LOCK, os.O_RDONLY)
+    except OSError:
+        yield bool(_state().get("running", False))
+        return
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            yield True
+            return
+        try:
+            yield bool(_state().get("running", False))
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        os.close(handle)
+
+
+def _read_pending_document():
+    try:
+        document = json.loads(SETTINGS_PENDING_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    return document
+
+
+def _pending_document_fields(document):
+    fields = document.get("fields")
+    if not isinstance(fields, list):
+        return []
+    return [field for field in fields if isinstance(field, str)]
+
+
+def _record_pending_settings(fields, run_id):
+    known = set(fields)
+    existing = _read_pending_document()
+    if existing is not None and existing.get("syncStartedAt") == run_id:
+        known.update(_pending_document_fields(existing))
+    document = {"syncStartedAt": run_id, "fields": sorted(known)}
+    SETTINGS_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        prefix=f"{SETTINGS_PENDING_FILE.name}.", dir=SETTINGS_PENDING_FILE.parent
+    )
+    try:
+        os.fchmod(handle, 0o640)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(document) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, SETTINGS_PENDING_FILE)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _live_tool_conflict(fields):
+    return (
+        "the running sync is still reading these from the mounted tool: "
+        + ", ".join(fields)
+        + ". Change them once the run finishes; every other setting saves now."
+    )
+
+
+def _clear_pending_settings():
+    try:
+        SETTINGS_PENDING_FILE.unlink()
+    except OSError:
+        pass
+
+
+def _pending_settings(state=None, in_flight=None):
+    """Report settings saved during the run that is still in flight."""
+    state = _state() if state is None else state
+    if in_flight is None:
+        in_flight = _sync_snapshot_active(state)
+    document = _read_pending_document()
+    if document is None or not in_flight:
+        return {"appliesToNextRun": False, "pendingFields": []}
+    if document.get("syncStartedAt") != _snapshot_run_id(state):
+        # The marker belongs to a run that has finished. The current run read
+        # these values at its own start, so they are in use, not pending.
+        return {"appliesToNextRun": False, "pendingFields": []}
+    fields = _pending_document_fields(document)
+    return {"appliesToNextRun": bool(fields), "pendingFields": fields}
+
+
 def _activation_configured():
     try:
         return bool(ACTIVATION_CODE_FILE.read_text().strip())
@@ -981,6 +1173,7 @@ def status():
             "vcfdtInstalled": tool_info["installed"],
             "vcfdtVersion": tool_info["version"],
             "vcfdtUploadedAt": tool_info.get("uploadedAt"),
+            **_pending_settings(state),
         }
     )
 
@@ -1068,7 +1261,7 @@ def log():
 
 @app.get("/api/settings")
 def settings():
-    return jsonify(_settings_doc())
+    return jsonify({**_settings_doc(), **_pending_settings()})
 
 
 @app.post("/api/settings")
@@ -1076,23 +1269,7 @@ def update_settings():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"error": "a JSON settings document is required"}), 400
-    allowed_fields = {
-        "backupEnabled",
-        "ceip",
-        "cronSchedule",
-        "depotEndpoint",
-        "esxMode",
-        "logRetention",
-        "sku",
-        "storageConfirmed",
-        "syncTargets",
-        "timezone",
-        "tokenUrl",
-        "uidGid",
-        "vcfVersion",
-        "vkrMatch",
-        "vkrOs",
-    }
+    allowed_fields = set(SETTING_ENV_FIELDS.values())
     unknown_fields = sorted(set(body) - allowed_fields)
     if unknown_fields:
         return jsonify(
@@ -1171,23 +1348,50 @@ def update_settings():
         "VKR_MATCH": vkr_match,
         "VKR_OS": vkr_os,
     }
-    if _state().get("running", False) and any(
-        _settings().get(key) != value for key, value in updates.items()
-    ):
-        return jsonify({"error": "wait for the running sync to finish before changing settings"}), 409
+    stored = _settings()
+    before = _settings_doc(stored)
+    after = _settings_doc({**stored, **updates})
+    changed = sorted(
+        field for field in SETTING_ENV_FIELDS.values() if before[field] != after[field]
+    )
+    live_tool_changes = [field for field in changed if field in LIVE_TOOL_FIELDS]
+    applied_now = [field for field in changed if field in LIVE_SERVICE_FIELDS]
+    deferred = [field for field in changed if field not in LIVE_SERVICE_FIELDS]
     try:
-        with _tool_update_lock():
-            if _state().get("running", False):
-                return jsonify({"error": "wait for the running sync to finish before changing settings"}), 409
-            _write_settings(updates)
-            current = VCFDT_STORE / "current"
-            if current.is_dir():
-                _patch_tool_endpoints(current)
+        # The guard is held across the write, so a run cannot read settings.env
+        # while the save is in flight and the answer it yields stays true.
+        with _settings_snapshot_guard() as snapshot_taken:
+            if snapshot_taken and live_tool_changes:
+                return jsonify({"error": _live_tool_conflict(live_tool_changes)}), 409
+            state = _state()
+            run_id = _snapshot_run_id(state) if snapshot_taken else None
+            if live_tool_changes:
+                with _tool_update_lock():
+                    # The exclusive tool lock cannot be taken while a sync holds
+                    # its shared lock, so a run that started since the check
+                    # above keeps the endpoints it read.
+                    if _sync_snapshot_active():
+                        return jsonify(
+                            {"error": _live_tool_conflict(live_tool_changes)}
+                        ), 409
+                    _write_settings(updates)
+                    current = VCFDT_STORE / "current"
+                    if current.is_dir():
+                        _patch_tool_endpoints(current)
+            else:
+                _write_settings(updates)
+            if not snapshot_taken:
+                _clear_pending_settings()
+            elif deferred:
+                _record_pending_settings(deferred, run_id)
+            pending = _pending_settings(state, in_flight=snapshot_taken)
     except BlockingIOError:
         return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
     except OSError as exc:
         return jsonify({"error": f"could not save settings: {exc}"}), 500
-    return jsonify({**_settings_doc(), "saved": True})
+    return jsonify(
+        {**_settings_doc(), **pending, "appliedNow": applied_now, "saved": True}
+    )
 
 
 @app.post("/api/password")

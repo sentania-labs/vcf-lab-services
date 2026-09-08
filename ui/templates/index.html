@@ -65,6 +65,10 @@
     border:1px solid var(--line); border-radius:8px; color:#bdc8d2; font:12px/1.5 ui-monospace,monospace; }
   table { width:100%; border-collapse:collapse; } th,td { padding:7px; border-bottom:1px solid var(--line); text-align:left; }
   th { color:var(--muted); font-size:12px; } .tablewrap { overflow:auto; max-height:390px; }
+  .tabs { display:flex; flex-wrap:wrap; gap:8px; border-bottom:1px solid var(--line); padding-bottom:10px; }
+  .tab-button { background:transparent; border:1px solid var(--line); color:var(--muted); }
+  .tab-button.active { background:var(--accent); border-color:var(--accent); color:white; }
+  .tabpanel { display:grid; gap:18px; min-width:0; }
   [hidden] { display:none !important; }
   @media (max-width:760px) { .two { grid-template-columns:1fr; } .steps { grid-template-columns:1fr; }
     .step { border-top:0; border-left:3px solid var(--line); padding:4px 0 4px 9px; } header { padding:0 16px; } main { padding:16px; } }
@@ -99,55 +103,114 @@
 </main>
 
 <main id="app-shell" hidden>
-  <section id="setup" class="panel hero">
-    <div class="eyebrow">Setup and settings</div>
-    <h2>Bring the depot online</h2>
-    <p class="muted">Complete these once. Every setting remains editable here afterward.</p>
-    <div class="steps">
-      <div id="progress-owner" class="step done">1. Owner</div>
-      <div id="progress-tool" class="step">2. Licensed tool</div>
-      <div id="progress-register" class="step">3. Registration</div>
-      <div id="progress-storage" class="step">4. Storage</div>
-      <div id="progress-settings" class="step">5. Sync settings</div>
-    </div>
+  <nav class="tabs" id="tabs" aria-label="Console sections">
+    <button class="tab-button active" data-tab="setup">Setup</button>
+    <button class="tab-button" data-tab="sync">Sync</button>
+    <button class="tab-button" data-tab="settings">Settings</button>
+    <button class="tab-button" data-tab="backup">Backup</button>
+    <button class="tab-button" data-tab="logs">Logs</button>
+  </nav>
 
-    <div class="setup-card">
-      <h3>Licensed VCF Download Tool</h3>
-      <div class="formgrid"><div class="field full"><label for="vcfdt-archive">Portal-downloaded archive</label>
-        <input id="vcfdt-archive" type="file" accept=".tar.gz,.tgz,.zip"></div></div>
-      <p class="help">The archive is validated on the mounted tool volume. It is never added to an image or repository.</p>
-      <div class="row"><button id="vcfdt-upload">Upload or replace tool</button><span id="vcfdt-flash" class="muted"></span></div>
-    </div>
-
-    <div class="setup-card">
-      <h3>Register the Software Depot ID</h3>
-      <div class="stat"><div class="key">Software Depot ID</div><div id="machine-id" class="value">Upload the tool first</div></div>
-      <p class="help">Register this ID in Broadcom's VCF Download Tool registration flow, then paste the activation code below.</p>
-      <div class="formgrid"><div class="field full"><label for="activation-code">Activation code</label>
-        <input id="activation-code" type="password" autocomplete="off" placeholder="Stored only in the protected secrets volume"></div></div>
-      <div class="row" style="margin-top:10px"><button id="save-activation">Save activation code</button><span id="activation-flash" class="muted"></span></div>
-    </div>
-
-    <div class="setup-card">
-      <h3>Platform-provided storage</h3>
-      <p class="muted">VCF Services consumes the mounted paths below. Configure the Docker volume, bind mount, Kubernetes PV, or NFS backing outside the appliance.</p>
-      <div class="grid" style="margin-top:10px">
-        <div class="stat"><div class="key">Depot writer</div><div id="depot-storage" class="value">Checking /depot</div></div>
-        <div class="stat"><div class="key">Backup target</div><div id="backup-storage" class="value">Checking /mnt/backup</div></div>
+  <div class="tabpanel" id="tab-setup">
+    <section id="setup" class="panel hero">
+      <div class="eyebrow">Setup</div>
+      <h2>Bring the depot online</h2>
+      <p class="muted">Complete these once. Every setting remains editable in the other tabs afterward.</p>
+      <div class="steps">
+        <div id="progress-owner" class="step done">1. Owner</div>
+        <div id="progress-tool" class="step">2. Licensed tool</div>
+        <div id="progress-register" class="step">3. Registration</div>
+        <div id="progress-storage" class="step">4. Storage</div>
+        <div id="progress-settings" class="step">5. Sync settings</div>
       </div>
-      <label class="choice" style="margin-top:12px"><input id="storage-confirmed" type="checkbox"> I confirm these mounted paths have the intended durable backing.</label>
+
+      <div class="setup-card">
+        <h3>Licensed VCF Download Tool</h3>
+        <div class="formgrid"><div class="field full"><label for="vcfdt-archive">Portal-downloaded archive</label>
+          <input id="vcfdt-archive" type="file" accept=".tar.gz,.tgz,.zip"></div></div>
+        <p class="help">The archive is validated on the mounted tool volume. It is never added to an image or repository.</p>
+        <div class="row"><button id="vcfdt-upload">Upload or replace tool</button><span id="vcfdt-flash" class="muted"></span></div>
+      </div>
+
+      <div class="setup-card">
+        <h3>Register the Software Depot ID</h3>
+        <div class="stat"><div class="key">Software Depot ID</div><div id="machine-id" class="value">Upload the tool first</div></div>
+        <p class="help">Register this ID in Broadcom's VCF Download Tool registration flow, then paste the activation code below.</p>
+        <div class="formgrid"><div class="field full"><label for="activation-code">Activation code</label>
+          <input id="activation-code" type="password" autocomplete="off" placeholder="Stored only in the protected secrets volume"></div></div>
+        <div class="row" style="margin-top:10px"><button id="save-activation">Save activation code</button><span id="activation-flash" class="muted"></span></div>
+      </div>
+
+      <div class="setup-card">
+        <h3>Platform-provided storage</h3>
+        <p class="muted">VCF Services consumes the mounted paths below. Configure the Docker volume, bind mount, Kubernetes PV, or NFS backing outside the appliance.</p>
+        <div class="grid" style="margin-top:10px">
+          <div class="stat"><div class="key">Depot writer</div><div id="depot-storage" class="value">Checking /depot</div></div>
+          <div class="stat"><div class="key">Backup target</div><div id="backup-storage" class="value">Checking /mnt/backup</div></div>
+        </div>
+        <label class="choice" style="margin-top:12px"><input id="storage-confirmed" type="checkbox"> I confirm these mounted paths have the intended durable backing.</label>
+      </div>
+
+      <div class="row" style="margin-top:16px"><button id="finish-setup">Finish setup</button><span id="finish-flash" class="error"></span></div>
+    </section>
+
+    <section id="ready" class="notice success" hidden>Setup is complete. The console remains the source of truth for operator settings.</section>
+
+    <section class="panel">
+      <h2>TLS trust</h2>
+      <p class="muted">Download the first-boot root CA and add it to each VCF consumer trust store before configuring depot URLs.</p>
+      <a class="button-link" id="download-ca" href="api/tls/ca" download>Download root CA</a>
+    </section>
+
+    <section class="panel">
+      <h2>Shared credential</h2>
+      <p class="muted">One password protects the console, depot, and SFTP service. A change requires updating every configured consumer.</p>
+      <div class="formgrid">
+        <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password"></div>
+        <div class="field"><label for="new-password">New password</label><input id="new-password" type="password"></div>
+      </div>
+      <div class="row" style="margin-top:12px"><button id="save-password">Change shared password</button><span id="password-flash" class="muted"></span></div>
+    </section>
+  </div>
+
+  <div class="tabpanel" id="tab-sync" hidden>
+    <div class="two">
+      <section class="panel">
+        <h2>Sync now</h2>
+        <div class="targets" id="run-targets">
+          {% for target in targets %}<label class="choice"><input type="checkbox" class="run-target" value="{{target}}"> {{target}}</label>{% endfor %}
+        </div>
+        <div class="row" style="margin-top:14px"><button id="sync-btn">Sync selected</button><button id="refresh-remote" class="secondary">Check versions</button><span id="sync-flash" class="muted"></span></div>
+      </section>
+      <section class="panel">
+        <h2>Current state</h2>
+        <div class="grid">
+          <div class="stat"><div class="key">Sync engine</div><div class="value" id="st-state">Loading</div></div>
+          <div class="stat"><div class="key">Current target</div><div class="value" id="st-current">None</div></div>
+          <div class="stat"><div class="key">Next run</div><div class="value" id="st-next">Loading</div></div>
+          <div class="stat"><div class="key">Tool version</div><div class="value" id="st-tool">Loading</div></div>
+        </div>
+      </section>
     </div>
 
-    <div class="setup-card">
-      <h3>Sync and endpoint settings</h3>
+    <section class="panel"><h2>Per-target last sync</h2><div id="last-runs" class="grid"></div></section>
+    <section class="panel">
+      <h2>Available versions <span id="version-meta" class="muted"></span></h2>
+      <div class="tablewrap"><table><thead><tr><th>Component</th><th>Version</th><th>Type</th><th>Date</th><th>Size</th><th>Depot</th></tr></thead><tbody id="versions"><tr><td colspan="6" class="muted">Check versions after registration.</td></tr></tbody></table></div>
+    </section>
+  </div>
+
+  <div class="tabpanel" id="tab-settings" hidden>
+    <section class="panel">
+      <h2>Sync and endpoint settings</h2>
+      <p class="muted">These are the file-backed settings the sync service reads. Saving is allowed at any time.</p>
+      <div id="settings-pending" class="notice" hidden></div>
       <div class="formgrid">
         <div class="field"><label for="vcf-version">VCF version filter</label><input id="vcf-version" placeholder="9.1.0"></div>
         <div class="field"><label for="sku">SKU</label><select id="sku"><option>VCF</option><option>VVF</option></select></div>
         <div class="field"><label for="cron">Recurring schedule</label><input id="cron" placeholder="0 3 * * 0"></div>
         <div class="field"><label for="timezone">Timezone</label><input id="timezone" placeholder="UTC"></div>
         <div class="field"><label for="ceip">CEIP</label><select id="ceip"><option>DISABLE</option><option>ENABLE</option></select></div>
-        <div class="field"><label for="backup-enabled">Backup service</label><label class="choice"><input id="backup-enabled" type="checkbox"> Enable SFTP on port 2222</label></div>
-        <div class="field"><label for="uidgid">SFTP UID:GID</label><input id="uidgid" placeholder="1003:1003"></div>
         <div class="field"><label for="esx-mode">ESX target mode</label><select id="esx-mode"><option value="download">download</option><option value="metadata">metadata</option></select></div>
         <div class="field"><label for="log-retention">Run logs to retain</label><input id="log-retention" type="number" min="1" max="1000"></div>
         <div class="field full"><label>Scheduled targets</label><div id="settings-targets" class="targets">
@@ -158,55 +221,28 @@
         <div class="field"><label for="vkr-match">VKr release pins</label><input id="vkr-match" placeholder="Optional"></div>
         <div class="field"><label for="vkr-os">VKr OS filter</label><input id="vkr-os" placeholder="Optional"></div>
       </div>
-      <p class="help">The sync scheduler reloads these file-backed settings automatically. Endpoint changes also update the mounted tool.</p>
+      <p class="help">The sync scheduler reloads these file-backed settings automatically. Endpoint changes also update the mounted tool, so they wait for a running sync to finish.</p>
       <div class="row" style="margin-top:12px"><button id="save-settings">Save settings</button><span id="settings-flash" class="muted"></span></div>
-    </div>
-
-    <div class="row" style="margin-top:16px"><button id="finish-setup">Finish setup</button><span id="finish-flash" class="error"></span></div>
-  </section>
-
-  <section id="ready" class="notice success" hidden>Setup is complete. The console remains the source of truth for operator settings.</section>
-
-  <section class="panel">
-    <h2>TLS trust</h2>
-    <p class="muted">Download the first-boot root CA and add it to each VCF consumer trust store before configuring depot URLs.</p>
-    <a class="button-link" href="api/tls/ca" download>Download root CA</a>
-  </section>
-
-  <div class="two">
-    <section class="panel">
-      <h2>Sync now</h2>
-      <div class="targets" id="run-targets">
-        {% for target in targets %}<label class="choice"><input type="checkbox" class="run-target" value="{{target}}"> {{target}}</label>{% endfor %}
-      </div>
-      <div class="row" style="margin-top:14px"><button id="sync-btn">Sync selected</button><button id="refresh-remote" class="secondary">Check versions</button><span id="sync-flash" class="muted"></span></div>
-    </section>
-    <section class="panel">
-      <h2>Current state</h2>
-      <div class="grid">
-        <div class="stat"><div class="key">Sync engine</div><div class="value" id="st-state">Loading</div></div>
-        <div class="stat"><div class="key">Current target</div><div class="value" id="st-current">None</div></div>
-        <div class="stat"><div class="key">Next run</div><div class="value" id="st-next">Loading</div></div>
-        <div class="stat"><div class="key">Tool version</div><div class="value" id="st-tool">Loading</div></div>
-      </div>
     </section>
   </div>
 
-  <section class="panel"><h2>Per-target last sync</h2><div id="last-runs" class="grid"></div></section>
-  <section class="panel"><h2>Live log</h2><pre id="log">No sync log yet.</pre></section>
-  <section class="panel">
-    <h2>Available versions <span id="version-meta" class="muted"></span></h2>
-    <div class="tablewrap"><table><thead><tr><th>Component</th><th>Version</th><th>Type</th><th>Date</th><th>Size</th><th>Depot</th></tr></thead><tbody id="versions"><tr><td colspan="6" class="muted">Check versions after registration.</td></tr></tbody></table></div>
-  </section>
-  <section class="panel">
-    <h2>Shared credential</h2>
-    <p class="muted">One password protects the console, depot, and SFTP service. A change requires updating every configured consumer.</p>
-    <div class="formgrid">
-      <div class="field"><label for="current-password">Current password</label><input id="current-password" type="password"></div>
-      <div class="field"><label for="new-password">New password</label><input id="new-password" type="password"></div>
-    </div>
-    <div class="row" style="margin-top:12px"><button id="save-password">Change shared password</button><span id="password-flash" class="muted"></span></div>
-  </section>
+  <div class="tabpanel" id="tab-backup" hidden>
+    <section class="panel">
+      <h2>Backup service</h2>
+      <p class="muted">The SFTP backup service writes to the separate mounted backup path. It never shares the depot volume.</p>
+      <div id="backup-pending" class="notice" hidden></div>
+      <div class="formgrid">
+        <div class="field"><label for="backup-enabled">Backup service</label><label class="choice"><input id="backup-enabled" type="checkbox"> Enable SFTP on port 2222</label></div>
+        <div class="field"><label for="uidgid">SFTP UID:GID</label><input id="uidgid" placeholder="1003:1003"></div>
+      </div>
+      <p class="help">While the backup service is enabled it re-reads these two settings every few seconds, so both take effect at once: turning the service off ends current SFTP sessions, and a UID:GID change re-owns stored backup content.</p>
+      <div class="row" style="margin-top:12px"><button id="save-backup">Save backup settings</button><span id="backup-flash" class="muted"></span></div>
+    </section>
+  </div>
+
+  <div class="tabpanel" id="tab-logs" hidden>
+    <section class="panel"><h2>Live log</h2><pre id="log">No sync log yet.</pre></section>
+  </div>
 </main>
 
 <script>
@@ -214,6 +250,7 @@ const $ = id => document.getElementById(id);
 const esc = value => { const node=document.createElement('div'); node.textContent=value ?? ''; return node.innerHTML; };
 const fmt = value => value ? new Date(value).toLocaleString() : 'not available';
 let bootstrap = null;
+let landed = false;
 
 async function api(path, options={}) {
   const response = await fetch(path, options);
@@ -254,8 +291,37 @@ function showVersionProblem(problem) {
   const blocked=Boolean(problem?.blocked);
   $('version-blocked').hidden=!blocked;
   $('version-problem-copy').textContent=blocked ? problem.message : '';
-  document.querySelectorAll('#app-shell button, #app-shell input, #app-shell select')
+  document.querySelectorAll('#app-shell button:not(.tab-button), #app-shell input, #app-shell select')
     .forEach(control => { control.disabled=blocked; });
+}
+
+function showTab(name) {
+  document.querySelectorAll('.tab-button').forEach(button => {
+    button.classList.toggle('active', button.dataset.tab === name);
+  });
+  document.querySelectorAll('.tabpanel').forEach(panel => {
+    panel.hidden = panel.id !== `tab-${name}`;
+  });
+}
+
+document.querySelectorAll('.tab-button').forEach(button => {
+  button.onclick = () => showTab(button.dataset.tab);
+});
+
+function saveMessage(result) {
+  const pending=result.appliesToNextRun ? (result.pendingFields||[]) : [];
+  const live=result.appliedNow||[];
+  if(!pending.length) return 'Saved and active';
+  if(live.length) return `Saved. ${live.join(', ')} took effect now, the rest applies to the next run`;
+  return 'Saved, applies to the next run';
+}
+
+function showPending(status) {
+  const fields=status?.appliesToNextRun ? (status.pendingFields||[]) : [];
+  const text=fields.length ? `Saved. Applies to the next run: ${fields.join(', ')}. The sync in progress keeps the values it started with.` : '';
+  ['settings-pending','backup-pending'].forEach(id => {
+    $(id).textContent=text; $(id).hidden=!text;
+  });
 }
 
 function populateSetup(data) {
@@ -282,6 +348,7 @@ function populateSetup(data) {
   $('progress-register').className=`step ${data.activationConfigured ? 'done' : data.tool.installed ? 'active' : ''}`;
   $('progress-storage').className=`step ${settings.storageConfirmed ? 'done' : data.activationConfigured ? 'active' : ''}`;
   $('progress-settings').className=`step ${data.setupComplete ? 'done' : settings.storageConfirmed ? 'active' : ''}`;
+  if (!landed) { landed=true; showTab(data.setupComplete ? 'sync' : 'setup'); }
 }
 
 async function boot() {
@@ -331,11 +398,18 @@ function settingsPayload(){ return {
   syncTargets:[...document.querySelectorAll('.settings-target:checked')].map(box=>box.value)
 }; }
 
-$('save-settings').onclick=async()=>{
-  $('settings-flash').textContent='Saving';
-  try { await api('api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(settingsPayload())}); $('settings-flash').textContent='Saved and active'; populateSetup(await api('api/bootstrap')); }
-  catch(error){$('settings-flash').textContent=error.message;}
-};
+async function saveSettings(flashId){
+  $(flashId).textContent='Saving';
+  try {
+    const result=await api('api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(settingsPayload())});
+    $(flashId).textContent=saveMessage(result);
+    showPending(result);
+    populateSetup(await api('api/bootstrap'));
+  } catch(error){$(flashId).textContent=error.message;}
+}
+
+$('save-settings').onclick=()=>saveSettings('settings-flash');
+$('save-backup').onclick=()=>saveSettings('backup-flash');
 
 $('finish-setup').onclick=async()=>{
   $('finish-flash').textContent='';
@@ -349,6 +423,7 @@ async function poll(){
     $('st-state').innerHTML=running?'<span class="pill run">running</span>':armed?'<span class="pill ok">armed, idle</span>':'<span class="pill bad">not armed</span>';
     $('st-current').textContent=status.currentTarget||'none'; $('st-next').textContent=fmt(status.nextRun); $('st-tool').textContent=status.vcfdtVersion;
     $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}</span></div></div>`;}).join('');
+    showPending(status);
     $('sync-btn').disabled=running||!armed; $('refresh-remote').disabled=running||!armed; $('vcfdt-upload').disabled=running;
     const log=await api('api/log'); if(log.log){const node=$('log');const bottom=node.scrollTop+node.clientHeight>=node.scrollHeight-30;node.textContent=log.log;if(bottom)node.scrollTop=node.scrollHeight;}
   } catch(error){$('sync-flash').textContent=error.message;}

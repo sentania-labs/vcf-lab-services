@@ -3,29 +3,41 @@
 set -uo pipefail
 
 settings_file="${SETTINGS_FILE:-/etc/vcf-services/settings.env}"
-if [ -f "$settings_file" ]; then
-	set -a
-	# shellcheck disable=SC1090
-	. "$settings_file"
-	set +a
-fi
+# settings.env is read under the snapshot lock further down, so the admin
+# console can tell whether a save landed before or after this run took its
+# values. Container environment defaults are set first and any key the console
+# owns overrides its default when the file is sourced.
+load_settings() {
+	if [ -f "$settings_file" ]; then
+		set -a
+		# shellcheck disable=SC1090
+		. "$settings_file"
+		set +a
+	fi
+}
 
+# Container environment settings. The admin console does not own these keys.
 : "${DEPOT_DIR:=/depot}"
 : "${STATE_DIR:=/state}"
 : "${AUTH_FILE:=/etc/vcf-services/secrets/activation-code.txt}"
 : "${TOOL_ROOT:=/opt/vcfdt}"
 : "${VCFDT_TOOL_STORE:=$TOOL_ROOT}"
-: "${SYNC_TARGETS:=esx install upgrade patches}"
-: "${VCF_VERSION:=9.1.0}"
-: "${SKU:=VCF}"
-: "${ESX_MODE:=download}"
-: "${CEIP:=DISABLE}"
-: "${LOG_RETENTION:=20}"
-: "${VKR_MATCH:=}"
-: "${VKR_OS:=}"
 : "${REDIS_HOST:=}"
 : "${REDIS_PORT:=6379}"
 : "${REDIS_PASSWORD_FILE:=/etc/vcf-services/secrets/redis-password}"
+
+# Defaults for the keys the console owns, applied after settings.env is read so
+# a missing or blank value still lands on a working default.
+apply_settings_defaults() {
+	: "${SYNC_TARGETS:=esx install upgrade patches}"
+	: "${VCF_VERSION:=9.1.0}"
+	: "${SKU:=VCF}"
+	: "${ESX_MODE:=download}"
+	: "${CEIP:=DISABLE}"
+	: "${LOG_RETENTION:=20}"
+	: "${VKR_MATCH:=}"
+	: "${VKR_OS:=}"
+}
 
 status_key="vcf-services:sync:status"
 log_key="vcf-services:sync:log"
@@ -83,13 +95,38 @@ if [ "${1:-}" = "--status" ]; then
 	exit 0
 fi
 
-if [ "$#" -gt 0 ]; then SYNC_TARGETS="$*"; fi
-
 exec 9>"$STATE_DIR/sync.lock"
 if ! flock -n 9; then
 	log "another sync is already running, skipping this trigger"
 	exit 0
 fi
+
+# Take the settings snapshot lock before reading settings.env and hold it for
+# the whole run. A console save waits here, so it either lands before this run
+# reads the file and is reported as active, or lands after and is reported as
+# applying to the next run. The kernel releases the lock when this process ends.
+snapshot_lock="$STATE_DIR/settings-snapshot.lock"
+[ -e "$snapshot_lock" ] || : > "$snapshot_lock"
+# Publish this run's identity before the lock is taken, so a console that sees
+# the lock held always reads an identity at least as new as that lock. The
+# console tags a save with the identity it reads and only reports the save as
+# pending while that same run still holds the snapshot.
+snapshot_run_file="$STATE_DIR/settings-snapshot.run"
+snapshot_run_id="run-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
+if snapshot_run_tmp="$(mktemp "$STATE_DIR/settings-snapshot.run.XXXXXX")"; then
+	printf '%s\n' "$snapshot_run_id" > "$snapshot_run_tmp"
+	mv "$snapshot_run_tmp" "$snapshot_run_file"
+else
+	log "WARNING: could not record the run identity in $snapshot_run_file"
+fi
+if exec 6<"$snapshot_lock" && flock -x 6; then
+	:
+else
+	log "WARNING: could not hold $snapshot_lock; a settings save during this run may be reported as active"
+fi
+load_settings
+apply_settings_defaults
+if [ "$#" -gt 0 ]; then SYNC_TARGETS="$*"; fi
 
 if [ ! -x "$tool" ]; then
 	write_state '. + {running:false, currentTarget:null}'
@@ -114,7 +151,7 @@ log_publisher_pid=""
 if [ -n "$REDIS_HOST" ]; then
 	main_pid=$$
 	(
-		exec 9>&- >/dev/null 2>&1
+		exec 6<&- 9>&- >/dev/null 2>&1
 		while kill -0 "$main_pid" 2>/dev/null; do
 			publish_log_tail
 			sleep 2
