@@ -831,10 +831,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
 
     def test_schedule_preview_uses_configured_timezone_and_validates(self):
         self.claim()
-        self.settings.write_text(
-            self.settings.read_text().replace('TZ="UTC"', 'TZ="Pacific/Kiritimati"')
+        preview = self.get(
+            "/api/schedule/preview?cron=30+6+*+*+1,3&timezone=Pacific/Kiritimati"
         )
-        preview = self.get("/api/schedule/preview?cron=30+6+*+*+1,3")
         self.assertEqual(preview.status_code, 200)
         body = preview.get_json()
         self.assertEqual(body["cron"], "30 6 * * 1,3")
@@ -857,21 +856,26 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             400,
         )
         self.assertEqual(
-            self.get("/api/schedule/preview?cron=0+99+*+*+*").status_code, 400
+            self.get("/api/schedule/preview?cron=0+99+*+*+*&timezone=UTC").status_code,
+            400,
         )
         # A weekly picker with no weekday composes an empty day-of-week field.
         self.assertEqual(
-            self.get("/api/schedule/preview?cron=30+6+*+*+").status_code, 400
+            self.get("/api/schedule/preview?cron=30+6+*+*+&timezone=UTC").status_code,
+            400,
         )
         self.assertEqual(
             self.get("/api/schedule/preview?cron=0+3+*+*+*&timezone=Mars/Olympus").status_code,
             400,
         )
-        # A cleared timezone field is what the save rejects, so the preview
-        # must reject it too instead of falling back to the stored zone.
+        # A cleared or omitted timezone is what the save rejects, so the
+        # preview rejects it too instead of falling back to the stored zone.
         self.assertEqual(
             self.get("/api/schedule/preview?cron=0+3+*+*+*&timezone=").status_code,
             400,
+        )
+        self.assertEqual(
+            self.get("/api/schedule/preview?cron=0+3+*+*+*").status_code, 400
         )
         # Nothing is written by a preview.
         self.assertIn('CRON_SCHEDULE="0 3 * * 0"', self.settings.read_text())

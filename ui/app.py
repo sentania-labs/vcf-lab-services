@@ -1176,13 +1176,10 @@ def schedule_preview():
     problem = _cron_problem(cron)
     if problem:
         return jsonify({"error": problem}), 400
-    # Only an absent timezone falls back to the stored one. A blank value is
-    # what the form sends when the operator clears the field, and the save
-    # rejects it, so the preview must not claim a next run for it.
-    if "timezone" in request.args:
-        timezone_name = str(request.args.get("timezone", "")).strip()
-    else:
-        timezone_name = _settings().get("TZ") or "UTC"
+    # The timezone is always supplied by the picker and validated the same way
+    # the save validates it, so a blank or missing value is a 400, not a
+    # fallback to the stored zone.
+    timezone_name = str(request.args.get("timezone", "")).strip()
     try:
         tzinfo = ZoneInfo(timezone_name)
     except (KeyError, ValueError):
