@@ -1555,6 +1555,64 @@ class BootstrapVersionTests(unittest.TestCase):
         self.run_bootstrap()
         self.assertEqual(self.persistent_snapshot(self.config), snapshot)
 
+    def test_interrupted_migration_keeps_old_marker_and_retries_with_report(self):
+        self.config.mkdir()
+        marker = self.config / ".vcf-services-version"
+        report = self.config / ".vcf-services-migration.json"
+        marker.write_text("v0.2.0\n")
+        (self.config / ".vcf-services-schema").write_text("1\n")
+        original = 'DEPOT_ENDPOINT="operator.example.test"\n'
+        (self.config / "settings.env").write_text(original)
+        replace = os.replace
+
+        def interrupt_after_report(source, destination):
+            replace(source, destination)
+            if Path(destination) == report:
+                raise KeyboardInterrupt("startup interrupted")
+
+        with mock.patch.object(os, "replace", side_effect=interrupt_after_report):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_bootstrap()
+        self.assertEqual(marker.read_text(), "v0.2.0\n")
+        interrupted_result = json.loads(report.read_text())
+        backup = Path(interrupted_result["backupPath"])
+        self.assertEqual((backup / "settings.env").read_text(), original)
+        module = self.run_bootstrap()
+        result = json.loads(report.read_text())
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["fromVersion"], "v0.2.0")
+        self.assertEqual(result["toVersion"], "v0.2.1")
+        self.assertNotEqual(result["backupPath"], interrupted_result["backupPath"])
+        self.assertEqual(marker.read_text(), "v0.2.1\n")
+        self.assertFalse(module.VERSION_STATUS.exists())
+
+    def test_unsupported_release_formats_block_without_migrating(self):
+        module = self.run_bootstrap()
+        for version in ("0.1.0", "v0.1.0-rc1", "v0.1.0+build", "v٠.١.٠"):
+            with self.subTest(version=version):
+                module.VERSION_MARKER.write_text(version + "\n")
+                before = self.persistent_snapshot(self.config, {module.VERSION_STATUS.name})
+                module.main()
+                status = json.loads(module.VERSION_STATUS.read_text())
+                self.assertTrue(status["blocked"])
+                self.assertEqual(status["foundVersion"], version)
+                self.assertEqual(
+                    self.persistent_snapshot(self.config, {module.VERSION_STATUS.name}),
+                    before,
+                )
+
+    def test_dev_sentinel_allows_upgrade_and_refuses_release_downgrade(self):
+        module = self.run_bootstrap()
+        with mock.patch.object(module, "CURRENT_VERSION", "dev"):
+            module.main()
+            self.assertEqual(module.VERSION_MARKER.read_text(), "dev\n")
+            result = json.loads(module.MIGRATION_STATUS.read_text())
+            self.assertEqual(result["toVersion"], "dev")
+            self.assertFalse(module.VERSION_STATUS.exists())
+        module.main()
+        self.assertEqual(module.VERSION_MARKER.read_text(), "dev\n")
+        self.assertTrue(json.loads(module.VERSION_STATUS.read_text())["blocked"])
+
     def test_newer_marker_is_quarantined_without_rewriting_state(self):
         self.config.mkdir()
         (self.config / ".vcf-services-version").write_text("v0.3.0\n")

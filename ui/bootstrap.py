@@ -46,7 +46,7 @@ DEFAULT_SETTINGS = {
 def _release_key(value):
     if value == "dev":
         return (10**9,)
-    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", value or "")
+    match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", value or "")
     if match is None:
         return None
     return tuple(int(part) for part in match.groups())
@@ -202,7 +202,6 @@ def prepare_config(config_was_empty):
                 schema += 1
                 write_atomic(SCHEMA_MARKER, f"{schema}\n", 0o640)
             _fill_settings_defaults()
-            write_atomic(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
             result = {
                 "status": "completed",
                 "fromSchema": original_schema,
@@ -213,6 +212,7 @@ def prepare_config(config_was_empty):
                 "migratedAt": migrated_at,
             }
             write_atomic(MIGRATION_STATUS, json.dumps(result) + "\n", 0o640)
+            write_atomic(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
         except Exception as exc:
             message = (
                 f"Config migration failed after a backup was written to {backup}: {exc}. "
