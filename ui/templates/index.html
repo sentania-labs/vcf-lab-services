@@ -442,17 +442,22 @@ function composeCron(){
   const minute=$('schedule-minute').value, hour=$('schedule-hour').value;
   if(mode==='daily') return `${minute} ${hour} * * *`;
   const days=[...document.querySelectorAll('.schedule-weekday:checked')].map(box=>Number(box.value)).sort((a,b)=>a-b);
-  return `${minute} ${hour} * * ${days.length?days.join(','):'*'}`;
+  return `${minute} ${hour} * * ${days.join(',')}`;
+}
+
+function scheduleProblem(){
+  if($('schedule-mode').value==='weekly'&&!document.querySelector('.schedule-weekday:checked')) return 'Pick at least one weekday';
+  return null;
 }
 
 function loadSchedule(cron){
-  savedCron=cron;
   const shape=decomposeCron(cron);
   $('schedule-mode').value=shape.mode;
   if(shape.mode!=='custom'){ $('schedule-hour').value=shape.hour; $('schedule-minute').value=shape.minute; }
   document.querySelectorAll('.schedule-weekday').forEach(box=>{ box.checked=shape.mode==='weekly'&&shape.days.includes(Number(box.value)); });
   $('cron').value=cron;
   if(shape.mode==='custom') $('cron-advanced').checked=true;
+  savedCron=composeCron();
   previewNextRun=null; previewError=null;
   renderSchedule();
 }
@@ -470,19 +475,21 @@ function renderSchedule(){
 function renderScheduleNext(){
   const node=$('schedule-next'); const cron=composeCron();
   node.className='help';
+  const problem=scheduleProblem();
+  if(problem){ node.textContent=problem; node.className='help error'; return; }
   if(cron===savedCron){ node.textContent=`Next run: ${fmt(savedNextRun)}`; return; }
   if(previewError){ node.textContent=previewError; node.className='help error'; return; }
   node.textContent=previewNextRun ? `Next run after save: ${fmt(previewNextRun)}` : 'Next run after save: calculating';
 }
 
 async function previewSchedule(){
-  const cron=composeCron(); if(cron===savedCron) return;
+  const cron=composeCron(); if(cron===savedCron||scheduleProblem()) return;
   try {
     const query=new URLSearchParams({cron, timezone:$('timezone').value.trim()});
     const result=await api(`api/schedule/preview?${query}`);
     if(composeCron()!==cron) return;
     previewNextRun=result.nextRun; previewError=null;
-  } catch(error){ previewNextRun=null; previewError=error.message; }
+  } catch(error){ if(composeCron()!==cron) return; previewNextRun=null; previewError=error.message; }
   renderScheduleNext();
 }
 
@@ -497,7 +504,7 @@ $('schedule-mode').onchange=()=>{
 };
 ['schedule-hour','schedule-minute','timezone'].forEach(id=>{ $(id).onchange=scheduleChanged; });
 $('cron').oninput=scheduleChanged;
-document.querySelectorAll('.schedule-weekday').forEach(box=>{ box.onchange=scheduleChanged; });
+document.querySelectorAll('.schedule-weekday').forEach(box=>{ box.onchange=()=>{ if(!box.checked&&scheduleProblem()) box.checked=true; scheduleChanged(); }; });
 $('cron-advanced').onchange=()=>{ if(!$('cron-advanced').checked&&$('schedule-mode').value==='custom') $('cron-advanced').checked=true; renderSchedule(); };
 
 function settingsPayload(){ return {
@@ -511,6 +518,8 @@ function settingsPayload(){ return {
 }; }
 
 async function saveSettings(flashId){
+  const problem=scheduleProblem();
+  if(problem){ $(flashId).textContent=problem; renderScheduleNext(); return; }
   $(flashId).textContent='Saving';
   try {
     const result=await api('api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(settingsPayload())});
@@ -524,7 +533,8 @@ $('save-settings').onclick=()=>saveSettings('settings-flash');
 $('save-backup').onclick=()=>saveSettings('backup-flash');
 
 $('finish-setup').onclick=async()=>{
-  $('finish-flash').textContent='';
+  $('finish-flash').textContent=scheduleProblem()||'';
+  if($('finish-flash').textContent) return;
   try { await api('api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(settingsPayload())}); await api('api/setup/complete',{method:'POST'}); populateSetup(await api('api/bootstrap')); }
   catch(error){$('finish-flash').textContent=error.message;}
 };

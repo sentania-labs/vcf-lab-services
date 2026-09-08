@@ -455,6 +455,10 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         body = self.valid_settings()
         body["cronSchedule"] = "0 3 * * $(id)"
         self.assertEqual(self.post("/api/settings", json=body).status_code, 400)
+        # A weekly picker with no weekday composes an empty day-of-week field.
+        body = self.valid_settings()
+        body["cronSchedule"] = "30 6 * * "
+        self.assertEqual(self.post("/api/settings", json=body).status_code, 400)
         body = self.valid_settings()
         body["uidGid"] = "0:1003"
         self.assertEqual(self.post("/api/settings", json=body).status_code, 400)
@@ -682,7 +686,6 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn('id="schedule-weekdays"', body)
         self.assertIn('id="schedule-next"', body)
         self.assertIn('id="cron-wrap" hidden', body)
-        self.assertIn("api/schedule/preview", body)
         self.assertIn('id="log"', body)
         self.assertIn('id="versions"', body)
 
@@ -855,6 +858,10 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         )
         self.assertEqual(
             self.get("/api/schedule/preview?cron=0+99+*+*+*").status_code, 400
+        )
+        # A weekly picker with no weekday composes an empty day-of-week field.
+        self.assertEqual(
+            self.get("/api/schedule/preview?cron=30+6+*+*+").status_code, 400
         )
         self.assertEqual(
             self.get("/api/schedule/preview?cron=0+3+*+*+*&timezone=Mars/Olympus").status_code,
