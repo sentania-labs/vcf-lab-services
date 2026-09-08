@@ -40,6 +40,9 @@ VERSION_MARKER_FILE = Path(
 VERSION_STATUS_FILE = Path(
     os.environ.get("VERSION_STATUS_FILE", "/config/.vcf-services-version-status.json")
 )
+MIGRATION_STATUS_FILE = Path(
+    os.environ.get("MIGRATION_STATUS_FILE", "/config/.vcf-services-migration.json")
+)
 SOFTWARE_DEPOT_ID_FILE = Path(
     os.environ.get("SOFTWARE_DEPOT_ID_FILE", "/config/software-depot-id")
 )
@@ -62,6 +65,7 @@ SYNC_SNAPSHOT_RUN_FILE = Path(
 )
 CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
+TOOL_SELECTION_FILE = VCFDT_STORE / ".selection.json"
 SECRETS_ROOT = "/etc/vcf-services/secrets"
 AUTH_FILE = Path(os.environ.get("AUTH_FILE", f"{SECRETS_ROOT}/auth.json"))
 ACTIVATION_CODE_FILE = Path(
@@ -324,6 +328,16 @@ def _version_problem():
     }
 
 
+def _migration_status():
+    try:
+        status = json.loads(MIGRATION_STATUS_FILE.read_text(encoding="utf-8"))
+        if status.get("status") and status.get("migratedAt"):
+            return status
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
 def _safe_archive_path(name):
     normalized = str(name).replace("\\", "/")
     if not normalized or "\x00" in normalized:
@@ -551,11 +565,11 @@ def _probe_machine_id(tool_root):
     return match.group(0)
 
 
-def _current_tool_info():
-    current = VCFDT_STORE / "current"
-    tool = current / "bin" / "vcf-download-tool"
+def _release_tool_info(link_name):
+    release = VCFDT_STORE / link_name
+    tool = release / "bin" / "vcf-download-tool"
     if (
-        not current.is_dir()
+        not release.is_dir()
         or not tool.is_file()
         or tool.is_symlink()
         or tool.stat().st_size == 0
@@ -563,17 +577,80 @@ def _current_tool_info():
         return {"installed": False, "version": "not installed"}
     metadata = {}
     try:
-        metadata = json.loads((current / ".vcf-services.json").read_text())
+        metadata = json.loads((release / ".vcf-services.json").read_text())
     except (OSError, ValueError):
         pass
     return {
         "installed": True,
+        "releaseId": metadata.get("releaseId"),
         "version": metadata.get("version", "unknown"),
         "versionVerified": bool(metadata.get("versionVerified", "version" in metadata)),
-        "uploadedAt": metadata.get("uploadedAt"),
+        "installedAt": metadata.get("installedAt", metadata.get("uploadedAt")),
+        "uploadedAt": metadata.get("uploadedAt", metadata.get("installedAt")),
         "source": metadata.get("source", "upload"),
         "sourceFile": metadata.get("sourceFile"),
     }
+
+
+def _current_tool_info():
+    current = _release_tool_info("current")
+    previous = _release_tool_info("previous")
+    current["previous"] = previous if previous["installed"] else None
+    return current
+
+
+def _select_tool(release_id):
+    _write_secret(
+        TOOL_SELECTION_FILE,
+        json.dumps(
+            {
+                "releaseId": release_id,
+                "selectedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        + "\n",
+    )
+
+
+def _promote_synced_tool(state):
+    if state.get("running", False):
+        return
+    current = _release_tool_info("current")
+    previous_target = _release_target("previous")
+    try:
+        selection = json.loads(TOOL_SELECTION_FILE.read_text(encoding="utf-8"))
+        selected_at = datetime.fromisoformat(selection["selectedAt"])
+        finished_at = datetime.fromisoformat(state["finishedAt"].replace("Z", "+00:00"))
+    except (KeyError, OSError, TypeError, ValueError):
+        return
+    if (
+        not current["installed"]
+        or previous_target is None
+        or not current.get("releaseId")
+        or selection.get("releaseId") != current["releaseId"]
+        or state.get("depotContentToolReleaseId") != current["releaseId"]
+        or finished_at <= selected_at
+    ):
+        return
+    try:
+        with _tool_update_lock():
+            previous_target = _release_target("previous")
+            if previous_target is not None:
+                (VCFDT_STORE / "previous").unlink(missing_ok=True)
+                shutil.rmtree(previous_target, ignore_errors=True)
+    except BlockingIOError:
+        pass
+
+
+def _release_target(link_name):
+    link = VCFDT_STORE / link_name
+    if not link.is_symlink():
+        return None
+    target = (VCFDT_STORE / os.readlink(link)).resolve()
+    releases = (VCFDT_STORE / "releases").resolve()
+    if target.parent != releases:
+        return None
+    return target
 
 
 @contextmanager
@@ -618,9 +695,10 @@ def _install_tool_archive(archive_path, filename, source):
             pass
         version = _probe_tool_version(tool_root)
         metadata = {
+            "releaseId": release_id,
             "version": version if version else "unverified",
             "versionVerified": version is not None,
-            "uploadedAt": datetime.now(timezone.utc).isoformat(),
+            "installedAt": datetime.now(timezone.utc).isoformat(),
             "source": source,
             "sourceFile": filename,
             "patchedFiles": patched_files,
@@ -633,8 +711,7 @@ def _install_tool_archive(archive_path, filename, source):
         os.replace(tool_root, release_path)
 
         current = VCFDT_STORE / "current"
-        if current.is_symlink():
-            old_target = (VCFDT_STORE / os.readlink(current)).resolve()
+        old_target = _release_target("current")
         next_link.symlink_to(Path("releases") / release_id)
         os.replace(next_link, current)
         swapped = True
@@ -771,8 +848,17 @@ def _replace_tool(install):
                 _remember_machine_id(machine_id)
             else:
                 _machine_id_cache["value"] = None
-            if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
-                shutil.rmtree(old_target, ignore_errors=True)
+            old_previous = _release_target("previous")
+            previous = VCFDT_STORE / "previous"
+            if old_target:
+                next_previous = VCFDT_STORE / f".previous-{uuid.uuid4().hex}"
+                next_previous.symlink_to(Path("releases") / old_target.name)
+                os.replace(next_previous, previous)
+            else:
+                previous.unlink(missing_ok=True)
+            if old_previous and old_previous != old_target:
+                shutil.rmtree(old_previous, ignore_errors=True)
+            _select_tool(metadata["releaseId"])
     except BlockingIOError:
         return jsonify(
             {"error": "wait for the running sync or tool update to finish"}
@@ -784,6 +870,45 @@ def _replace_tool(install):
             {"error": "the tool could not be staged on its mounted volume"}
         ), 500
     return jsonify({"installed": True, **metadata}), 201
+
+
+def _rollback_tool():
+    try:
+        with _tool_update_lock():
+            if _state().get("running", False):
+                return jsonify({"error": "wait for the running sync to finish"}), 409
+            current_target = _release_target("current")
+            previous_target = _release_target("previous")
+            if current_target is None or previous_target is None:
+                return jsonify({"error": "no previous tool release is available"}), 409
+            swap_id = uuid.uuid4().hex
+            next_current = VCFDT_STORE / f".current-rollback-{swap_id}"
+            next_previous = VCFDT_STORE / f".previous-rollback-{swap_id}"
+            next_current.symlink_to(Path("releases") / previous_target.name)
+            next_previous.symlink_to(Path("releases") / current_target.name)
+            current_swapped = False
+            try:
+                os.replace(next_current, VCFDT_STORE / "current")
+                current_swapped = True
+                os.replace(next_previous, VCFDT_STORE / "previous")
+            except OSError:
+                if current_swapped:
+                    restore = VCFDT_STORE / f".current-restore-{swap_id}"
+                    restore.symlink_to(Path("releases") / current_target.name)
+                    os.replace(restore, VCFDT_STORE / "current")
+                raise
+            finally:
+                next_current.unlink(missing_ok=True)
+                next_previous.unlink(missing_ok=True)
+            _select_tool(previous_target.name)
+            _machine_id_cache["value"] = None
+            return jsonify(_current_tool_info())
+    except BlockingIOError:
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
+    except OSError:
+        return jsonify({"error": "the tool rollback could not be completed"}), 500
 
 
 @app.errorhandler(413)
@@ -1344,6 +1469,7 @@ def bootstrap_status():
             "authenticated": _is_authenticated(),
             "setupComplete": False if version_problem else settings["setupComplete"],
             "versionProblem": version_problem,
+            "migration": _migration_status(),
             "tool": tool,
             "machineId": machine_id,
             "machineIdError": machine_error,
@@ -1422,6 +1548,7 @@ def schedule_preview():
 @app.get("/api/status")
 def status():
     state = _state()
+    _promote_synced_tool(state)
     settings = _settings()
     tool_info = _current_tool_info()
     cron = settings.get("CRON_SCHEDULE", "0 3 * * 0")
@@ -1444,6 +1571,7 @@ def status():
             "vcfdtInstalled": tool_info["installed"],
             "vcfdtVersion": tool_info["version"],
             "vcfdtUploadedAt": tool_info.get("uploadedAt"),
+            "depotContentToolVersion": state.get("depotContentToolVersion"),
             **_pending_settings(state),
         }
     )
@@ -1484,6 +1612,11 @@ def install_vcfdt_from_depot():
     except ToolArchiveError as exc:
         return jsonify({"error": str(exc)}), 400
     return _replace_tool(lambda: _install_tool_archive(archive, archive.name, "depot"))
+
+
+@app.post("/api/vcfdt/rollback")
+def rollback_vcfdt():
+    return _rollback_tool()
 
 
 @app.get("/api/registration")

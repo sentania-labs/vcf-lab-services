@@ -75,7 +75,11 @@ Two groups of settings behave differently:
   turning backup off during a sync ends current SFTP sessions.
 
 Tool installation (from the depot or by upload) and starting a sync keep
-their existing running-sync guards.
+their existing running-sync guards. Replacing the tool retains the prior
+extracted release and exposes a rollback button on Setup. The retained release
+is removed only after the replacement completes a fully successful sync. If a
+replacement has not synced successfully, installing another release keeps only
+the current and immediately previous releases.
 
 ## Storage ownership
 
@@ -108,13 +112,13 @@ share an update lock, so they cannot modify the volume at the same time.
 Restore it from the Setup tab by installing a tool archive already mirrored in
 the depot, or by uploading the licensed archive again.
 
-The config volume carries the product version that created it. If an unmarked
-or differently marked config volume is found, the console stays reachable but
-setup, sync, and SFTP operations remain blocked. The console reports both
-versions and directs the operator to preserve needed data, then use a new
-config volume or restore one created by the running version. This prevents a
-failed mixed-version first boot from silently presenting contaminated setup
-state as complete.
+The config volume carries separate product release and config schema markers.
+An older schema is migrated forward in order after its small files are copied
+to a timestamped directory under `/config/migration-backups`. Existing setting
+values and identity are preserved, new keys receive shipped defaults, and the
+result plus recovery path is shown on Setup. A release refuses to use config
+written by a newer release or schema and leaves the console reachable with a
+clear recovery message. Downgrades never rewrite newer state.
 
 ## Network and credentials
 
@@ -156,12 +160,20 @@ a tool is installed, endpoint settings can still be saved for its installation.
 
 ## Optional bootstrap helper
 
-`./install.sh` remains only as a compatibility convenience. It checks that the
-Docker daemon and Compose v2 are usable, pulls the published images, runs
-`docker compose up -d`, and verifies the live HTTPS health endpoint. Those host
-startup checks cannot run in the console because the console does not exist
-until Compose has started it. The helper asks no product questions, creates no
-settings, configures no storage, and builds no image.
+`./install.sh` remains a compatibility convenience. Its normal path checks the
+Docker daemon and Compose v2, pulls the published images, starts Compose, and
+verifies the live HTTPS health endpoint. `./install.sh --upgrade` pulls the
+selected release and force-recreates the services without removing any volume.
+It is safe to rerun. No current settings change requires an image rebuild. The
+licensed tool is replaced separately from Setup, where rollback is available
+until its first successful sync.
+
+`./uninstall.sh` removes this stack's containers, network, and images, but
+retains every named volume and reports each retained volume and mount path.
+`./uninstall.sh --purge-data` is the separately named destructive path. It
+requires typing `PURGE`, then removes all stack volumes including the depot and
+Software Depot ID. Do not use it unless those durable copies are no longer
+needed.
 
 ## Operations
 
@@ -171,6 +183,8 @@ docker compose logs -f depot-sync
 docker compose logs -f sftp-backup
 docker compose up -d
 docker compose down
+./install.sh --upgrade
+./uninstall.sh
 ```
 
 Use `./compose.sh` only if a small Docker-daemon preflight is useful. Direct
@@ -181,11 +195,6 @@ Compose commands are the normal path.
 Deferred work is explicit:
 
 - Native in-product NFS configuration. Storage is platform-provided.
-- Keeping the previous tool release for rollback after a depot or upload
-  install. Installing or upgrading the tool from the depot's own
-  `PROD/COMP/VCFDT` tree is present and shares the upload path's atomic
-  release swap, but the replaced release is removed once the swap lands, so
-  rolling back means installing the previous version again from the depot.
 - Backup status by product and product release checking.
 - A console path for adopting an existing VCFDT depot and Software Depot ID.
   The adoption scripts remain in `scripts/`, but removing the installer left

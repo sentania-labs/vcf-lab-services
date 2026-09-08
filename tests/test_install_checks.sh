@@ -17,6 +17,62 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+lifecycle_bin="$work_dir/lifecycle-bin"
+lifecycle_log="$work_dir/docker.log"
+mkdir -p "$lifecycle_bin"
+cat > "$lifecycle_bin/docker" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+exit 0
+STUB
+cat > "$lifecycle_bin/curl" <<'STUB'
+#!/bin/bash
+exit 0
+STUB
+chmod 0755 "$lifecycle_bin/docker" "$lifecycle_bin/curl"
+
+PATH="$lifecycle_bin:$PATH" DOCKER_LOG="$lifecycle_log" \
+	"$project_dir/install.sh" --upgrade > "$work_dir/upgrade.out"
+grep -qx 'compose pull' "$lifecycle_log" || fail "upgrade did not pull images"
+grep -qx 'compose up -d --force-recreate --remove-orphans' "$lifecycle_log" \
+	|| fail "upgrade did not recreate services"
+grep -q '^Preserved: depot, Software Depot ID, settings, secrets' "$work_dir/upgrade.out" \
+	|| fail "upgrade did not report preserved state"
+grep -q '^Rebuild required for settings changes: none' "$work_dir/upgrade.out" \
+	|| fail "upgrade did not report the rebuild contract"
+
+: > "$lifecycle_log"
+PATH="$lifecycle_bin:$PATH" DOCKER_LOG="$lifecycle_log" \
+	DEPOT_VOLUME_NAME=operator-depot BACKUP_VOLUME_NAME=operator-backup \
+	"$project_dir/uninstall.sh" > "$work_dir/uninstall.out"
+grep -qx 'compose down --remove-orphans --rmi all' "$lifecycle_log" \
+	|| fail "default uninstall did not remove stack images"
+grep -q 'depot content: operator-depot at /depot' "$work_dir/uninstall.out" \
+	|| fail "default uninstall did not report the retained depot"
+grep -q 'Software Depot ID: vcf-services-vcfdt-state' "$work_dir/uninstall.out" \
+	|| fail "default uninstall did not report retained identity state"
+if grep -q -- '--volumes' "$lifecycle_log"; then
+	fail "default uninstall attempted to remove volumes"
+fi
+
+: > "$lifecycle_log"
+set +e
+printf 'KEEP\n' | PATH="$lifecycle_bin:$PATH" DOCKER_LOG="$lifecycle_log" \
+		"$project_dir/uninstall.sh" --purge-data > "$work_dir/purge-cancelled.out"
+purge_cancelled_rc=$?
+set -e
+[ "$purge_cancelled_rc" -eq 1 ] || fail "cancelled data purge did not stop"
+! grep -q '^compose down' "$lifecycle_log" || fail "cancelled data purge changed the stack"
+
+: > "$lifecycle_log"
+printf 'PURGE\n' | PATH="$lifecycle_bin:$PATH" DOCKER_LOG="$lifecycle_log" \
+		"$project_dir/uninstall.sh" --purge-data > "$work_dir/purge.out"
+grep -qx 'compose down --remove-orphans --rmi all --volumes' "$lifecycle_log" \
+	|| fail "confirmed data purge did not remove stack volumes"
+grep -q '^Left behind by this stack: nothing.$' "$work_dir/purge.out" \
+	|| fail "confirmed data purge did not report its result"
+echo "upgrade and uninstall lifecycle tests passed"
+
 # shellcheck source=/dev/null
 source "$project_dir/scripts/install-checks.sh"
 

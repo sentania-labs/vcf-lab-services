@@ -143,6 +143,14 @@ fi
 exec 7<"$tool_lock"
 flock -s 7
 
+tool_version=unknown
+tool_release_id=unknown
+tool_metadata="$TOOL_ROOT/.vcf-services.json"
+if [ -s "$tool_metadata" ]; then
+	tool_version="$(jq -r 'if (.version | type) == "string" and .version != "" then .version else "unknown" end' "$tool_metadata" 2>/dev/null || printf unknown)"
+	tool_release_id="$(jq -r 'if (.releaseId | type) == "string" and .releaseId != "" then .releaseId else "unknown" end' "$tool_metadata" 2>/dev/null || printf unknown)"
+fi
+
 run_log="$STATE_DIR/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
 exec > >(tee -a "$run_log") 2>&1
 ln -sfn "$(basename "$run_log")" "$STATE_DIR/latest.log"
@@ -257,9 +265,27 @@ for target in $SYNC_TARGETS; do
 			log "unknown sync target '$target', continuing"
 			;;
 	esac
-	write_state '.lastRun[$target]={status:$status, finishedAt:$finished}' \
-		--arg target "$target" --arg status "$last_status" --arg finished "$(now)"
+	write_state '.lastRun[$target]={status:$status, finishedAt:$finished, toolVersion:$toolVersion, toolReleaseId:$toolReleaseId}' \
+		--arg target "$target" --arg status "$last_status" --arg finished "$(now)" \
+		--arg toolVersion "$tool_version" --arg toolReleaseId "$tool_release_id"
 done
+
+if [ "$overall_rc" -eq 0 ]; then
+	write_state '.depotContentToolVersion=$toolVersion | .depotContentToolReleaseId=$toolReleaseId' \
+		--arg toolVersion "$tool_version" --arg toolReleaseId "$tool_release_id"
+	previous_link="$VCFDT_TOOL_STORE/previous"
+	if [ -L "$previous_link" ]; then
+		previous_target="$(readlink -f "$previous_link" 2>/dev/null || true)"
+		case "$previous_target" in
+			"$VCFDT_TOOL_STORE"/releases/*)
+				rm -f "$previous_link"
+				rm -rf -- "$previous_target"
+				log "promoted tool $tool_version and removed the previous release"
+				;;
+			*) log "WARNING: previous tool link does not point inside the release store; it was not removed" ;;
+		esac
+	fi
+fi
 
 log "sync finished overall rc=$overall_rc"
 exit "$overall_rc"

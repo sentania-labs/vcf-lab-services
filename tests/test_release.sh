@@ -64,7 +64,7 @@ archive="$work_dir/vcf-lab-services-$version.tar.gz"
 
 bundle="vcf-lab-services-$version"
 listing="$(tar -tzf "$archive")"
-for path in .release.env .env install.sh compose.sh docker-compose.yml caddy/Caddyfile \
+for path in .release.env .env install.sh uninstall.sh compose.sh docker-compose.yml caddy/Caddyfile \
 	docs/kubernetes.md docs/releasing.md kubernetes/kustomization.yaml \
 	kubernetes/namespace.yaml kubernetes/deployment.yaml kubernetes/storage.yaml \
 	kubernetes/Caddyfile kubernetes/service.yaml kubernetes/service-sftp.yaml \
@@ -90,11 +90,10 @@ grep -qx "VCF_SERVICES_UI_IMAGE=$repository/ui:$version" "$bundle_dir/.env"
 grep -qx "VCF_SERVICES_SYNC_IMAGE=$repository/sync-base:$version" "$bundle_dir/.env"
 grep -qx "VCF_SERVICES_SFTP_IMAGE=$repository/sftp:$version" "$bundle_dir/.env"
 
-grep -q '^docker compose pull$' "$project_dir/install.sh"
-grep -q '^docker compose up -d$' "$project_dir/install.sh"
-! grep -q 'docker build' "$project_dir/install.sh"
-! grep -Eq 'read -r|ask\(|answers-file|VCFDT' "$project_dir/install.sh"
-! grep -Eq 'NFS_|STORAGE_MODE|DEPOT_LOCAL_PATH|BACKUP_LOCAL_PATH' "$project_dir/install.sh"
+test -x "$bundle_dir/install.sh"
+test -x "$bundle_dir/uninstall.sh"
+"$bundle_dir/install.sh" --help >/dev/null
+"$bundle_dir/uninstall.sh" --help >/dev/null
 
 for image in ui sync-base sftp; do
 	grep -q "VCF_SERVICES_.*IMAGE=.*$repository/$image:$version" "$bundle_dir/.env"
