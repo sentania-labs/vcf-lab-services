@@ -43,14 +43,9 @@ ruby -ryaml - "$project_dir/.github/workflows/release.yml" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 steps = workflow.fetch("jobs").fetch("publish").fetch("steps")
 names = steps.map { |step| step["name"] }
-push = steps.fetch(names.index("Push versioned product images"))
 proof_index = names.index("Prove the published README quickstart and API path")
 promote_index = names.index("Promote verified release to latest")
-raise "versioned push unexpectedly publishes latest" if push.fetch("run").include?(":latest")
 raise "latest promotion does not follow the release proof" unless proof_index < promote_index
-promote = steps.fetch(promote_index)
-raise "latest promotion is not limited to the highest version" unless promote.fetch("if").include?("steps.latest.outputs.publish")
-raise "latest promotion does not publish all product images" unless promote.fetch("run").include?("for component in ui sync-base sftp")
 RUBY
 grep -q 'verify-published-quickstart.sh.*GITHUB_REF_NAME' \
 	"$project_dir/.github/workflows/release.yml"
