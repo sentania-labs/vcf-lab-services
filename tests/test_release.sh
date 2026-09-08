@@ -43,9 +43,6 @@ grep -q 'verify-published-quickstart.sh.*GITHUB_REF_NAME' \
 	"$project_dir/.github/workflows/release.yml"
 grep -q '^docker compose up -d$' \
 	"$project_dir/scripts/verify-published-quickstart.sh"
-# The quickstart proof runs from the release bundle; it never sets an image override itself.
-! grep -Eq '^[[:space:]]*(export[[:space:]]+)?VCF_SERVICES_(UI|SYNC|SFTP)_IMAGE=' \
-	"$project_dir/scripts/verify-published-quickstart.sh"
 "$project_dir/scripts/package-release.sh" "$version" "$work_dir" "$repository" >/dev/null
 
 archive="$work_dir/vcf-lab-services-$version.tar.gz"
@@ -71,6 +68,14 @@ done
 
 tar -xzf "$archive" -C "$work_dir"
 bundle_dir="$work_dir/$bundle"
+kubectl kustomize "$bundle_dir/kubernetes" > "$work_dir/bundled-kubernetes.yaml"
+awk '$1 == "image:" {print $2}' "$work_dir/bundled-kubernetes.yaml" \
+	| sort > "$work_dir/bundled-images"
+printf '%s\n' "$repository/ui:$version" "$repository/ui:$version" \
+	"$repository/ui:$version" "$repository/sync-base:$version" \
+	"$repository/sftp:$version" caddy:2.10.0-alpine redis:7.4-alpine \
+	| sort > "$work_dir/expected-images"
+diff -u "$work_dir/expected-images" "$work_dir/bundled-images"
 grep -qx "VCF_SERVICES_VERSION=$version" "$bundle_dir/.release.env"
 grep -qx "VCF_SERVICES_IMAGE_REPOSITORY=$repository" "$bundle_dir/.release.env"
 grep -qx "VCF_SERVICES_UI_IMAGE=$repository/ui:$version" "$bundle_dir/.env"

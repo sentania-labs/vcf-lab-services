@@ -47,6 +47,11 @@ for file in "${files[@]}"; do
 	cp "$project_dir/$file" "$bundle_root/$file"
 done
 
+for image in ui sync-base sftp; do
+	sed -i "s|image: ghcr.io/sentania-labs/vcf-lab-services/$image:latest$|image: $image_repository/$image:$version|" \
+		"$bundle_root/kubernetes/deployment.yaml"
+done
+
 cat > "$bundle_root/.release.env" <<EOF
 VCF_SERVICES_VERSION=$version
 VCF_SERVICES_IMAGE_REPOSITORY=$image_repository
