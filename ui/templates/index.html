@@ -654,9 +654,10 @@ async function poll(){
     const status=await api('api/status'); const running=status.running, armed=status.armed;
     $('st-state').innerHTML=running?'<span class="pill run">running</span>':armed?'<span class="pill ok">armed, idle</span>':'<span class="pill bad">not armed</span>';
     $('st-current').textContent=status.currentTarget||'none'; $('st-next').textContent=fmt(status.nextRun); $('st-tool').textContent=status.vcfdtVersion;
-    $('vcfdt-produced').textContent=status.depotContentToolVersion ? `tool ${status.depotContentToolVersion}` : 'No successful sync recorded';
+    const targetRuns=status.targets.filter(target=>status.lastRun[target]);
+    $('vcfdt-produced').textContent=targetRuns.length ? targetRuns.map(target=>{const result=status.lastRun[target];return `${target}: tool ${result.toolVersion||'unknown'} (${result.status})`;}).join('; ') : 'No sync recorded';
     savedNextRun=status.nextRun; renderScheduleNext();
-    $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}</span></div></div>`;}).join('');
+    $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}${result?`<br>tool ${esc(result.toolVersion||'unknown')}`:''}</span></div></div>`;}).join('');
     showPending(status);
     $('sync-btn').disabled=running||!armed; $('refresh-remote').disabled=running||!armed; $('vcfdt-upload').disabled=running;
     syncRunning=running; updateDepotInstallState();

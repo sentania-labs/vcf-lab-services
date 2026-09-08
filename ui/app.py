@@ -65,7 +65,6 @@ SYNC_SNAPSHOT_RUN_FILE = Path(
 )
 CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
-TOOL_SELECTION_FILE = VCFDT_STORE / ".selection.json"
 SECRETS_ROOT = "/etc/vcf-services/secrets"
 AUTH_FILE = Path(os.environ.get("AUTH_FILE", f"{SECRETS_ROOT}/auth.json"))
 ACTIVATION_CODE_FILE = Path(
@@ -599,49 +598,6 @@ def _current_tool_info():
     return current
 
 
-def _select_tool(release_id):
-    _write_secret(
-        TOOL_SELECTION_FILE,
-        json.dumps(
-            {
-                "releaseId": release_id,
-                "selectedAt": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        + "\n",
-    )
-
-
-def _promote_synced_tool(state):
-    if state.get("running", False):
-        return
-    current = _release_tool_info("current")
-    previous_target = _release_target("previous")
-    try:
-        selection = json.loads(TOOL_SELECTION_FILE.read_text(encoding="utf-8"))
-        selected_at = datetime.fromisoformat(selection["selectedAt"])
-        finished_at = datetime.fromisoformat(state["finishedAt"].replace("Z", "+00:00"))
-    except (KeyError, OSError, TypeError, ValueError):
-        return
-    if (
-        not current["installed"]
-        or previous_target is None
-        or not current.get("releaseId")
-        or selection.get("releaseId") != current["releaseId"]
-        or state.get("depotContentToolReleaseId") != current["releaseId"]
-        or finished_at <= selected_at
-    ):
-        return
-    try:
-        with _tool_update_lock():
-            previous_target = _release_target("previous")
-            if previous_target is not None:
-                (VCFDT_STORE / "previous").unlink(missing_ok=True)
-                shutil.rmtree(previous_target, ignore_errors=True)
-    except BlockingIOError:
-        pass
-
-
 def _release_target(link_name):
     link = VCFDT_STORE / link_name
     if not link.is_symlink():
@@ -858,7 +814,6 @@ def _replace_tool(install):
                 previous.unlink(missing_ok=True)
             if old_previous and old_previous != old_target:
                 shutil.rmtree(old_previous, ignore_errors=True)
-            _select_tool(metadata["releaseId"])
     except BlockingIOError:
         return jsonify(
             {"error": "wait for the running sync or tool update to finish"}
@@ -900,7 +855,6 @@ def _rollback_tool():
             finally:
                 next_current.unlink(missing_ok=True)
                 next_previous.unlink(missing_ok=True)
-            _select_tool(previous_target.name)
             _machine_id_cache["value"] = None
             return jsonify(_current_tool_info())
     except BlockingIOError:
@@ -1548,7 +1502,6 @@ def schedule_preview():
 @app.get("/api/status")
 def status():
     state = _state()
-    _promote_synced_tool(state)
     settings = _settings()
     tool_info = _current_tool_info()
     cron = settings.get("CRON_SCHEDULE", "0 3 * * 0")

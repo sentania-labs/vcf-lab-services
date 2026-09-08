@@ -3,6 +3,8 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -646,7 +648,8 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.write_state(
             depotContentToolVersion=current["version"],
             depotContentToolReleaseId=current["releaseId"],
-            finishedAt="2000-01-01T00:00:00Z",
+            finishedAt="2099-01-01T00:00:00Z",
+            lastRun={"esx": {"status": "FAILED:23", "toolVersion": current["version"]}},
         )
         self.assertEqual(self.get("/api/status").status_code, 200)
         self.assertTrue((self.tool_store / "previous").exists())
@@ -656,7 +659,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(refused.status_code, 409)
         self.assertIn("running sync", refused.get_json()["error"])
 
-    def test_successful_sync_promotes_current_and_removes_previous_release(self):
+    def test_status_poll_preserves_previous_release_after_successful_sync(self):
         self.claim()
         self.write_state()
         self.assertEqual(self.upload_tool().status_code, 201)
@@ -675,9 +678,41 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(
             status.get_json()["depotContentToolVersion"], "9.1.0.0400.25570101"
         )
-        self.assertFalse((self.tool_store / "previous").exists())
-        self.assertFalse(original_target.exists())
-        self.assertIsNone(self.get("/api/vcfdt").get_json()["previous"])
+        self.assertTrue((self.tool_store / "previous").exists())
+        self.assertTrue(original_target.exists())
+        self.assertIsNotNone(self.get("/api/vcfdt").get_json()["previous"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_renders_per_target_tool_versions_for_partial_runs(self):
+        self.claim()
+        self.write_state(
+            depotContentToolVersion="stale-summary",
+            lastRun={
+                "esx": {"status": "OK", "toolVersion": "B"},
+                "install": {"status": "FAILED:23", "toolVersion": "B"},
+                "patches": {"status": "OK", "toolVersion": "A"},
+                "upgrade": {"status": "OK"},
+            },
+        )
+        payload = {
+            "html": self.get("/").get_data(as_text=True),
+            "status": self.get("/api/status").get_json(),
+        }
+        result = subprocess.run(
+            ["node", str(APP_PATH.parents[1] / "tests" / "console-status.cjs")],
+            input=json.dumps(payload), text=True, capture_output=True, check=True,
+        )
+        rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["error"], "")
+        self.assertIn("esx: tool B (OK)", rendered["summary"])
+        self.assertIn("install: tool B (FAILED:23)", rendered["summary"])
+        self.assertIn("patches: tool A (OK)", rendered["summary"])
+        self.assertIn("upgrade: tool unknown (OK)", rendered["summary"])
+        self.assertNotIn("stale-summary", rendered["summary"])
+        self.assertIn("tool A", rendered["rows"])
+        self.assertIn("tool B", rendered["rows"])
+        self.assertIn("FAILED:23", rendered["rows"])
+        self.assertIn("tool unknown", rendered["rows"])
 
     def test_install_from_depot_refuses_paths_outside_the_vcfdt_tree(self):
         self.claim()
@@ -1496,6 +1531,29 @@ class BootstrapVersionTests(unittest.TestCase):
             (self.config / "settings.env").read_text(),
         )
         self.assertEqual(module.VERSION_MARKER.read_text().strip(), "v0.2.1")
+
+    def test_same_schema_upgrade_backs_up_before_filling_defaults(self):
+        self.config.mkdir()
+        original = 'DEPOT_ENDPOINT="operator.example.test"\n'
+        (self.config / "settings.env").write_text(original)
+        (self.config / ".vcf-services-version").write_text("v0.2.0\n")
+        (self.config / ".vcf-services-schema").write_text("1\n")
+        (self.config / "software-depot-id").write_text("preserved-identity\n")
+        module = self.run_bootstrap()
+        result = json.loads(module.MIGRATION_STATUS.read_text())
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual((result["fromSchema"], result["toSchema"]), (1, 1))
+        self.assertEqual((result["fromVersion"], result["toVersion"]), ("v0.2.0", "v0.2.1"))
+        backup = Path(result["backupPath"])
+        self.assertEqual((backup / "settings.env").read_text(), original)
+        self.assertEqual((backup / ".vcf-services-version").read_text(), "v0.2.0\n")
+        self.assertEqual((backup / "software-depot-id").read_text(), "preserved-identity\n")
+        self.assertEqual((self.config / "software-depot-id").read_text(), "preserved-identity\n")
+        self.assertIn(original, module.SETTINGS.read_text())
+        self.assertIn('TOKEN_URL="https://eapi.broadcom.com/vcf/generateToken"', module.SETTINGS.read_text())
+        snapshot = self.persistent_snapshot(self.config)
+        self.run_bootstrap()
+        self.assertEqual(self.persistent_snapshot(self.config), snapshot)
 
     def test_newer_marker_is_quarantined_without_rewriting_state(self):
         self.config.mkdir()

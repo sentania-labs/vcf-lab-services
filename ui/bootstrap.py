@@ -192,7 +192,7 @@ def prepare_config(config_was_empty):
         )
         return _block_config(found, message)
 
-    if schema < CURRENT_SCHEMA:
+    if schema < CURRENT_SCHEMA or found != CURRENT_VERSION:
         backup = _backup_config(schema)
         migrated_at = datetime.now(timezone.utc).isoformat()
         original_schema = schema
@@ -201,6 +201,7 @@ def prepare_config(config_was_empty):
                 MIGRATIONS[schema]()
                 schema += 1
                 write_atomic(SCHEMA_MARKER, f"{schema}\n", 0o640)
+            _fill_settings_defaults()
             write_atomic(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
             result = {
                 "status": "completed",
@@ -218,8 +219,6 @@ def prepare_config(config_was_empty):
                 "The stack is blocked so the backup can be inspected or restored."
             )
             return _block_config(found, message)
-    elif found != CURRENT_VERSION:
-        write_atomic(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
 
     VERSION_STATUS.unlink(missing_ok=True)
     return True
