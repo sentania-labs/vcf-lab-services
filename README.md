@@ -179,8 +179,10 @@ selected release and force-recreates the services without removing any volume.
 It is safe to rerun. No current settings change requires an image rebuild. The
 licensed tool replacement and rollback follow the Setup procedure above.
 
-`./uninstall.sh` removes this stack's containers, network, and images, but
-retains every named volume and reports each retained volume and mount path.
+`./uninstall.sh` removes this stack's containers, network, and three product
+images, but retains the shared Caddy and Redis image caches. It also retains
+every named volume and reports each retained volume and mount path using the
+names resolved by Compose, including values supplied through `.env`.
 `./uninstall.sh --purge-data` is the separately named destructive path. It
 requires typing `PURGE`, then removes all stack volumes including the depot and
 Software Depot ID. Do not use it unless those durable copies are no longer

@@ -168,4 +168,12 @@ jq -e '.lastRun.patches.toolVersion == "0.0.1-stub"
   and (has("depotContentToolReleaseId") | not)' \
 	"$work_dir/promotion-state/state.json" >/dev/null
 
+# A successful target must have used the installed download tool before the
+# retained release can be promoted away. VKR is handled by a separate helper.
+grep -q 'tool_backed_target=false' "$project_dir/sync/sync.sh"
+grep -q '\[ "$tool_backed_target" = true \].*\[ "$last_status" = OK \]' \
+	"$project_dir/sync/sync.sh"
+grep -q '\[ "$overall_rc" -eq 0 \].*\[ "$successful_tool_sync" = true \]' \
+	"$project_dir/sync/sync.sh"
+
 echo "sync behavior tests passed"

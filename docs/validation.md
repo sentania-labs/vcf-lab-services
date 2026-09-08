@@ -105,8 +105,10 @@ validation responsibilities.
 
 `tests/test_install_checks.sh` runs the supported upgrade and uninstall
 commands against a stub Docker and Compose executable. It proves upgrade pulls
-and recreates services, default uninstall omits volume removal and reports the
-retained volume names, a cancelled purge changes nothing, and a confirmed
+and recreates services, then refuses to claim success when persistent-state
+migration is blocked. It proves default uninstall omits volume removal, reports
+Compose-resolved volume names, removes only product images, and retains shared
+Caddy and Redis images. A cancelled purge changes nothing, and a confirmed
 purge requests volume removal. The same test remains the regression guard for
 the depot-adoption scripts (`scripts/install-checks.sh`,
 `scripts/import-vcfdt-state.sh`, and `scripts/validate-adopted-depot.sh`) that

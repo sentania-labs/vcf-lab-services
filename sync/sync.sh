@@ -216,6 +216,7 @@ auth_opt="--depot-download-activation-code-file=$AUTH_FILE"
 ceip_opt="--ceip=$CEIP"
 overall_rc=0
 last_status=""
+successful_tool_sync=false
 
 run_target() {
 	local label="$1"
@@ -235,22 +236,27 @@ run_target() {
 for target in $SYNC_TARGETS; do
 	write_state '.currentTarget=$target' --arg target "$target"
 	last_status=unknown
+	tool_backed_target=false
 	case "$target" in
 		esx)
+			tool_backed_target=true
 			run_target esx-image-library "$tool" esx "$ESX_MODE" "$ceip_opt" \
 				"--depot-store=$DEPOT_DIR" "$auth_opt"
 			;;
 		install)
+			tool_backed_target=true
 			run_target vcf-install "$tool" binaries download "$ceip_opt" \
 				"--depot-store=$DEPOT_DIR" "$auth_opt" "--vcf-version=$VCF_VERSION" \
 				"--sku=$SKU" --automated-install --type=INSTALL
 			;;
 		upgrade)
+			tool_backed_target=true
 			run_target vcf-upgrade "$tool" binaries download "$ceip_opt" \
 				"--depot-store=$DEPOT_DIR" "$auth_opt" "--vcf-version=$VCF_VERSION" \
 				"--sku=$SKU" --type=UPGRADE
 			;;
 		patches)
+			tool_backed_target=true
 			run_target vcf-patches "$tool" binaries download "$ceip_opt" \
 				"--depot-store=$DEPOT_DIR" "$auth_opt" "--vcf-version=$VCF_VERSION" \
 				"--sku=$SKU" --patches-only
@@ -265,12 +271,15 @@ for target in $SYNC_TARGETS; do
 			log "unknown sync target '$target', continuing"
 			;;
 	esac
+	if [ "$tool_backed_target" = true ] && [ "$last_status" = OK ]; then
+		successful_tool_sync=true
+	fi
 	write_state '.lastRun[$target]={status:$status, finishedAt:$finished, toolVersion:$toolVersion, toolReleaseId:$toolReleaseId}' \
 		--arg target "$target" --arg status "$last_status" --arg finished "$(now)" \
 		--arg toolVersion "$tool_version" --arg toolReleaseId "$tool_release_id"
 done
 
-if [ "$overall_rc" -eq 0 ]; then
+if [ "$overall_rc" -eq 0 ] && [ "$successful_tool_sync" = true ]; then
 	previous_link="$VCFDT_TOOL_STORE/previous"
 	if [ -L "$previous_link" ]; then
 		previous_target="$(readlink -f "$previous_link" 2>/dev/null || true)"

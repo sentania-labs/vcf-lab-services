@@ -23,10 +23,26 @@ mkdir -p "$lifecycle_bin"
 cat > "$lifecycle_bin/docker" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
+if [ "$*" = "compose config --environment" ]; then
+	[ -z "${STUB_COMPOSE_DEPOT_VOLUME:-}" ] || printf 'DEPOT_VOLUME_NAME=%s\n' "$STUB_COMPOSE_DEPOT_VOLUME"
+	[ -z "${STUB_COMPOSE_BACKUP_VOLUME:-}" ] || printf 'BACKUP_VOLUME_NAME=%s\n' "$STUB_COMPOSE_BACKUP_VOLUME"
+	[ -z "${STUB_COMPOSE_UI_IMAGE:-}" ] || printf 'VCF_SERVICES_UI_IMAGE=%s\n' "$STUB_COMPOSE_UI_IMAGE"
+	[ -z "${STUB_COMPOSE_SYNC_IMAGE:-}" ] || printf 'VCF_SERVICES_SYNC_IMAGE=%s\n' "$STUB_COMPOSE_SYNC_IMAGE"
+	[ -z "${STUB_COMPOSE_SFTP_IMAGE:-}" ] || printf 'VCF_SERVICES_SFTP_IMAGE=%s\n' "$STUB_COMPOSE_SFTP_IMAGE"
+fi
 exit 0
 STUB
 cat > "$lifecycle_bin/curl" <<'STUB'
 #!/bin/bash
+case "$*" in
+	*/admin/api/bootstrap*)
+		if [ "${STUB_BOOTSTRAP_BLOCKED:-false}" = true ]; then
+			printf '%s\n' '{"versionProblem":{"blocked":true}}'
+		else
+			printf '%s\n' '{"versionProblem":null}'
+		fi
+		;;
+esac
 exit 0
 STUB
 chmod 0755 "$lifecycle_bin/docker" "$lifecycle_bin/curl"
@@ -41,12 +57,31 @@ grep -q '^Preserved: depot, Software Depot ID, settings, secrets' "$work_dir/upg
 grep -q '^Rebuild required for settings changes: none' "$work_dir/upgrade.out" \
 	|| fail "upgrade did not report the rebuild contract"
 
+set +e
+PATH="$lifecycle_bin:$PATH" DOCKER_LOG="$lifecycle_log" STUB_BOOTSTRAP_BLOCKED=true \
+	"$project_dir/install.sh" --upgrade > "$work_dir/blocked-upgrade.out" 2>&1
+blocked_upgrade_rc=$?
+set -e
+[ "$blocked_upgrade_rc" -eq 1 ] || fail "upgrade reported success for blocked persistent state"
+grep -q 'persistent-state migration was refused or failed' "$work_dir/blocked-upgrade.out" \
+	|| fail "blocked upgrade did not report the migration refusal"
+! grep -q '^Upgrade complete:' "$work_dir/blocked-upgrade.out" \
+	|| fail "blocked upgrade printed a completion message"
+
 : > "$lifecycle_log"
 PATH="$lifecycle_bin:$PATH" DOCKER_LOG="$lifecycle_log" \
-	DEPOT_VOLUME_NAME=operator-depot BACKUP_VOLUME_NAME=operator-backup \
+	STUB_COMPOSE_DEPOT_VOLUME=operator-depot STUB_COMPOSE_BACKUP_VOLUME=operator-backup \
 	"$project_dir/uninstall.sh" > "$work_dir/uninstall.out"
-grep -qx 'compose down --remove-orphans --rmi all' "$lifecycle_log" \
-	|| fail "default uninstall did not remove stack images"
+grep -qx 'compose down --remove-orphans' "$lifecycle_log" \
+	|| fail "default uninstall did not remove the stack"
+grep -qx 'image rm ghcr.io/sentania-labs/vcf-lab-services/ui:latest' "$lifecycle_log" \
+	|| fail "default uninstall did not remove the UI image"
+grep -qx 'image rm ghcr.io/sentania-labs/vcf-lab-services/sync-base:latest' "$lifecycle_log" \
+	|| fail "default uninstall did not remove the sync image"
+grep -qx 'image rm ghcr.io/sentania-labs/vcf-lab-services/sftp:latest' "$lifecycle_log" \
+	|| fail "default uninstall did not remove the SFTP image"
+! grep -Eq 'image rm (caddy|redis):' "$lifecycle_log" \
+	|| fail "default uninstall removed a shared third-party image"
 grep -q 'depot content: operator-depot at /depot' "$work_dir/uninstall.out" \
 	|| fail "default uninstall did not report the retained depot"
 grep -q 'Software Depot ID: vcf-services-vcfdt-state' "$work_dir/uninstall.out" \
@@ -67,9 +102,9 @@ set -e
 : > "$lifecycle_log"
 printf 'PURGE\n' | PATH="$lifecycle_bin:$PATH" DOCKER_LOG="$lifecycle_log" \
 		"$project_dir/uninstall.sh" --purge-data > "$work_dir/purge.out"
-grep -qx 'compose down --remove-orphans --rmi all --volumes' "$lifecycle_log" \
+grep -qx 'compose down --remove-orphans --volumes' "$lifecycle_log" \
 	|| fail "confirmed data purge did not remove stack volumes"
-grep -q '^Left behind by this stack: nothing.$' "$work_dir/purge.out" \
+grep -q '^Left behind by VCF Services: no containers, network, or volumes.$' "$work_dir/purge.out" \
 	|| fail "confirmed data purge did not report its result"
 echo "upgrade and uninstall lifecycle tests passed"
 
