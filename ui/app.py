@@ -128,9 +128,8 @@ SOFTWARE_DEPOT_ID_RE = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
 # The sync tool mirrors its own distribution archives into this depot tree.
-# On the reference depot the tree is flat: PROD/COMP/VCFDT/vcf-download-tool-
-# <version>.tar.gz with no version subdirectories. Listing also accepts one
-# level of version subdirectories so a future layout change is not a dead end.
+# The tree is flat: PROD/COMP/VCFDT/vcf-download-tool-<version>.tar.gz with no
+# version subdirectories, and the listing and resolver accept only that layout.
 DEPOT_TOOL_DIR = DEPOT / "PROD" / "COMP" / "VCFDT"
 DEPOT_TOOL_ARCHIVE_RE = re.compile(
     rf"^vcf-download-tool-(?P<version>{TOOL_VERSION_VALUE})\.(?:tar\.gz|tgz|zip)$",
@@ -595,13 +594,9 @@ def _install_tool(upload):
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def _archive_version(path, root):
+def _archive_version(path):
     match = DEPOT_TOOL_ARCHIVE_RE.fullmatch(path.name)
-    if match is not None:
-        return match.group("version")
-    if path.parent != root and TOOL_VERSION_RE.fullmatch(path.parent.name) is not None:
-        return path.parent.name
-    return None
+    return None if match is None else match.group("version")
 
 
 def _version_sort_key(version):
@@ -614,25 +609,15 @@ def _version_sort_key(version):
 def _depot_tool_archives():
     """List the tool archives the sync mirrored under PROD/COMP/VCFDT.
 
-    Only regular files that still resolve inside the VCFDT tree after symlink
-    resolution are offered, a subset of what the install path accepts: the
-    listing skips symlinked subdirectories outright while the resolver checks
-    where they land.
+    Only regular files directly under the VCFDT tree that still resolve inside
+    it after symlink resolution are offered.
     """
     root = DEPOT_TOOL_DIR
     if not root.is_dir():
         return []
     try:
         resolved_root = root.resolve(strict=True)
-        candidates = []
-        for child in sorted(root.iterdir()):
-            if child.is_dir() and not child.is_symlink():
-                try:
-                    candidates.extend(sorted(child.iterdir()))
-                except OSError:
-                    continue
-            else:
-                candidates.append(child)
+        candidates = sorted(root.iterdir())
     except OSError:
         return []
     installed = _current_tool_info()
@@ -649,10 +634,10 @@ def _depot_tool_archives():
             stat = resolved.stat()
         except OSError:
             continue
-        version = _archive_version(path, root)
+        version = _archive_version(path)
         entries.append(
             {
-                "path": path.relative_to(root).as_posix(),
+                "path": path.name,
                 "filename": path.name,
                 "version": version or "unknown",
                 "versionKnown": version is not None,
@@ -690,17 +675,12 @@ def _resolve_depot_archive(value):
         raise ToolArchiveError("choose a VCF Download Tool archive from the depot")
     if "\x00" in value:
         raise ToolArchiveError("the chosen archive is not inside the depot VCFDT tree")
-    relative = PurePosixPath(value.replace("\\", "/"))
-    if (
-        relative.is_absolute()
-        or not relative.parts
-        or len(relative.parts) > 2
-        or any(part in {"", ".", ".."} for part in relative.parts)
-    ):
+    name = value.replace("\\", "/")
+    if "/" in name or name in {".", ".."}:
         raise ToolArchiveError("the chosen archive is not inside the depot VCFDT tree")
     try:
         resolved_root = DEPOT_TOOL_DIR.resolve(strict=True)
-        candidate = DEPOT_TOOL_DIR.joinpath(*relative.parts).resolve(strict=True)
+        candidate = (DEPOT_TOOL_DIR / name).resolve(strict=True)
     except (OSError, ValueError) as exc:
         raise ToolArchiveError("the chosen archive is not in the depot") from exc
     if candidate == resolved_root or not candidate.is_relative_to(resolved_root):

@@ -348,6 +348,11 @@ function updateDepotInstallState() {
 }
 async function loadDepotArchives(report=false) {
   const select=$('vcfdt-depot-version'); const flash=$('vcfdt-depot-flash');
+  if (bootstrap?.versionProblem?.blocked) {
+    depotArchiveCount=0; select.innerHTML='';
+    const blocked=document.createElement('option'); blocked.value=''; blocked.textContent='Depot listing unavailable until the version check clears'; select.appendChild(blocked);
+    flash.textContent=''; updateDepotInstallState(); return;
+  }
   try {
     const result=await api('api/vcfdt/depot');
     const rows=result.archives||[];
@@ -358,10 +363,11 @@ async function loadDepotArchives(report=false) {
       flash.textContent=result.mounted ? `No vcf-download-tool archives under ${result.directory}; run a sync or upload the archive` : `${result.directory} does not exist yet; run a sync or upload the archive`;
     } else {
       rows.forEach(item => {
-        const option=document.createElement('option'); option.value=item.path;
-        option.textContent=`${item.version} (${item.filename}, ${bytes(item.sizeBytes)}${item.installed ? ', installed' : ''})`;
+        const option=document.createElement('option'); option.value=item.path; option.disabled=!item.readable;
+        option.textContent=`${item.version} (${item.filename}, ${bytes(item.sizeBytes)}${item.installed ? ', installed' : ''}${item.readable ? '' : ', not readable'})`;
         select.appendChild(option);
       });
+      depotArchiveCount=rows.filter(item => item.readable).length;
       if (report) flash.textContent=`${rows.length} archive${rows.length === 1 ? '' : 's'} found in the depot`;
     }
   } catch(error) { depotArchiveCount=0; flash.textContent=error.message; }

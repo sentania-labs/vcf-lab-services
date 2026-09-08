@@ -388,7 +388,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
 
         old = self.seed_depot_tool("9.1.0.0.25371089")
         new = self.seed_depot_tool("9.1.0.0100.25429019")
-        nested = self.seed_depot_tool("9.1.0.0400.25570101", subdir="9.1.0.0400.25570101")
+        self.seed_depot_tool("9.1.0.0400.25570101", subdir="9.1.0.0400.25570101")
         (self.depot / "PROD" / "COMP" / "VCFDT" / "metadata.json").write_text("{}")
         outside = self.depot / "PROD" / "COMP" / "ESX_HOST"
         outside.mkdir(parents=True)
@@ -403,18 +403,13 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertTrue(listing["mounted"])
         self.assertEqual(
             [entry["version"] for entry in listing["archives"]],
-            ["9.1.0.0400.25570101", "9.1.0.0100.25429019", "9.1.0.0.25371089", "unknown"],
+            ["9.1.0.0100.25429019", "9.1.0.0.25371089", "unknown"],
         )
         self.assertEqual(
             [entry["path"] for entry in listing["archives"]],
-            [
-                "9.1.0.0400.25570101/vcf-download-tool-9.1.0.0400.25570101.tar.gz",
-                new.name,
-                old.name,
-                unnamed.name,
-            ],
+            [new.name, old.name, unnamed.name],
         )
-        for entry, source in zip(listing["archives"], (nested, new, old)):
+        for entry, source in zip(listing["archives"], (new, old)):
             self.assertEqual(entry["filename"], source.name)
             self.assertEqual(entry["sizeBytes"], source.stat().st_size)
             self.assertTrue(entry["versionKnown"])
@@ -428,10 +423,27 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         listing = self.get("/api/vcfdt/depot").get_json()
         self.assertEqual(
             [entry["installed"] for entry in listing["archives"]],
-            [False, True, False, False],
+            [True, False, False],
         )
         self.assertEqual(listing["installed"]["version"], "9.1.0.0100.25429019")
         self.assertEqual(listing["installed"]["source"], "depot")
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every file regardless of mode")
+    def test_depot_listing_flags_unreadable_archives(self):
+        self.claim()
+        self.write_state()
+        readable = self.seed_depot_tool("9.1.0.0100.25429019")
+        locked = self.seed_depot_tool("9.1.0.0.25371089")
+        locked.chmod(0o000)
+        self.addCleanup(lambda: locked.exists() and locked.chmod(0o644))
+        listing = self.get("/api/vcfdt/depot").get_json()
+        self.assertEqual(
+            [(entry["path"], entry["readable"]) for entry in listing["archives"]],
+            [(readable.name, True), (locked.name, False)],
+        )
+        response = self.install_from_depot(locked.name)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("file mode", response.get_json()["error"])
 
     def test_install_from_depot_swaps_release_and_preserves_depot_id(self):
         self.claim()
@@ -500,6 +512,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(self.upload_tool().status_code, 201)
         original = os.readlink(self.tool_store / "current")
         self.seed_depot_tool("9.1.0.0.25371089")
+        self.seed_depot_tool("9.1.0.0400.25570101", subdir="9.1.0.0400.25570101")
         outside = self.depot / "PROD" / "COMP" / "ESX_HOST"
         outside.mkdir(parents=True)
         stray = outside / "vcf-download-tool-9.9.9.tar.gz"
@@ -513,6 +526,8 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             str(stray),
             "linked.tar.gz",
             "escape/vcf-download-tool-9.9.9.tar.gz",
+            "9.1.0.0400.25570101/vcf-download-tool-9.1.0.0400.25570101.tar.gz",
+            "9.1.0.0400.25570101\\vcf-download-tool-9.1.0.0400.25570101.tar.gz",
             "metadata.json",
             "missing.tar.gz",
             "",
