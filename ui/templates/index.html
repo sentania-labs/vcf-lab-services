@@ -276,6 +276,13 @@
 const $ = id => document.getElementById(id);
 const esc = value => { const node=document.createElement('div'); node.textContent=value ?? ''; return node.innerHTML; };
 const fmt = value => value ? new Date(value).toLocaleString() : 'not available';
+// The picker labels its time as the configured timezone, so its readout is
+// rendered in that zone rather than the browser's, and names the zone.
+const fmtIn = (value, zone) => {
+  if (!value) return 'not available';
+  try { return `${new Date(value).toLocaleString(undefined,{timeZone:zone})} (${zone})`; }
+  catch (_error) { return `${new Date(value).toLocaleString()} (browser time)`; }
+};
 let bootstrap = null;
 let landed = false;
 
@@ -419,7 +426,7 @@ $('save-activation').onclick=async()=>{
 // string; the picker only composes and decomposes it. Daily and weekly shapes
 // are a fixed minute and hour with wildcard day-of-month and month; anything
 // else opens in Custom mode with the raw string.
-let savedNextRun=null, savedSchedule=null, previewNextRun=null, previewError=null, previewTimer=null;
+let savedNextRun=null, savedSchedule=null, savedTimezone='UTC', previewNextRun=null, previewError=null, previewTimer=null;
 const pad=value=>String(value).padStart(2,'0');
 for (let hour=0; hour<24; hour++) $('schedule-hour').insertAdjacentHTML('beforeend',`<option value="${hour}">${pad(hour)}</option>`);
 for (let minute=0; minute<60; minute++) $('schedule-minute').insertAdjacentHTML('beforeend',`<option value="${minute}">${pad(minute)}</option>`);
@@ -459,7 +466,7 @@ function loadSchedule(cron){
   document.querySelectorAll('.schedule-weekday').forEach(box=>{ box.checked=shape.mode==='weekly'&&shape.days.includes(Number(box.value)); });
   $('cron').value=cron;
   if(shape.mode==='custom') $('cron-advanced').checked=true;
-  savedSchedule=scheduleKey();
+  savedSchedule=scheduleKey(); savedTimezone=$('timezone').value.trim()||'UTC';
   previewNextRun=null; previewError=null;
   renderSchedule();
 }
@@ -475,13 +482,13 @@ function renderSchedule(){
 }
 
 function renderScheduleNext(){
-  const node=$('schedule-next'); const cron=composeCron();
+  const node=$('schedule-next');
   node.className='help';
   const problem=scheduleProblem();
   if(problem){ node.textContent=problem; node.className='help error'; return; }
-  if(scheduleKey()===savedSchedule){ node.textContent=`Next run: ${fmt(savedNextRun)}`; return; }
+  if(scheduleKey()===savedSchedule){ node.textContent=`Next run: ${fmtIn(savedNextRun, savedTimezone)}`; return; }
   if(previewError){ node.textContent=previewError; node.className='help error'; return; }
-  node.textContent=previewNextRun ? `Next run after save: ${fmt(previewNextRun)}` : 'Next run after save: calculating';
+  node.textContent=previewNextRun ? `Next run after save: ${fmtIn(previewNextRun, $('timezone').value.trim())}` : 'Next run after save: calculating';
 }
 
 async function previewSchedule(){

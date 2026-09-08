@@ -867,6 +867,12 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             self.get("/api/schedule/preview?cron=0+3+*+*+*&timezone=Mars/Olympus").status_code,
             400,
         )
+        # A cleared timezone field is what the save rejects, so the preview
+        # must reject it too instead of falling back to the stored zone.
+        self.assertEqual(
+            self.get("/api/schedule/preview?cron=0+3+*+*+*&timezone=").status_code,
+            400,
+        )
         # Nothing is written by a preview.
         self.assertIn('CRON_SCHEDULE="0 3 * * 0"', self.settings.read_text())
 
