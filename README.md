@@ -38,7 +38,10 @@ The console then walks through:
 2. Reading the persistent Software Depot ID and saving its activation code.
 3. Confirming the platform-provided depot and backup mounts.
 4. Choosing the VCF filter, SKU, targets, recurring schedule, timezone, CEIP,
-   backup service state, SFTP identity, and download endpoints.
+   backup service state, SFTP identity, and download endpoints. The schedule
+   is picked as daily, weekly, or custom cron (with an advanced cron toggle),
+   and the console shows the next run the choice would produce before it is
+   saved.
 5. Running a sync and inspecting live state, logs, and available versions.
 
 The console is organised into Setup, Sync, Settings, Backup, and Logs tabs.
