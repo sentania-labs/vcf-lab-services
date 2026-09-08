@@ -1140,21 +1140,62 @@ def download_tls_ca():
     )
 
 
+def _cron_problem(cron):
+    """Return the operator-facing reason a five-field cron string is invalid."""
+    if len(cron.split()) != 5 or not re.fullmatch(r"[0-9*/ ,\-]+", cron):
+        return "the schedule must use five cron fields"
+    try:
+        croniter(cron, datetime.now(timezone.utc)).get_next(datetime)
+    except (KeyError, ValueError):
+        return "the sync schedule is invalid"
+    return None
+
+
+def _zone(timezone_name):
+    try:
+        return ZoneInfo(timezone_name or "UTC")
+    except (KeyError, ValueError):
+        return timezone.utc
+
+
+def _next_run(cron, tzinfo):
+    try:
+        return croniter(cron, datetime.now(tzinfo)).get_next(datetime).isoformat()
+    except (KeyError, ValueError):
+        return None
+
+
+@app.get("/api/schedule/preview")
+def schedule_preview():
+    """Compute the next run for an unsaved schedule so the picker can show it.
+
+    The picker composes the same five-field string that POST /api/settings
+    stores, so the validation here is the one the save applies.
+    """
+    cron = str(request.args.get("cron", "")).strip()
+    problem = _cron_problem(cron)
+    if problem:
+        return jsonify({"error": problem}), 400
+    # The timezone is always supplied by the picker and validated the same way
+    # the save validates it, so a blank or missing value is a 400, not a
+    # fallback to the stored zone.
+    timezone_name = str(request.args.get("timezone", "")).strip()
+    try:
+        tzinfo = ZoneInfo(timezone_name)
+    except (KeyError, ValueError):
+        return jsonify({"error": "choose a valid IANA timezone"}), 400
+    return jsonify(
+        {"cron": cron, "timezone": timezone_name, "nextRun": _next_run(cron, tzinfo)}
+    )
+
+
 @app.get("/api/status")
 def status():
     state = _state()
     settings = _settings()
     tool_info = _current_tool_info()
     cron = settings.get("CRON_SCHEDULE", "0 3 * * 0")
-    try:
-        tzinfo = ZoneInfo(settings.get("TZ") or "UTC")
-    except (KeyError, ValueError):
-        tzinfo = timezone.utc
-    next_run = None
-    try:
-        next_run = croniter(cron, datetime.now(tzinfo)).get_next(datetime).isoformat()
-    except (KeyError, ValueError):
-        pass
+    next_run = _next_run(cron, _zone(settings.get("TZ")))
     armed = _activation_configured()
     return jsonify(
         {
@@ -1288,12 +1329,9 @@ def update_settings():
     if any(target not in VALID_TARGETS for target in targets) or len(set(targets)) != len(targets):
         return jsonify({"error": "the sync target selection is invalid"}), 400
     cron = str(body["cronSchedule"]).strip()
-    if len(cron.split()) != 5 or not re.fullmatch(r"[0-9*/ ,\-]+", cron):
-        return jsonify({"error": "the schedule must use five cron fields"}), 400
-    try:
-        croniter(cron, datetime.now(timezone.utc)).get_next(datetime)
-    except (KeyError, ValueError):
-        return jsonify({"error": "the sync schedule is invalid"}), 400
+    cron_problem = _cron_problem(cron)
+    if cron_problem:
+        return jsonify({"error": cron_problem}), 400
     timezone_name = str(body["timezone"]).strip()
     try:
         ZoneInfo(timezone_name)
