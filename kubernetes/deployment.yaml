@@ -194,7 +194,6 @@ spec:
               mountPath: /depot
             - name: vcfdt-tool
               mountPath: /opt/vcfdt
-              readOnly: true
             - name: vcfdt-state
               mountPath: /home/vcf/.local/share/vmware/vdt
             - name: sync-state

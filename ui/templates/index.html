@@ -356,9 +356,17 @@ document.querySelectorAll('.tab-button').forEach(button => {
 function saveMessage(result) {
   const pending=result.appliesToNextRun ? (result.pendingFields||[]) : [];
   const live=result.appliedNow||[];
-  if(!pending.length) return 'Saved and active';
-  if(live.length) return `Saved. ${live.join(', ')} took effect now, the rest applies to the next run`;
-  return 'Saved, applies to the next run';
+  const patched=result.patchedFiles||[];
+  const patchNotice=patched.length ? ` Endpoint profiles patched: ${patched.join(', ')}.` : '';
+  if(!pending.length) return `Saved and active.${patchNotice}`;
+  if(live.length) return `Saved. ${live.join(', ')} took effect now, the rest applies to the next run.${patchNotice}`;
+  return `Saved, applies to the next run.${patchNotice}`;
+}
+
+function toolInstallMessage(result, source) {
+  const ready=result.versionVerified ? `${result.version} installed${source}` : `Installed${source}; the reported version could not be verified`;
+  const patched=result.patchedFiles||[];
+  return patched.length ? `${ready}. Endpoint profiles patched: ${patched.join(', ')}.` : ready;
 }
 
 function showPending(status) {
@@ -464,7 +472,7 @@ $('vcfdt-upload').onclick=async()=>{
   const file=$('vcfdt-archive').files[0]; if(!file){$('vcfdt-flash').textContent='Choose an archive';return;}
   $('vcfdt-upload').disabled=true; $('vcfdt-flash').textContent='Uploading and validating';
   const payload=new FormData(); payload.append('archive',file);
-  try { await api('api/vcfdt',{method:'POST',body:payload}); $('vcfdt-archive').value=''; populateSetup(await api('api/bootstrap')); await loadDepotArchives(); }
+  try { const result=await api('api/vcfdt',{method:'POST',body:payload}); $('vcfdt-archive').value=''; populateSetup(await api('api/bootstrap')); await loadDepotArchives(); $('vcfdt-flash').textContent=toolInstallMessage(result,''); }
   catch(error){$('vcfdt-flash').textContent=error.message;} finally{$('vcfdt-upload').disabled=false;}
 };
 
@@ -476,7 +484,7 @@ $('vcfdt-depot-install').onclick=async()=>{
   try {
     const result=await api('api/vcfdt/depot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
     populateSetup(await api('api/bootstrap')); await loadDepotArchives();
-    $('vcfdt-depot-flash').textContent=result.versionVerified ? `${result.version} installed from the depot` : 'Installed from the depot; the reported version could not be verified';
+    $('vcfdt-depot-flash').textContent=toolInstallMessage(result,' from the depot');
   } catch(error){$('vcfdt-depot-flash').textContent=error.message;} finally{updateDepotInstallState();}
 };
 

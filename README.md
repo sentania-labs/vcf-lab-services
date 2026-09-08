@@ -101,9 +101,12 @@ named volumes. The most important small volumes are:
   secrets.
 - `vcf-services-sftp-host-keys`, the stable consumer fingerprints.
 
-The `vcf-services-vcfdt-tool` volume is disposable. Restore it from the Setup
-tab by installing a tool archive already mirrored in the depot, or by
-uploading the licensed archive again.
+The `vcf-services-vcfdt-tool` volume is disposable. Both the console and sync
+service mount it read-write: the console installs the licensed tool, and the
+tool rewrites its telemetry flag during every sync. Tool installation and sync
+share an update lock, so they cannot modify the volume at the same time.
+Restore it from the Setup tab by installing a tool archive already mirrored in
+the depot, or by uploading the licensed archive again.
 
 The config volume carries the product version that created it. If an unmarked
 or differently marked config volume is found, the console stays reachable but
@@ -141,6 +144,15 @@ saved, the stack stays healthy but sync reports `not armed`.
 The download host and token URL are generic advanced settings. Production
 defaults are already present. Changing them patches the mounted tool only when
 no sync is running, with no image build or container recreation.
+Installation and endpoint changes update the existing endpoint keys in every
+regular, non-symlink `conf/application-prod*.properties` file. Non-production
+profiles are left untouched. Each changed file is replaced atomically, and a
+failed profile update or settings-file save restores the previous profiles
+under the update lock. The console reports the filenames changed after a
+successful save or install; files already containing the requested values are
+not listed. If neither endpoint key exists in any matching production profile,
+installation or an endpoint change is rejected with an explicit error. Before
+a tool is installed, endpoint settings can still be saved for its installation.
 
 ## Optional bootstrap helper
 

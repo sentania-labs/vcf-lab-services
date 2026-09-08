@@ -61,10 +61,19 @@ grep -q 'VERSION_STATUS_FILE' sftp/entrypoint.sh || fail "SFTP does not stop on 
 grep -q 'depot_store:/depot:ro' docker-compose.yml || fail "web depot mount must be read-only at /depot"
 grep -q 'depot_store:/depot:rw' docker-compose.yml || fail "sync depot mount must be read-write at /depot"
 grep -q 'backup_store:/mnt/backup:rw' docker-compose.yml || fail "backup mount must be separate and writable"
-grep -q 'vcfdt_tool:/opt/vcfdt:ro' docker-compose.yml || fail "sync tool mount must be read-only"
-grep -q 'vcfdt_tool:/opt/vcfdt:rw' docker-compose.yml || fail "console tool mount must be writable"
-[ "$(grep -c 'vcfdt_tool:/opt/vcfdt:rw' docker-compose.yml)" -eq 1 ] \
-	|| fail "only the console may write the tool volume"
+docker compose config --format json | python3 -c '
+import json
+import sys
+
+config = json.load(sys.stdin)
+for name in ("depot-sync", "admin-ui"):
+    mounts = [mount for mount in config["services"][name]["volumes"]
+              if mount["target"] == "/opt/vcfdt"]
+    assert len(mounts) == 1, f"{name}: expected one tool mount"
+    mount = mounts[0]
+    assert mount["type"] == "volume" and mount["source"] == "vcfdt_tool", name
+    assert mount.get("read_only", False) is False, f"{name}: tool mount must be writable"
+'
 grep -q 'name: vcf-services-vcfdt-state' docker-compose.yml || fail "machine ID volume renamed"
 grep -q 'name: vcf-services-sftp-host-keys' docker-compose.yml || fail "SFTP host-key volume renamed"
 

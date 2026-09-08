@@ -152,6 +152,7 @@ class UiApiTests(unittest.TestCase):
         version="9.1.2",
         machine_id="11111111-1111-4111-8111-111111111111",
         version_output=None,
+        profiles=None,
     ):
         if version_output is None:
             version_output = f"Version: {version}\n{version}"
@@ -171,15 +172,24 @@ class UiApiTests(unittest.TestCase):
             info.size = len(payload)
             info.mode = 0o755
             archive.addfile(info, io.BytesIO(payload))
-            properties = (
-                b"lcm.depot.adapter.host=old.example.test\n"
-                b"lcm.access_token.broadcom.authorization.server.url=https://old.example.test/token\n"
-            )
-            info = tarfile.TarInfo(
-                "vcf-download-tool/conf/application-prodv2.properties"
-            )
-            info.size = len(properties)
-            archive.addfile(info, io.BytesIO(properties))
+            if profiles is None:
+                profiles = {
+                    "application-prod.properties": (
+                        "lcm.depot.adapter.host=old.example.test\n"
+                        "lcm.access_token.broadcom.authorization.server.url="
+                        "https://old.example.test/token\n"
+                    ),
+                    "application-prodv2.properties": (
+                        "lcm.depot.adapter.host=old.example.test\n"
+                        "lcm.access_token.broadcom.authorization.server.url="
+                        "https://old.example.test/token\n"
+                    ),
+                }
+            for profile, text in profiles.items():
+                properties = text.encode()
+                info = tarfile.TarInfo(f"vcf-download-tool/conf/{profile}")
+                info.size = len(properties)
+                archive.addfile(info, io.BytesIO(properties))
         stream.seek(0)
         return stream
 
@@ -279,8 +289,61 @@ class UiApiTests(unittest.TestCase):
         current = self.tool_store / "current"
         self.assertTrue(current.is_symlink())
         self.assertEqual(response.get_json()["version"], "9.1.2")
-        properties = (current / "conf" / "application-prodv2.properties").read_text()
+        self.assertEqual(
+            response.get_json()["patchedFiles"],
+            [
+                "conf/application-prod.properties",
+                "conf/application-prodv2.properties",
+            ],
+        )
+        for profile in ("application-prod.properties", "application-prodv2.properties"):
+            properties = (current / "conf" / profile).read_text()
+            self.assertIn("lcm.depot.adapter.host=dl.broadcom.com", properties)
+
+    def test_tool_upload_patches_prodv2_only_archive(self):
+        self.claim()
+        self.write_state()
+        archive = self.tar_tool(
+            profiles={
+                "application-prodv2.properties": (
+                    "lcm.depot.adapter.host=old.example.test\n"
+                    "lcm.access_token.broadcom.authorization.server.url="
+                    "https://old.example.test/token\n"
+                )
+            }
+        )
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (archive, "vcf-download-tool-prodv2-only.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.get_json()["patchedFiles"],
+            ["conf/application-prodv2.properties"],
+        )
+        properties = (
+            self.tool_store / "current" / "conf" / "application-prodv2.properties"
+        ).read_text()
         self.assertIn("lcm.depot.adapter.host=dl.broadcom.com", properties)
+
+    def test_tool_upload_rejects_archive_without_endpoint_keys(self):
+        self.claim()
+        self.write_state()
+        archive = self.tar_tool(
+            profiles={
+                "application-prod.properties": "unrelated.setting=true\n",
+                "application-lab.properties": "lcm.depot.adapter.host=lab.example.test\n",
+            }
+        )
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (archive, "vcf-download-tool-no-endpoints.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no VCF Download Tool endpoint keys", response.get_json()["error"])
+        self.assertFalse((self.tool_store / "current").exists())
 
     def test_real_tool_version_output_is_parsed(self):
         self.claim()
@@ -497,6 +560,13 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertTrue(body["versionVerified"])
         self.assertEqual(body["source"], "depot")
         self.assertEqual(body["sourceFile"], archive.name)
+        self.assertEqual(
+            body["patchedFiles"],
+            [
+                "conf/application-prod.properties",
+                "conf/application-prodv2.properties",
+            ],
+        )
         current = self.tool_store / "current"
         self.assertTrue(current.is_symlink())
         self.assertNotEqual(os.readlink(current), original)
@@ -606,18 +676,121 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.claim()
         self.write_state()
         self.upload_tool()
+        profile_paths = [
+            self.tool_store / "current" / "conf" / profile
+            for profile in (
+                "application-prod.properties",
+                "application-prodv2.properties",
+            )
+        ]
+        original_inodes = {path: path.stat().st_ino for path in profile_paths}
         response = self.post("/api/settings", json=self.valid_settings())
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertEqual(body["cronSchedule"], "0 2 * * 6")
         self.assertTrue(body["storageConfirmed"])
+        self.assertEqual(
+            body["patchedFiles"],
+            [
+                "conf/application-prod.properties",
+                "conf/application-prodv2.properties",
+            ],
+        )
         settings_text = self.settings.read_text()
         self.assertNotIn("NFS_", settings_text)
         self.assertIn('DEPOT_ENDPOINT="downloads.example.test"', settings_text)
-        properties = (
-            self.tool_store / "current" / "conf" / "application-prodv2.properties"
-        ).read_text()
-        self.assertIn("lcm.depot.adapter.host=downloads.example.test", properties)
+        for path in profile_paths:
+            properties = path.read_text()
+            self.assertIn("lcm.depot.adapter.host=downloads.example.test", properties)
+            self.assertNotEqual(path.stat().st_ino, original_inodes[path])
+
+    def test_settings_leaves_non_production_profile_untouched(self):
+        self.claim()
+        self.write_state()
+        archive = self.tar_tool(
+            profiles={
+                "application-prod.properties": (
+                    "lcm.depot.adapter.host=old.example.test\n"
+                ),
+                "application-prodv2.properties": (
+                    "lcm.access_token.broadcom.authorization.server.url="
+                    "https://old.example.test/token\n"
+                ),
+                "application-lab.properties": (
+                    "unrelated.setting=true\n"
+                    "lcm.depot.adapter.host=old.example.test\n"
+                ),
+            }
+        )
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (archive, "vcf-download-tool-profiles.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        saved = self.post("/api/settings", json=self.valid_settings())
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(
+            saved.get_json()["patchedFiles"],
+            [
+                "conf/application-prod.properties",
+                "conf/application-prodv2.properties",
+            ],
+        )
+        lab_profile = self.tool_store / "current" / "conf" / "application-lab.properties"
+        self.assertEqual(
+            lab_profile.read_text(),
+            "unrelated.setting=true\nlcm.depot.adapter.host=old.example.test\n",
+        )
+
+    def test_settings_write_failure_restores_profiles_and_settings(self):
+        self.claim()
+        self.write_state()
+        self.upload_tool()
+        conf = self.tool_store / "current" / "conf"
+        profiles = sorted(conf.glob("application-prod*.properties"))
+        originals = {path: path.read_bytes() for path in profiles}
+        modes = {path: path.stat().st_mode for path in profiles}
+        settings_before = self.settings.read_bytes()
+        replace = os.replace
+        for failed_path in (profiles[1], self.settings):
+            with self.subTest(failed_path=failed_path.name):
+                replaced = []
+
+                def fail_write(source, destination):
+                    destination = Path(destination)
+                    if destination == failed_path:
+                        raise OSError("injected write failure")
+                    replace(source, destination)
+                    replaced.append(destination)
+
+                with mock.patch.object(self.module.os, "replace", side_effect=fail_write):
+                    response = self.post("/api/settings", json=self.valid_settings())
+                self.assertEqual(response.status_code, 500)
+                self.assertIn("injected write failure", response.get_json()["error"])
+                self.assertIn(profiles[0], replaced)
+                for path in profiles:
+                    self.assertEqual(path.read_bytes(), originals[path])
+                    self.assertEqual(path.stat().st_mode, modes[path])
+                self.assertEqual(self.settings.read_bytes(), settings_before)
+                self.assertEqual(sorted(conf.glob(".*")), [])
+                settings = self.get("/api/settings").get_json()
+                self.assertEqual(settings["depotEndpoint"], "dl.broadcom.com")
+                self.assertEqual(
+                    settings["tokenUrl"], "https://eapi.broadcom.com/vcf/generateToken"
+                )
+
+    def test_settings_no_key_error_preserves_stored_endpoints(self):
+        self.claim()
+        self.write_state()
+        self.upload_tool()
+        current = self.tool_store / "current"
+        for properties in (current / "conf").glob("application*.properties"):
+            properties.write_text("unrelated.setting=true\n")
+        response = self.post("/api/settings", json=self.valid_settings())
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no VCF Download Tool endpoint keys", response.get_json()["error"])
+        self.assertIn('DEPOT_ENDPOINT="dl.broadcom.com"', self.settings.read_text())
 
     def test_partial_settings_update_merges_over_stored_document(self):
         self.claim()

@@ -32,6 +32,7 @@ sleep 0.1
 run_sync patches > "$work_dir/locked-secondary.log"
 wait "$primary_pid"
 grep -q 'another sync is already running' "$work_dir/locked-secondary.log"
+grep -qx 'written' "$work_dir/tool/conf/telemetry/telemetry.flag"
 
 set +e
 STUB_FAIL_TARGET=install run_sync esx install patches > "$work_dir/sequential.log"

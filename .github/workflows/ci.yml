@@ -74,9 +74,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/vcf-download-tool-0.0.0-stub.tar.gz" \
             -C "$RUNNER_TEMP/vcfdt/current" --strip-components=1
           docker run --rm \
-            -v "$RUNNER_TEMP/vcfdt:/opt/vcfdt:ro" \
+            -v "$RUNNER_TEMP/vcfdt:/opt/vcfdt:rw" \
             --entrypoint /opt/vcfdt/current/bin/vcf-download-tool \
             vcf-services-sync-base:ci --version | grep -q 'Welcome to VCF Download Tool'
+          grep -qx 'written' "$RUNNER_TEMP/vcfdt/current/conf/telemetry/telemetry.flag"
 
       - name: Run UI unit tests in the built image
         run: docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:ci python tests/test_ui.py

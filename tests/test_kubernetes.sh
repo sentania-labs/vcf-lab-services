@@ -52,6 +52,19 @@ permissions_block="$(sed -n '/name: volume-permissions/,/name: bootstrap/p' "$re
 	|| fail "volume-permissions must not mount or re-own the backup claim"
 grep -q '/volumes/depot' <<< "$permissions_block" \
 	|| fail "volume-permissions does not initialize application-owned volume roots"
+ruby -ryaml -e '
+documents = YAML.load_stream(File.read(ARGV.fetch(0)))
+deployment = documents.find { |doc| doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "vcf-services" }
+abort "vcf-services Deployment missing" unless deployment
+containers = deployment.fetch("spec").fetch("template").fetch("spec").fetch("containers")
+sync = containers.find { |container| container["name"] == "depot-sync" }
+abort "depot-sync container missing" unless sync
+mounts = sync.fetch("volumeMounts").select { |mount| mount["mountPath"] == "/opt/vcfdt" }
+abort "expected one sync tool mount" unless mounts.length == 1
+mount = mounts.first
+abort "sync tool volume is incorrect" unless mount["name"] == "vcfdt-tool"
+abort "sync tool volume must be writable" unless mount.fetch("readOnly", false) == false
+' "$rendered"
 for annotation in proxy-body-size proxy-read-timeout proxy-send-timeout proxy-request-buffering; do
 	grep -q "nginx.ingress.kubernetes.io/$annotation" "$rendered" \
 		|| fail "ingress upload annotation $annotation is missing"

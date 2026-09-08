@@ -405,31 +405,84 @@ def _archive_kind(filename):
     raise ToolArchiveError("choose a .tar.gz, .tgz, or .zip VCF Download Tool archive")
 
 
-def _patch_tool_endpoints(tool_root):
-    properties = tool_root / "conf" / "application-prodv2.properties"
-    if not properties.is_file():
-        return
-    settings = _settings()
+@contextmanager
+def _patch_tool_endpoints(tool_root, settings=None):
+    settings = _settings() if settings is None else settings
     replacements = {
         "lcm.depot.adapter.host": settings.get("DEPOT_ENDPOINT", "dl.broadcom.com"),
         "lcm.access_token.broadcom.authorization.server.url": settings.get(
             "TOKEN_URL", "https://eapi.broadcom.com/vcf/generateToken"
         ),
     }
-    lines = properties.read_text().splitlines()
-    found = set()
-    updated = []
-    for line in lines:
-        key = line.split("=", 1)[0]
-        if key in replacements:
-            updated.append(f"{key}={replacements[key]}")
-            found.add(key)
-        else:
-            updated.append(line)
-    updated.extend(
-        f"{key}={value}" for key, value in replacements.items() if key not in found
+    found_any = False
+    changed = []
+    conf_dir = tool_root / "conf"
+    candidates = sorted(
+        path
+        for path in conf_dir.glob("application-prod*.properties")
+        if path.is_file() and not path.is_symlink()
     )
-    properties.write_text("\n".join(updated) + "\n")
+    backups = []
+    replaced = []
+    try:
+        for properties in candidates:
+            original = properties.read_text()
+            updated = []
+            found_here = False
+            for line in original.splitlines():
+                key = line.split("=", 1)[0].strip()
+                if key in replacements:
+                    updated.append(f"{key}={replacements[key]}")
+                    found_here = True
+                    found_any = True
+                else:
+                    updated.append(line)
+            if not found_here:
+                continue
+            updated_text = "\n".join(updated) + "\n"
+            if updated_text == original:
+                continue
+            backup_handle, backup_name = tempfile.mkstemp(
+                prefix=f".{properties.name}.rollback.", dir=properties.parent
+            )
+            os.close(backup_handle)
+            backups.append(backup_name)
+            shutil.copy2(properties, backup_name)
+            mode = properties.stat().st_mode & 0o777
+            handle, temp_name = tempfile.mkstemp(
+                prefix=f".{properties.name}.", dir=properties.parent
+            )
+            try:
+                os.fchmod(handle, mode)
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write(updated_text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp_name, properties)
+                replaced.append((properties, backup_name))
+            except Exception:
+                try:
+                    os.close(handle)
+                except OSError:
+                    pass
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
+                raise
+            changed.append(str(properties.relative_to(tool_root)))
+        if not found_any:
+            raise ToolArchiveError(
+                "no VCF Download Tool endpoint keys were found in conf/application-prod*.properties"
+            )
+        yield changed
+    except Exception:
+        for properties, backup_name in reversed(replaced):
+            os.replace(backup_name, properties)
+        raise
+    finally:
+        for backup_name in backups:
+            Path(backup_name).unlink(missing_ok=True)
 
 
 def _find_tool_root(extracted):
@@ -561,7 +614,8 @@ def _install_tool_archive(archive_path, filename, source):
         else:
             _extract_zip(archive_path, extracted)
         tool_root = _find_tool_root(extracted)
-        _patch_tool_endpoints(tool_root)
+        with _patch_tool_endpoints(tool_root) as patched_files:
+            pass
         version = _probe_tool_version(tool_root)
         metadata = {
             "version": version if version else "unverified",
@@ -569,6 +623,7 @@ def _install_tool_archive(archive_path, filename, source):
             "uploadedAt": datetime.now(timezone.utc).isoformat(),
             "source": source,
             "sourceFile": filename,
+            "patchedFiles": patched_files,
         }
         try:
             machine_id = _probe_machine_id(tool_root)
@@ -1589,6 +1644,7 @@ def update_settings():
     live_tool_changes = [field for field in changed if field in LIVE_TOOL_FIELDS]
     applied_now = [field for field in changed if field in LIVE_SERVICE_FIELDS]
     deferred = [field for field in changed if field not in LIVE_SERVICE_FIELDS]
+    patched_files = []
     try:
         # The guard is held across the write, so a run cannot read settings.env
         # while the save is in flight and the answer it yields stays true.
@@ -1606,10 +1662,14 @@ def update_settings():
                         return jsonify(
                             {"error": _live_tool_conflict(live_tool_changes)}
                         ), 409
-                    _write_settings(updates)
                     current = VCFDT_STORE / "current"
                     if current.is_dir():
-                        _patch_tool_endpoints(current)
+                        with _patch_tool_endpoints(
+                            current, {**stored, **updates}
+                        ) as patched_files:
+                            _write_settings(updates)
+                    else:
+                        _write_settings(updates)
             else:
                 _write_settings(updates)
             if not snapshot_taken:
@@ -1621,10 +1681,18 @@ def update_settings():
         return jsonify(
             {"error": "wait for the running sync or tool update to finish"}
         ), 409
+    except ToolArchiveError as exc:
+        return jsonify({"error": f"could not update tool endpoints: {exc}"}), 409
     except OSError as exc:
         return jsonify({"error": f"could not save settings: {exc}"}), 500
     return jsonify(
-        {**_settings_doc(), **pending, "appliedNow": applied_now, "saved": True}
+        {
+            **_settings_doc(),
+            **pending,
+            "appliedNow": applied_now,
+            "patchedFiles": patched_files,
+            "saved": True,
+        }
     )
 
 
