@@ -293,8 +293,14 @@ class UiApiTests(unittest.TestCase):
         self.assertTrue(current.is_symlink())
         self.assertEqual(response.get_json()["version"], "9.1.2")
         self.assertIsNotNone(
-            datetime.fromisoformat(response.get_json()["installedAt"])
+            datetime.fromisoformat(response.get_json()["uploadedAt"])
         )
+        self.assertNotIn("installedAt", response.get_json())
+        metadata = json.loads((current / ".vcf-services.json").read_text())
+        self.assertEqual(metadata["uploadedAt"], response.get_json()["uploadedAt"])
+        self.assertNotIn("installedAt", metadata)
+        status = self.get("/api/status").get_json()
+        self.assertEqual(status["vcfdtUploadedAt"], metadata["uploadedAt"])
         self.assertEqual(
             response.get_json()["patchedFiles"],
             [

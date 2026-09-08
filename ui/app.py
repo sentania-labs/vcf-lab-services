@@ -584,8 +584,7 @@ def _release_tool_info(link_name):
         "releaseId": metadata.get("releaseId"),
         "version": metadata.get("version", "unknown"),
         "versionVerified": bool(metadata.get("versionVerified", "version" in metadata)),
-        "installedAt": metadata.get("installedAt", metadata.get("uploadedAt")),
-        "uploadedAt": metadata.get("uploadedAt", metadata.get("installedAt")),
+        "uploadedAt": metadata.get("uploadedAt"),
         "source": metadata.get("source", "upload"),
         "sourceFile": metadata.get("sourceFile"),
     }
@@ -654,7 +653,7 @@ def _install_tool_archive(archive_path, filename, source):
             "releaseId": release_id,
             "version": version if version else "unverified",
             "versionVerified": version is not None,
-            "installedAt": datetime.now(timezone.utc).isoformat(),
+            "uploadedAt": datetime.now(timezone.utc).isoformat(),
             "source": source,
             "sourceFile": filename,
             "patchedFiles": patched_files,

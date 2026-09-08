@@ -10,7 +10,7 @@ mkdir -p "$work_dir/tool" "$work_dir/depot" "$work_dir/state" "$work_dir/secrets
 tar -xzf "$work_dir/vcf-download-tool-0.0.0-stub.tar.gz" \
 	-C "$work_dir/tool" --strip-components=1
 touch "$work_dir/tool/.update.lock"
-printf '%s\n' '{"releaseId":"base-stub","version":"0.0.0-stub","installedAt":"2026-09-08T00:00:00Z"}' \
+printf '%s\n' '{"releaseId":"base-stub","version":"0.0.0-stub","uploadedAt":"2026-09-08T00:00:00Z"}' \
 	> "$work_dir/tool/.vcf-services.json"
 
 run_sync() {
@@ -131,9 +131,9 @@ mkdir -p "$tool_store/releases/current-release" "$tool_store/releases/previous-r
 	"$work_dir/promotion-state"
 cp -a "$work_dir/tool/." "$tool_store/releases/current-release/"
 cp -a "$work_dir/tool/." "$tool_store/releases/previous-release/"
-printf '%s\n' '{"releaseId":"current-release","version":"0.0.1-stub","installedAt":"2026-09-08T01:00:00Z"}' \
+printf '%s\n' '{"releaseId":"current-release","version":"0.0.1-stub","uploadedAt":"2026-09-08T01:00:00Z"}' \
 	> "$tool_store/releases/current-release/.vcf-services.json"
-printf '%s\n' '{"releaseId":"previous-release","version":"0.0.0-stub","installedAt":"2026-09-08T00:00:00Z"}' \
+printf '%s\n' '{"releaseId":"previous-release","version":"0.0.0-stub","uploadedAt":"2026-09-08T00:00:00Z"}' \
 	> "$tool_store/releases/previous-release/.vcf-services.json"
 ln -s releases/current-release "$tool_store/current"
 ln -s releases/previous-release "$tool_store/previous"
@@ -158,6 +158,21 @@ set -e
 test -L "$tool_store/previous"
 test -d "$tool_store/releases/previous-release"
 
+cat > "$work_dir/vkr-stub.bash" <<'STUB'
+function /usr/local/lib/vcf-services/targets/vkr.sh() {
+	mkdir -p "$1/PROD/COMP/VKR"
+	printf 'stub VKR content\n' > "$1/PROD/COMP/VKR/content.txt"
+}
+STUB
+BASH_ENV="$work_dir/vkr-stub.bash" run_promoted_sync vkr > "$work_dir/promotion-vkr.log"
+test -L "$tool_store/previous"
+test -d "$tool_store/releases/previous-release"
+grep -qx 'stub VKR content' "$work_dir/depot/PROD/COMP/VKR/content.txt"
+jq -e '.lastRun.vkr.status == "OK"
+  and .lastRun.vkr.toolVersion == "not applicable"
+  and .lastRun.vkr.toolReleaseId == "not applicable"' \
+	"$work_dir/promotion-state/state.json" >/dev/null
+
 run_promoted_sync patches > "$work_dir/promotion-success.log"
 test ! -e "$tool_store/previous"
 test ! -e "$tool_store/releases/previous-release"
@@ -167,13 +182,5 @@ jq -e '.lastRun.patches.toolVersion == "0.0.1-stub"
   and (has("depotContentToolVersion") | not)
   and (has("depotContentToolReleaseId") | not)' \
 	"$work_dir/promotion-state/state.json" >/dev/null
-
-# A successful target must have used the installed download tool before the
-# retained release can be promoted away. VKR is handled by a separate helper.
-grep -q 'tool_backed_target=false' "$project_dir/sync/sync.sh"
-grep -q '\[ "$tool_backed_target" = true \].*\[ "$last_status" = OK \]' \
-	"$project_dir/sync/sync.sh"
-grep -q '\[ "$overall_rc" -eq 0 \].*\[ "$successful_tool_sync" = true \]' \
-	"$project_dir/sync/sync.sh"
 
 echo "sync behavior tests passed"

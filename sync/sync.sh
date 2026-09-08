@@ -274,9 +274,10 @@ for target in $SYNC_TARGETS; do
 	if [ "$tool_backed_target" = true ] && [ "$last_status" = OK ]; then
 		successful_tool_sync=true
 	fi
-	write_state '.lastRun[$target]={status:$status, finishedAt:$finished, toolVersion:$toolVersion, toolReleaseId:$toolReleaseId}' \
+	write_state '.lastRun[$target]={status:$status, finishedAt:$finished, toolVersion:(if $toolBacked then $toolVersion else "not applicable" end), toolReleaseId:(if $toolBacked then $toolReleaseId else "not applicable" end)}' \
 		--arg target "$target" --arg status "$last_status" --arg finished "$(now)" \
-		--arg toolVersion "$tool_version" --arg toolReleaseId "$tool_release_id"
+		--arg toolVersion "$tool_version" --arg toolReleaseId "$tool_release_id" \
+		--argjson toolBacked "$tool_backed_target"
 done
 
 if [ "$overall_rc" -eq 0 ] && [ "$successful_tool_sync" = true ]; then
