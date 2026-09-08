@@ -147,7 +147,11 @@ the web and console containers are individually healthy.
 
 ## Reverse proxy upload limits
 
-The licensed VCF Download Tool upload is roughly 490 MB. ingress-nginx defaults
+The licensed VCF Download Tool upload is roughly 490 MB. Installing the tool
+from the depot's `PROD/COMP/VCFDT` tree avoids the browser upload entirely once
+a sync has mirrored the archive, because the console reads the archive in
+place from its read-only depot mount. The limits below only matter for the
+upload path. ingress-nginx defaults
 to a 1 MB request body, so an unprepared ingress returns HTTP 413 and prevents
 initial appliance configuration. Allow at least 30 minutes for request and
 response transfer. The supplied ingress carries the working settings:
@@ -171,5 +175,6 @@ hostnames, and external Service integration.
 The Deployment uses `Recreate`, so an upgrade stops the old Pod before the new
 Pod attaches its RWO claims. Preserve every PVC during updates. Deleting the
 namespace deletes the namespaced claims and can erase the appliance. The
-`vcfdt-tool` claim alone is disposable and can be restored by uploading the
-licensed archive again.
+`vcfdt-tool` claim alone is disposable and can be restored from the Setup tab
+by installing a tool archive already mirrored in the depot, or by uploading
+the licensed archive again.

@@ -1,7 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# STUB_VERSION lets a stub report a chosen version so a stub depot tree can
+# carry several distinguishable tool archives (see make-stub-depot.sh).
 output="${1:-vcf-download-tool-0.0.0-stub.tar.gz}"
+stub_version="${STUB_VERSION:-0.0.0.0.20000000}"
 work_dir="$(mktemp -d /tmp/vcf-services-stub.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
 mkdir -p "$work_dir/vcf-download-tool-stub/bin" "$work_dir/vcf-download-tool-stub/conf"
@@ -58,6 +61,7 @@ printf 'stub content for %s\n' "$target" > "$depot/STUB/$target/20000000.bin"
 ln -sfn "$depot/PROD/COMP/ESX_HOST/patch-store" "$depot/umds-patch-store"
 echo "stub completed target $target"
 STUB
+sed -i "s/0\.0\.0\.0\.20000000/$stub_version/g" "$work_dir/vcf-download-tool-stub/bin/vcf-download-tool"
 chmod 0755 "$work_dir/vcf-download-tool-stub/bin/vcf-download-tool"
 cat > "$work_dir/vcf-download-tool-stub/conf/application-prodv2.properties" <<'PROPERTIES'
 lcm.depot.adapter.host=dl.broadcom.com

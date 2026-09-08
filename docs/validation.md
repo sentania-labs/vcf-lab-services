@@ -23,7 +23,10 @@ VCF_SERVICES_SFTP_IMAGE=vcf-services-sftp:local \
 ```
 
 The UI test covers first-person ownership, login, live depot authentication,
-licensed archive staging, persistent Software Depot ID retrieval, activation
+licensed archive staging by upload, listing and installing tool archives
+from a stub `PROD/COMP/VCFDT` depot tree through the same atomic release swap
+(with the depot left untouched, paths outside that tree refused, and a
+running sync refused), persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 setup completion, shared password replacement, sync dispatch, partial settings
 merges over the stored document, settings saved during a running sync being
@@ -41,6 +44,16 @@ single-writer sync behavior, sync safe-stop on a version mismatch, log
 retention, SFTP identity and host keys, Range serving, packaging, rejection of
 release tags that disagree with the Compose or Kubernetes defaults,
 idempotent release publication, and license isolation.
+
+`tests/make-stub-depot.sh <dir> [version ...]` builds a stub depot tree that
+models the reference depot layout for the tool itself, a flat
+`PROD/COMP/VCFDT/vcf-download-tool-<version>.tar.gz` per tool version, so the
+console's "Install from depot" control can be exercised locally without the
+licensed archive. Bind-mount that directory in place of the depot volume (in a
+Compose stack, or at `/depot:ro` on the ui image together with the writable
+tool store at `/opt/vcfdt`, a settings.env at `/config`, and a secrets
+directory holding at least the session secret, which the image refuses to start
+without) to see the Setup tab list and install the stub versions.
 
 `tests/test_compose_boot.sh` uses an isolated project, container names, network,
 and fresh volumes without publishing host ports. It can run beside an installed

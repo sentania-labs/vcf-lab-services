@@ -127,6 +127,15 @@ SOFTWARE_DEPOT_ID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
+# The sync tool mirrors its own distribution archives into this depot tree.
+# On the reference depot the tree is flat: PROD/COMP/VCFDT/vcf-download-tool-
+# <version>.tar.gz with no version subdirectories. Listing also accepts one
+# level of version subdirectories so a future layout change is not a dead end.
+DEPOT_TOOL_DIR = DEPOT / "PROD" / "COMP" / "VCFDT"
+DEPOT_TOOL_ARCHIVE_RE = re.compile(
+    rf"^vcf-download-tool-(?P<version>{TOOL_VERSION_VALUE})\.(?:tar\.gz|tgz|zip)$",
+    re.IGNORECASE,
+)
 ARMING_INSTRUCTIONS = (
     "Register the Software Depot ID in the Broadcom download tool registration "
     "flow, then save the activation code here."
@@ -353,7 +362,7 @@ def _extract_tar(archive_path, destination):
                     raise ToolArchiveError("the expanded archive is too large")
             archive.extractall(destination, members=members, filter="data")
     except (tarfile.TarError, OSError) as exc:
-        raise ToolArchiveError("the uploaded file is not a readable tar.gz archive") from exc
+        raise ToolArchiveError("the archive is not a readable tar.gz archive") from exc
 
 
 def _extract_zip(archive_path, destination):
@@ -382,7 +391,7 @@ def _extract_zip(archive_path, destination):
                 if mode:
                     os.chmod(destination / path, mode)
     except (zipfile.BadZipFile, OSError) as exc:
-        raise ToolArchiveError("the uploaded file is not a readable zip archive") from exc
+        raise ToolArchiveError("the archive is not a readable zip archive") from exc
 
 
 def _archive_kind(filename):
@@ -500,6 +509,8 @@ def _current_tool_info():
         "version": metadata.get("version", "unknown"),
         "versionVerified": bool(metadata.get("versionVerified", "version" in metadata)),
         "uploadedAt": metadata.get("uploadedAt"),
+        "source": metadata.get("source", "upload"),
+        "sourceFile": metadata.get("sourceFile"),
     }
 
 
@@ -514,13 +525,17 @@ def _tool_update_lock():
         lock_file.close()
 
 
-def _install_tool(upload):
-    filename = Path(str(upload.filename or "").replace("\\", "/")).name
+def _install_tool_archive(archive_path, filename, source):
+    """Stage one validated archive as the new current release.
+
+    The archive is read in place. An upload has already been saved under the
+    tool store, and a depot archive is opened read-only where it sits under
+    the read-only depot mount. Nothing is ever written into the depot.
+    """
     archive_kind = _archive_kind(filename)
     release_id = uuid.uuid4().hex
     incoming = VCFDT_STORE / ".incoming" / release_id
     extracted = incoming / "extracted"
-    archive_path = incoming / "upload"
     releases = VCFDT_STORE / "releases"
     release_path = releases / release_id
     next_link = VCFDT_STORE / f".current-{release_id}"
@@ -530,9 +545,8 @@ def _install_tool(upload):
     old_target = None
     swapped = False
     try:
-        upload.save(archive_path)
         if archive_path.stat().st_size == 0:
-            raise ToolArchiveError("the uploaded archive is empty")
+            raise ToolArchiveError("the archive is empty")
         if archive_kind == "tar":
             _extract_tar(archive_path, extracted)
         else:
@@ -544,6 +558,8 @@ def _install_tool(upload):
             "version": version if version else "unverified",
             "versionVerified": version is not None,
             "uploadedAt": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "sourceFile": filename,
         }
         try:
             machine_id = _probe_machine_id(tool_root)
@@ -564,6 +580,161 @@ def _install_tool(upload):
             shutil.rmtree(release_path, ignore_errors=True)
         next_link.unlink(missing_ok=True)
         shutil.rmtree(incoming, ignore_errors=True)
+
+
+def _install_tool(upload):
+    filename = Path(str(upload.filename or "").replace("\\", "/")).name
+    _archive_kind(filename)
+    staging = VCFDT_STORE / ".incoming" / f"upload-{uuid.uuid4().hex}"
+    staging.mkdir(parents=True)
+    try:
+        archive_path = staging / "upload"
+        upload.save(archive_path)
+        return _install_tool_archive(archive_path, filename, "upload")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _archive_version(path, root):
+    match = DEPOT_TOOL_ARCHIVE_RE.fullmatch(path.name)
+    if match is not None:
+        return match.group("version")
+    if path.parent != root and TOOL_VERSION_RE.fullmatch(path.parent.name) is not None:
+        return path.parent.name
+    return None
+
+
+def _version_sort_key(version):
+    parts = []
+    for part in re.split(r"[.+-]", (version or "").lstrip("vV")):
+        parts.append((0, int(part)) if part.isdigit() else (1, part.lower()))
+    return parts
+
+
+def _depot_tool_archives():
+    """List the tool archives the sync mirrored under PROD/COMP/VCFDT.
+
+    Only regular files that still resolve inside the VCFDT tree after symlink
+    resolution are offered, a subset of what the install path accepts: the
+    listing skips symlinked subdirectories outright while the resolver checks
+    where they land.
+    """
+    root = DEPOT_TOOL_DIR
+    if not root.is_dir():
+        return []
+    try:
+        resolved_root = root.resolve(strict=True)
+        candidates = []
+        for child in sorted(root.iterdir()):
+            if child.is_dir() and not child.is_symlink():
+                try:
+                    candidates.extend(sorted(child.iterdir()))
+                except OSError:
+                    continue
+            else:
+                candidates.append(child)
+    except OSError:
+        return []
+    installed = _current_tool_info()
+    entries = []
+    for path in candidates:
+        try:
+            _archive_kind(path.name)
+        except ToolArchiveError:
+            continue
+        try:
+            resolved = path.resolve(strict=True)
+            if not resolved.is_file() or not resolved.is_relative_to(resolved_root):
+                continue
+            stat = resolved.stat()
+        except OSError:
+            continue
+        version = _archive_version(path, root)
+        entries.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "filename": path.name,
+                "version": version or "unknown",
+                "versionKnown": version is not None,
+                "sizeBytes": stat.st_size,
+                "readable": os.access(resolved, os.R_OK),
+                "modifiedAt": datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc
+                ).isoformat(),
+                "installed": bool(
+                    installed["installed"]
+                    and (
+                        (
+                            installed.get("source") == "depot"
+                            and installed.get("sourceFile") == path.name
+                        )
+                        or (version is not None and version == installed["version"])
+                    )
+                ),
+            }
+        )
+    entries.sort(
+        key=lambda entry: (
+            entry["versionKnown"],
+            _version_sort_key(entry["version"]),
+            entry["modifiedAt"],
+        ),
+        reverse=True,
+    )
+    return entries
+
+
+def _resolve_depot_archive(value):
+    """Map an operator-chosen listing path back to a file inside the VCFDT tree."""
+    if not isinstance(value, str) or not value.strip():
+        raise ToolArchiveError("choose a VCF Download Tool archive from the depot")
+    if "\x00" in value:
+        raise ToolArchiveError("the chosen archive is not inside the depot VCFDT tree")
+    relative = PurePosixPath(value.replace("\\", "/"))
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or len(relative.parts) > 2
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ToolArchiveError("the chosen archive is not inside the depot VCFDT tree")
+    try:
+        resolved_root = DEPOT_TOOL_DIR.resolve(strict=True)
+        candidate = DEPOT_TOOL_DIR.joinpath(*relative.parts).resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        raise ToolArchiveError("the chosen archive is not in the depot") from exc
+    if candidate == resolved_root or not candidate.is_relative_to(resolved_root):
+        raise ToolArchiveError("the chosen archive is not inside the depot VCFDT tree")
+    if not candidate.is_file():
+        raise ToolArchiveError("the chosen depot entry is not an archive file")
+    _archive_kind(candidate.name)
+    if not os.access(candidate, os.R_OK):
+        raise ToolArchiveError(
+            "the console cannot read that depot archive; check its file mode"
+        )
+    return candidate
+
+
+def _replace_tool(install):
+    """Run one tool replacement under the guards shared by upload and depot."""
+    try:
+        with _tool_update_lock():
+            if _state().get("running", False):
+                return jsonify({"error": "wait for the running sync to finish"}), 409
+            metadata, old_target, machine_id = install()
+            if machine_id:
+                _remember_machine_id(machine_id)
+            else:
+                _machine_id_cache["value"] = None
+            if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
+                shutil.rmtree(old_target, ignore_errors=True)
+    except BlockingIOError:
+        return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
+    except ToolArchiveError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError:
+        return jsonify({"error": "the tool could not be staged on its mounted volume"}), 500
+    return jsonify({"installed": True, **metadata}), 201
 
 
 @app.errorhandler(413)
@@ -901,7 +1072,7 @@ def _machine_id():
     tool = VCFDT_STORE / "current" / "bin" / "vcf-download-tool"
     if not tool.is_file():
         saved = _persisted_machine_id()
-        return saved, "Upload the VCF Download Tool before verifying its saved ID."
+        return saved, "Install the VCF Download Tool before verifying its saved ID."
     try:
         value = _probe_machine_id(tool.parent.parent)
         _remember_machine_id(value)
@@ -1188,24 +1359,33 @@ def upload_vcfdt():
     upload = request.files.get("archive")
     if upload is None or not upload.filename:
         return jsonify({"error": "choose a VCF Download Tool archive"}), 400
+    return _replace_tool(lambda: _install_tool(upload))
+
+
+@app.get("/api/vcfdt/depot")
+def vcfdt_depot_archives():
+    return jsonify(
+        {
+            "directory": str(DEPOT_TOOL_DIR),
+            "mounted": DEPOT_TOOL_DIR.is_dir(),
+            "installed": _current_tool_info(),
+            "archives": _depot_tool_archives(),
+        }
+    )
+
+
+@app.post("/api/vcfdt/depot")
+def install_vcfdt_from_depot():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
     try:
-        with _tool_update_lock():
-            if _state().get("running", False):
-                return jsonify({"error": "wait for the running sync to finish"}), 409
-            metadata, old_target, machine_id = _install_tool(upload)
-            if machine_id:
-                _remember_machine_id(machine_id)
-            else:
-                _machine_id_cache["value"] = None
-            if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
-                shutil.rmtree(old_target, ignore_errors=True)
-    except BlockingIOError:
-        return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
+        archive = _resolve_depot_archive(body.get("path"))
     except ToolArchiveError as exc:
         return jsonify({"error": str(exc)}), 400
-    except OSError:
-        return jsonify({"error": "the tool could not be saved to its mounted volume"}), 500
-    return jsonify({"installed": True, **metadata}), 201
+    return _replace_tool(
+        lambda: _install_tool_archive(archive, archive.name, "depot")
+    )
 
 
 @app.get("/api/registration")
