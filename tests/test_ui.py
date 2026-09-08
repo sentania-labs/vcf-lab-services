@@ -135,9 +135,7 @@ class UiApiTests(unittest.TestCase):
         return self.client.post(path, base_url="https://localhost", **kwargs)
 
     def claim(self, password="a strong test password"):
-        return self.post(
-            "/api/claim", json={"username": "vcf", "password": password}
-        )
+        return self.post("/api/claim", json={"username": "vcf", "password": password})
 
     def write_state(self, **values):
         base = {"running": False, "armed": False, "lastRun": {}}
@@ -159,7 +157,7 @@ class UiApiTests(unittest.TestCase):
             version_output = f"Version: {version}\n{version}"
         payload = (
             "#!/bin/sh\n"
-            "if [ \"${1:-}\" = configuration ]; then\n"
+            'if [ "${1:-}" = configuration ]; then\n'
             f"  echo 'Software Depot ID: {machine_id}'\n"
             "else\n"
             "  cat <<'VCFDT_VERSION_OUTPUT'\n"
@@ -192,14 +190,22 @@ class UiApiTests(unittest.TestCase):
             content_type="multipart/form-data",
         )
 
-    def seed_depot_tool(self, version, machine_id="11111111-1111-4111-8111-111111111111", subdir=None, filename=None):
+    def seed_depot_tool(
+        self,
+        version,
+        machine_id="11111111-1111-4111-8111-111111111111",
+        subdir=None,
+        filename=None,
+    ):
         """Place a stub tool archive where the sync mirrors them: PROD/COMP/VCFDT."""
         tree = self.depot / "PROD" / "COMP" / "VCFDT"
         if subdir:
             tree = tree / subdir
         tree.mkdir(parents=True, exist_ok=True)
         target = tree / (filename or f"vcf-download-tool-{version}.tar.gz")
-        target.write_bytes(self.tar_tool(version=version, machine_id=machine_id).getvalue())
+        target.write_bytes(
+            self.tar_tool(version=version, machine_id=machine_id).getvalue()
+        )
         return target
 
     def install_from_depot(self, path):
@@ -232,12 +238,15 @@ class UiApiTests(unittest.TestCase):
             (self.secrets / "sftp-password").read_text(), "a strong test password\n"
         )
         second = self.post(
-            "/api/claim", json={"username": "vcf", "password": "another strong password"}
+            "/api/claim",
+            json={"username": "vcf", "password": "another strong password"},
         )
         self.assertEqual(second.status_code, 409)
 
     def test_first_boot_tls_ask_allows_valid_names_only(self):
-        self.assertEqual(self.get("/tls/allow?domain=vcf.example.test").status_code, 204)
+        self.assertEqual(
+            self.get("/tls/allow?domain=vcf.example.test").status_code, 204
+        )
         self.assertEqual(self.get("/tls/allow?domain=192.0.2.10").status_code, 204)
         self.assertEqual(self.get("/tls/allow?domain=bad_name").status_code, 403)
 
@@ -317,7 +326,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.write_state()
         self.assertEqual(self.upload_tool().status_code, 201)
         verified_id = "11111111-1111-4111-8111-111111111111"
-        self.assertEqual(self.get("/api/registration").get_json()["machineId"], verified_id)
+        self.assertEqual(
+            self.get("/api/registration").get_json()["machineId"], verified_id
+        )
         original = os.readlink(self.tool_store / "current")
 
         bogus = self.tar_tool(version="fake", machine_id="fake")
@@ -363,7 +374,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.write_state()
         self.assertEqual(self.upload_tool().status_code, 201)
         verified_id = "11111111-1111-4111-8111-111111111111"
-        self.assertEqual(self.get("/api/registration").get_json()["machineId"], verified_id)
+        self.assertEqual(
+            self.get("/api/registration").get_json()["machineId"], verified_id
+        )
         tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
         tool.write_text("#!/bin/sh\necho fake\n")
         tool.chmod(0o755)
@@ -392,10 +405,12 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         (self.depot / "PROD" / "COMP" / "VCFDT" / "metadata.json").write_text("{}")
         outside = self.depot / "PROD" / "COMP" / "ESX_HOST"
         outside.mkdir(parents=True)
-        (outside / "vcf-download-tool-9.9.9.tar.gz").write_bytes(self.tar_tool().getvalue())
-        (self.depot / "PROD" / "COMP" / "VCFDT" / "vcf-download-tool-9.9.9.tar.gz").symlink_to(
-            outside / "vcf-download-tool-9.9.9.tar.gz"
+        (outside / "vcf-download-tool-9.9.9.tar.gz").write_bytes(
+            self.tar_tool().getvalue()
         )
+        (
+            self.depot / "PROD" / "COMP" / "VCFDT" / "vcf-download-tool-9.9.9.tar.gz"
+        ).symlink_to(outside / "vcf-download-tool-9.9.9.tar.gz")
 
         unnamed = self.seed_depot_tool("9.1.2", filename="vcf-download-tool.zip")
 
@@ -450,7 +465,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.write_state()
         self.assertEqual(self.upload_tool().status_code, 201)
         verified_id = "11111111-1111-4111-8111-111111111111"
-        self.assertEqual(self.get("/api/registration").get_json()["machineId"], verified_id)
+        self.assertEqual(
+            self.get("/api/registration").get_json()["machineId"], verified_id
+        )
         original = os.readlink(self.tool_store / "current")
         original_release = (self.tool_store / original).resolve()
         archive = self.seed_depot_tool("9.1.0.0400.25570101", machine_id=verified_id)
@@ -459,11 +476,18 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         tree_before = sorted(path.name for path in depot_tree.iterdir())
         # The console mounts the depot read-only; prove the install never needs
         # to write there by taking write access away from the whole tree.
-        locked = [self.depot, self.depot / "PROD", self.depot / "PROD" / "COMP", depot_tree]
+        locked = [
+            self.depot,
+            self.depot / "PROD",
+            self.depot / "PROD" / "COMP",
+            depot_tree,
+        ]
         for directory in locked:
             directory.chmod(0o555)
         self.addCleanup(
-            lambda: [directory.chmod(0o755) for directory in locked if directory.exists()]
+            lambda: [
+                directory.chmod(0o755) for directory in locked if directory.exists()
+            ]
         )
 
         response = self.install_from_depot(archive.name)
@@ -482,15 +506,22 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             sorted(path.name for path in (self.tool_store / "releases").iterdir()),
             [os.path.basename(os.readlink(current))],
         )
-        self.assertFalse((self.tool_store / ".incoming").exists() and any((self.tool_store / ".incoming").iterdir()))
+        self.assertFalse(
+            (self.tool_store / ".incoming").exists()
+            and any((self.tool_store / ".incoming").iterdir())
+        )
         properties = (current / "conf" / "application-prodv2.properties").read_text()
         self.assertIn("lcm.depot.adapter.host=dl.broadcom.com", properties)
-        self.assertEqual(self.get("/api/registration").get_json()["machineId"], verified_id)
+        self.assertEqual(
+            self.get("/api/registration").get_json()["machineId"], verified_id
+        )
         self.assertEqual(
             Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), verified_id
         )
         self.assertEqual(archive.read_bytes(), before)
-        self.assertEqual(sorted(path.name for path in depot_tree.iterdir()), tree_before)
+        self.assertEqual(
+            sorted(path.name for path in depot_tree.iterdir()), tree_before
+        )
         status = self.get("/api/status").get_json()
         self.assertEqual(status["vcfdtVersion"], "9.1.0.0400.25570101")
 
@@ -538,7 +569,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             response = self.install_from_depot(path)
             self.assertEqual(response.status_code, 400, path)
             self.assertIn("error", response.get_json())
-        array_body = self.post("/api/vcfdt/depot", json=["vcf-download-tool-9.1.0.0.25371089.tar.gz"])
+        array_body = self.post(
+            "/api/vcfdt/depot", json=["vcf-download-tool-9.1.0.0.25371089.tar.gz"]
+        )
         self.assertEqual(array_body.status_code, 400)
         self.assertEqual(os.readlink(self.tool_store / "current"), original)
         self.assertEqual(self.get("/api/status").get_json()["vcfdtVersion"], "9.1.2")
@@ -558,9 +591,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.write_state()
         self.upload_tool()
         status = self.get("/api/registration").get_json()
-        self.assertEqual(
-            status["machineId"], "11111111-1111-4111-8111-111111111111"
-        )
+        self.assertEqual(status["machineId"], "11111111-1111-4111-8111-111111111111")
         saved = self.post(
             "/api/registration", json={"activationCode": "licensed-secret-value"}
         )
@@ -591,9 +622,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
     def test_partial_settings_update_merges_over_stored_document(self):
         self.claim()
         self.write_state()
-        response = self.post(
-            "/api/settings", json={"cronSchedule": "30 2 * * *"}
-        )
+        response = self.post("/api/settings", json={"cronSchedule": "30 2 * * *"})
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertEqual(body["cronSchedule"], "30 2 * * *")
@@ -622,9 +651,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(bootstrap.status_code, 200)
         self.assertFalse(bootstrap.get_json()["setupComplete"])
         self.assertTrue(bootstrap.get_json()["versionProblem"]["blocked"])
-        refused = self.post(
-            "/api/settings", json={"cronSchedule": "30 2 * * *"}
-        )
+        refused = self.post("/api/settings", json={"cronSchedule": "30 2 * * *"})
         self.assertEqual(refused.status_code, 409)
         self.assertIn("Startup is blocked", refused.get_json()["error"])
         self.assertEqual(self.get("/api/registration").status_code, 409)
@@ -689,9 +716,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         )
         self.assertEqual(blocked.status_code, 409)
         self.assertIn("depotEndpoint", blocked.get_json()["error"])
-        self.assertIn(
-            'DEPOT_ENDPOINT="dl.broadcom.com"', self.settings.read_text()
-        )
+        self.assertIn('DEPOT_ENDPOINT="dl.broadcom.com"', self.settings.read_text())
 
         self.write_state(running=False, armed=True)
         idle = self.get("/api/settings").get_json()
@@ -764,9 +789,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         run_file.write_text("run-two\n")
         with open(lock_path, "r", encoding="utf-8") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
-            self.write_state(
-                running=True, armed=True, startedAt="2026-09-06T12:00:00Z"
-            )
+            self.write_state(running=True, armed=True, startedAt="2026-09-06T12:00:00Z")
             status = self.get("/api/status").get_json()
             self.assertFalse(status["appliesToNextRun"])
             self.assertEqual(status["pendingFields"], [])
@@ -994,7 +1017,8 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
     def test_status_uses_configured_timezone_and_activation_file(self):
         self.claim()
         self.settings.write_text(
-            self.settings.read_text().replace('TZ="UTC"', 'TZ="Pacific/Kiritimati"')
+            self.settings.read_text()
+            .replace('TZ="UTC"', 'TZ="Pacific/Kiritimati"')
             .replace('CRON_SCHEDULE="0 3 * * 0"', 'CRON_SCHEDULE="0 3 * * *"')
         )
         self.write_state(armed=False)

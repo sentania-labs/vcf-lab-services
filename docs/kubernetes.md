@@ -114,7 +114,7 @@ consumer relationships:
 |---|---|---|---|
 | `depot-store` | `depot-sync` | `depot-web`, `admin-ui` | Web serves sync output, console reports storage state |
 | `backup-store` | `sftp-backup` | `admin-ui` | Console reports backup storage state |
-| `vcfdt-state` | licensed tool in `admin-ui` and `depot-sync` | both | Software Depot ID must remain consistent across upload, registration, and sync |
+| `vcfdt-state` | licensed tool in `admin-ui` and `depot-sync` | both | Software Depot ID must remain consistent across tool installation, registration, and sync |
 | `vcfdt-tool` | `admin-ui` | `depot-sync` read-only | Console installs the licensed tool, sync executes it |
 | `sync-state` | `depot-sync` | `admin-ui` read-only | Console displays current state and logs |
 | `caddy-data` | `depot-web` | `admin-ui` read-only | Console makes the generated local CA available to operators |

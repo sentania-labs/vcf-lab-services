@@ -38,9 +38,7 @@ VERSION_MARKER_FILE = Path(
     os.environ.get("VERSION_MARKER_FILE", "/config/.vcf-services-version")
 )
 VERSION_STATUS_FILE = Path(
-    os.environ.get(
-        "VERSION_STATUS_FILE", "/config/.vcf-services-version-status.json"
-    )
+    os.environ.get("VERSION_STATUS_FILE", "/config/.vcf-services-version-status.json")
 )
 SOFTWARE_DEPOT_ID_FILE = Path(
     os.environ.get("SOFTWARE_DEPOT_ID_FILE", "/config/software-depot-id")
@@ -76,9 +74,7 @@ FLASK_SECRET_FILE = Path(
     os.environ.get("FLASK_SECRET_FILE", f"{SECRETS_ROOT}/flask-secret")
 )
 CADDY_CA_FILE = Path(
-    os.environ.get(
-        "CADDY_CA_FILE", "/caddy-data/caddy/pki/authorities/local/root.crt"
-    )
+    os.environ.get("CADDY_CA_FILE", "/caddy-data/caddy/pki/authorities/local/root.crt")
 )
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
@@ -116,9 +112,7 @@ LIVE_TOOL_FIELDS = {"depotEndpoint", "tokenUrl"}
 # effect at once and must never be reported as waiting for the next run.
 LIVE_SERVICE_FIELDS = {"backupEnabled", "uidGid"}
 BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
-TOOL_VERSION_VALUE = (
-    r"v?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?"
-)
+TOOL_VERSION_VALUE = r"v?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?"
 TOOL_VERSION_RE = re.compile(rf"^{TOOL_VERSION_VALUE}$", re.IGNORECASE)
 TOOL_VERSION_LABEL_RE = re.compile(
     rf"^Version\s*:\s*(?P<version>{TOOL_VERSION_VALUE})$", re.IGNORECASE
@@ -352,8 +346,15 @@ def _extract_tar(archive_path, destination):
                 if len(members) > MAX_ARCHIVE_MEMBERS:
                     raise ToolArchiveError("the archive contains too many files")
                 _safe_archive_path(member.name)
-                if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
-                    raise ToolArchiveError("the archive contains an unsupported file type")
+                if not (
+                    member.isfile()
+                    or member.isdir()
+                    or member.issym()
+                    or member.islnk()
+                ):
+                    raise ToolArchiveError(
+                        "the archive contains an unsupported file type"
+                    )
                 if member.issym() or member.islnk():
                     _safe_archive_path(member.linkname)
                 extracted_bytes += max(member.size, 0)
@@ -379,7 +380,9 @@ def _extract_zip(archive_path, destination):
                     raise ToolArchiveError("the archive contains duplicate paths")
                 seen.add(path)
                 if (member.external_attr >> 16) & 0o170000 == 0o120000:
-                    raise ToolArchiveError("the archive contains an unsupported symbolic link")
+                    raise ToolArchiveError(
+                        "the archive contains an unsupported symbolic link"
+                    )
                 extracted_bytes += max(member.file_size, 0)
                 if extracted_bytes > MAX_EXTRACTED_BYTES:
                     raise ToolArchiveError("the expanded archive is too large")
@@ -423,7 +426,9 @@ def _patch_tool_endpoints(tool_root):
             found.add(key)
         else:
             updated.append(line)
-    updated.extend(f"{key}={value}" for key, value in replacements.items() if key not in found)
+    updated.extend(
+        f"{key}={value}" for key, value in replacements.items() if key not in found
+    )
     properties.write_text("\n".join(updated) + "\n")
 
 
@@ -496,7 +501,12 @@ def _probe_machine_id(tool_root):
 def _current_tool_info():
     current = VCFDT_STORE / "current"
     tool = current / "bin" / "vcf-download-tool"
-    if not current.is_dir() or not tool.is_file() or tool.is_symlink() or tool.stat().st_size == 0:
+    if (
+        not current.is_dir()
+        or not tool.is_file()
+        or tool.is_symlink()
+        or tool.stat().st_size == 0
+    ):
         return {"installed": False, "version": "not installed"}
     metadata = {}
     try:
@@ -709,11 +719,15 @@ def _replace_tool(install):
             if old_target and old_target.parent == (VCFDT_STORE / "releases").resolve():
                 shutil.rmtree(old_target, ignore_errors=True)
     except BlockingIOError:
-        return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
     except ToolArchiveError as exc:
         return jsonify({"error": str(exc)}), 400
     except OSError:
-        return jsonify({"error": "the tool could not be staged on its mounted volume"}), 500
+        return jsonify(
+            {"error": "the tool could not be staged on its mounted volume"}
+        ), 500
     return jsonify({"installed": True, **metadata}), 201
 
 
@@ -1179,7 +1193,11 @@ def auth_check():
     credentials = request.authorization
     if credentials and _verify_credentials(credentials.username, credentials.password):
         return "ok", 200
-    return "authentication required", 401, {"WWW-Authenticate": 'Basic realm="VCF Services"'}
+    return (
+        "authentication required",
+        401,
+        {"WWW-Authenticate": 'Basic realm="VCF Services"'},
+    )
 
 
 @app.get("/api/session")
@@ -1204,7 +1222,9 @@ def claim():
     if not isinstance(password, str) or len(password) < 12:
         return jsonify({"error": "use a password of at least 12 characters"}), 400
     if len(password) > 1024 or "\n" in password or "\r" in password:
-        return jsonify({"error": "the password must be one line and at most 1024 characters"}), 400
+        return jsonify(
+            {"error": "the password must be one line and at most 1024 characters"}
+        ), 400
 
     with _credential_update_lock():
         if _auth_doc() is not None:
@@ -1228,7 +1248,9 @@ def claim():
 @app.post("/api/login")
 def login():
     body = request.get_json(silent=True) or {}
-    if not _verify_credentials(str(body.get("username", "")), str(body.get("password", ""))):
+    if not _verify_credentials(
+        str(body.get("username", "")), str(body.get("password", ""))
+    ):
         return jsonify({"error": "the username or password is incorrect"}), 401
     session.clear()
     session["owner"] = body["username"]
@@ -1251,7 +1273,9 @@ def bootstrap_status():
             {
                 "claimed": True,
                 "authenticated": False,
-                "setupComplete": False if version_problem else settings["setupComplete"],
+                "setupComplete": False
+                if version_problem
+                else settings["setupComplete"],
                 "versionProblem": version_problem,
             }
         )
@@ -1363,9 +1387,7 @@ def install_vcfdt_from_depot():
         archive = _resolve_depot_archive(body.get("path"))
     except ToolArchiveError as exc:
         return jsonify({"error": str(exc)}), 400
-    return _replace_tool(
-        lambda: _install_tool_archive(archive, archive.name, "depot")
-    )
+    return _replace_tool(lambda: _install_tool_archive(archive, archive.name, "depot"))
 
 
 @app.get("/api/registration")
@@ -1397,7 +1419,11 @@ def save_registration():
     if not isinstance(activation_code, str) or not activation_code.strip():
         return jsonify({"error": "enter the activation code from Broadcom"}), 400
     activation_code = activation_code.strip()
-    if len(activation_code) > 4096 or "\n" in activation_code or "\r" in activation_code:
+    if (
+        len(activation_code) > 4096
+        or "\n" in activation_code
+        or "\r" in activation_code
+    ):
         return jsonify({"error": "the activation code must be one line"}), 400
     try:
         _write_secret(ACTIVATION_CODE_FILE, activation_code + "\n")
@@ -1445,7 +1471,9 @@ def update_settings():
     targets = body["syncTargets"]
     if not isinstance(targets, list) or not targets:
         return jsonify({"error": "select at least one sync target"}), 400
-    if any(target not in VALID_TARGETS for target in targets) or len(set(targets)) != len(targets):
+    if any(target not in VALID_TARGETS for target in targets) or len(
+        set(targets)
+    ) != len(targets):
         return jsonify({"error": "the sync target selection is invalid"}), 400
     cron = str(body["cronSchedule"]).strip()
     if len(cron.split()) != 5 or not re.fullmatch(r"[0-9*/ ,\-]+", cron):
@@ -1471,11 +1499,15 @@ def update_settings():
     backup_enabled = body["backupEnabled"]
     storage_confirmed = body["storageConfirmed"]
     if not isinstance(backup_enabled, bool) or not isinstance(storage_confirmed, bool):
-        return jsonify({"error": "storage and backup selections must be true or false"}), 400
+        return jsonify(
+            {"error": "storage and backup selections must be true or false"}
+        ), 400
     uid_gid = str(body["uidGid"])
     match = re.fullmatch(r"([0-9]+):([0-9]+)", uid_gid)
     if not match or any(not 1 <= int(value) <= 2147483647 for value in match.groups()):
-        return jsonify({"error": "UID:GID must contain two non-root numeric values"}), 400
+        return jsonify(
+            {"error": "UID:GID must contain two non-root numeric values"}
+        ), 400
     esx_mode = str(body["esxMode"])
     if esx_mode not in {"download", "metadata"}:
         return jsonify({"error": "ESX mode must be download or metadata"}), 400
@@ -1487,8 +1519,10 @@ def update_settings():
         return jsonify({"error": "log retention must be from 1 through 1000"}), 400
     vkr_match = str(body["vkrMatch"]).strip()
     vkr_os = str(body["vkrOs"]).strip()
-    if len(vkr_match) > 200 or len(vkr_os) > 100 or any(
-        "\n" in value or "\r" in value for value in (vkr_match, vkr_os)
+    if (
+        len(vkr_match) > 200
+        or len(vkr_os) > 100
+        or any("\n" in value or "\r" in value for value in (vkr_match, vkr_os))
     ):
         return jsonify({"error": "VKr filters must be short single-line values"}), 400
     updates = {
@@ -1546,7 +1580,9 @@ def update_settings():
                 _record_pending_settings(deferred, run_id)
             pending = _pending_settings(state, in_flight=snapshot_taken)
     except BlockingIOError:
-        return jsonify({"error": "wait for the running sync or tool update to finish"}), 409
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
     except OSError as exc:
         return jsonify({"error": f"could not save settings: {exc}"}), 500
     return jsonify(
@@ -1562,7 +1598,9 @@ def update_password():
     if not isinstance(new, str) or len(new) < 12:
         return jsonify({"error": "use a new password of at least 12 characters"}), 400
     if len(new) > 1024 or "\n" in new or "\r" in new:
-        return jsonify({"error": "the password must be one line and at most 1024 characters"}), 400
+        return jsonify(
+            {"error": "the password must be one line and at most 1024 characters"}
+        ), 400
     with _credential_update_lock():
         auth = _auth_doc()
         if not auth or not _verify_credentials(auth["username"], current):
@@ -1626,7 +1664,9 @@ def versions_remote():
             )
         except (redis_lib.RedisError, OSError) as exc:
             if doc is None:
-                return jsonify({"error": f"job bus unavailable: {exc}", "components": []}), 502
+                return jsonify(
+                    {"error": f"job bus unavailable: {exc}", "components": []}
+                ), 502
     if doc is None:
         return jsonify({"components": [], "pending": True}), 202
     if doc.get("error"):
@@ -1664,7 +1704,9 @@ def sync():
         return jsonify({"error": "select at least one valid target"}), 400
     state = _state()
     if not _activation_configured():
-        return jsonify({"error": f"not armed: activation code missing. {ARMING_INSTRUCTIONS}"}), 409
+        return jsonify(
+            {"error": f"not armed: activation code missing. {ARMING_INSTRUCTIONS}"}
+        ), 409
     if state.get("running"):
         return jsonify({"error": "a sync is already running"}), 409
     try:
