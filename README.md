@@ -144,6 +144,15 @@ saved, the stack stays healthy but sync reports `not armed`.
 The download host and token URL are generic advanced settings. Production
 defaults are already present. Changing them patches the mounted tool only when
 no sync is running, with no image build or container recreation.
+Installation and endpoint changes update the existing endpoint keys in every
+regular, non-symlink `conf/application-prod*.properties` file. Non-production
+profiles are left untouched. Each changed file is replaced atomically, and a
+failed profile update or settings-file save restores the previous profiles
+under the update lock. The console reports the filenames changed after a
+successful save or install; files already containing the requested values are
+not listed. If neither endpoint key exists in any matching production profile,
+installation or an endpoint change is rejected with an explicit error. Before
+a tool is installed, endpoint settings can still be saved for its installation.
 
 ## Optional bootstrap helper
 
