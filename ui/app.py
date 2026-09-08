@@ -1524,7 +1524,6 @@ def status():
             "vcfdtInstalled": tool_info["installed"],
             "vcfdtVersion": tool_info["version"],
             "vcfdtUploadedAt": tool_info.get("uploadedAt"),
-            "depotContentToolVersion": state.get("depotContentToolVersion"),
             **_pending_settings(state),
         }
     )

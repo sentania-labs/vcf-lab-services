@@ -164,8 +164,8 @@ test ! -e "$tool_store/releases/previous-release"
 test -d "$tool_store/releases/current-release"
 jq -e '.lastRun.patches.toolVersion == "0.0.1-stub"
   and .lastRun.patches.toolReleaseId == "current-release"
-  and .depotContentToolVersion == "0.0.1-stub"
-  and .depotContentToolReleaseId == "current-release"' \
+  and (has("depotContentToolVersion") | not)
+  and (has("depotContentToolReleaseId") | not)' \
 	"$work_dir/promotion-state/state.json" >/dev/null
 
 echo "sync behavior tests passed"

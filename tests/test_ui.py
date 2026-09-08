@@ -668,15 +668,20 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(self.install_from_depot(archive.name).status_code, 201)
         current = self.get("/api/vcfdt").get_json()
         self.write_state(
-            depotContentToolVersion="9.1.0.0400.25570101",
-            depotContentToolReleaseId=current["releaseId"],
+            lastRun={
+                "patches": {
+                    "status": "OK",
+                    "toolVersion": current["version"],
+                    "toolReleaseId": current["releaseId"],
+                }
+            },
             finishedAt="2099-09-08T12:00:00Z",
         )
 
         status = self.get("/api/status")
         self.assertEqual(status.status_code, 200)
         self.assertEqual(
-            status.get_json()["depotContentToolVersion"], "9.1.0.0400.25570101"
+            status.get_json()["lastRun"]["patches"]["toolVersion"], "9.1.0.0400.25570101"
         )
         self.assertTrue((self.tool_store / "previous").exists())
         self.assertTrue(original_target.exists())
@@ -687,6 +692,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.claim()
         self.write_state(
             depotContentToolVersion="stale-summary",
+            depotContentToolReleaseId="stale-release",
             lastRun={
                 "esx": {"status": "OK", "toolVersion": "B"},
                 "install": {"status": "FAILED:23", "toolVersion": "B"},
@@ -698,6 +704,8 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             "html": self.get("/").get_data(as_text=True),
             "status": self.get("/api/status").get_json(),
         }
+        self.assertNotIn("depotContentToolVersion", payload["status"])
+        self.assertNotIn("depotContentToolReleaseId", payload["status"])
         result = subprocess.run(
             ["node", str(APP_PATH.parents[1] / "tests" / "console-status.cjs")],
             input=json.dumps(payload), text=True, capture_output=True, check=True,

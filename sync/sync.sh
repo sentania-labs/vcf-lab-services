@@ -271,8 +271,6 @@ for target in $SYNC_TARGETS; do
 done
 
 if [ "$overall_rc" -eq 0 ]; then
-	write_state '.depotContentToolVersion=$toolVersion | .depotContentToolReleaseId=$toolReleaseId' \
-		--arg toolVersion "$tool_version" --arg toolReleaseId "$tool_release_id"
 	previous_link="$VCFDT_TOOL_STORE/previous"
 	if [ -L "$previous_link" ]; then
 		previous_target="$(readlink -f "$previous_link" 2>/dev/null || true)"
