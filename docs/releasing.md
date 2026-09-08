@@ -43,7 +43,10 @@ fields, carry that deployment policy. This is how `lab-deployment` consumes
 the product with an exact release tag and a digest where wanted.
 
 The highest semantic release owns the `latest` image tags, so re-releasing an
-older line never moves `latest` backwards. Each GitHub release bundle carries
+older line never moves `latest` backwards. The workflow publishes and proves
+all versioned images before it moves any `latest` tag. A failed build, public
+visibility check, anonymous pull, or live quickstart proof therefore leaves
+`latest` on the last proven release. Each GitHub release bundle carries
 a `.env` that pins Compose and a staged `kubernetes/deployment.yaml` whose
 five product image references pin the exact release tag. Kubernetes does not
 read the Compose `.env`. Packaging leaves the source manifests unchanged.
