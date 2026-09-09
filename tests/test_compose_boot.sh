@@ -89,6 +89,19 @@ trap diagnose EXIT
 base_config="$work_dir/base-config.json"
 test_config="$work_dir/test-config.json"
 docker compose -f "$project_dir/docker-compose.yml" config --format json > "$base_config"
+python3 - "$base_config" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    base = json.load(stream)
+
+for service, published, target in (("depot-web", "443", 443), ("sftp-backup", "2222", 22)):
+    ports = base.get("services", {}).get(service, {}).get("ports", [])
+    if not any(port.get("published") == published and port.get("target") == target
+               and port.get("protocol") == "tcp" for port in ports):
+        raise SystemExit(f"FAIL: shipped Compose must publish {service} TCP {published}:{target}")
+PY
 "${compose[@]}" config --format json > "$test_config"
 python3 - "$base_config" "$test_config" <<'PY'
 import json
