@@ -1721,6 +1721,102 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(licensed.status_code, 400)
         self.assertIn("Setup tab", licensed.get_json()["error"])
 
+    def test_depot_paths_preserve_valid_leading_and_trailing_whitespace(self):
+        self.claim()
+        (self.depot / "umds-patch-store").mkdir()
+
+        uploaded = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "",
+                "upload": (io.BytesIO(b"plain"), " file .bin "),
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(uploaded.status_code, 201, uploaded.get_json())
+        self.assertEqual((self.depot / " file .bin ").read_bytes(), b"plain")
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr(" folder / item .bin ", b"archive")
+        archive.seek(0)
+        extracted = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "",
+                "extract": "true",
+                "upload": (archive, "whitespace.zip"),
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(extracted.status_code, 201, extracted.get_json())
+        self.assertEqual(
+            (self.depot / " folder " / " item .bin ").read_bytes(), b"archive"
+        )
+        names = {
+            entry["name"]
+            for entry in self.get("/api/depot/tree").get_json()["entries"]
+        }
+        self.assertIn(" file .bin ", names)
+        self.assertIn(" folder ", names)
+        deleted = self.delete(
+            "/api/depot/entry",
+            json={"path": " file .bin ", "confirm": " file .bin "},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.get_json())
+
+    def test_depot_archive_rolls_back_when_ownership_cannot_be_recorded(self):
+        self.claim()
+        component_root = self.depot / "PROD" / "COMP"
+        component_root.mkdir(parents=True)
+
+        def operator_archive():
+            payload = io.BytesIO()
+            with zipfile.ZipFile(payload, "w") as package:
+                package.writestr("OPERATOR/lib.json", "{}")
+                package.writestr("OPERATOR/items.json", "[]")
+            payload.seek(0)
+            return payload
+
+        with mock.patch.object(
+            self.module,
+            "_record_operator_trees",
+            side_effect=OSError("state volume is full"),
+        ):
+            failed = self.post(
+                "/api/depot/upload",
+                data={
+                    "path": "PROD/COMP",
+                    "extract": "true",
+                    "upload": (operator_archive(), "operator.zip"),
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(failed.status_code, 500, failed.get_json())
+        self.assertIn("state volume is full", failed.get_json()["error"])
+        self.assertFalse((component_root / "OPERATOR").exists())
+
+        retried = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "PROD/COMP",
+                "extract": "true",
+                "upload": (operator_archive(), "operator.zip"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(retried.status_code, 201, retried.get_json())
+        manifest = json.loads(
+            (self.state_dir / "depot-ownership.json").read_text()
+        )
+        self.assertEqual(
+            manifest["trees"]["OPERATOR"],
+            {"ownership": "operator-provided", "protected": True},
+        )
+
     def test_depot_delete_requires_named_confirmation_and_reports_impact(self):
         self.claim()
         tree = self.depot / "remove-me"
@@ -1790,6 +1886,8 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         sync_lock_path = self.state_dir / "sync.lock"
         with sync_lock_path.open("a+") as sync_lock:
             fcntl.flock(sync_lock, fcntl.LOCK_EX)
+            ownership = self.get("/api/depot/ownership")
+            tree = self.get("/api/depot/tree")
             upload = self.post(
                 "/api/depot/upload",
                 data={
@@ -1804,7 +1902,10 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             )
             self.assertEqual(upload.status_code, 409)
             self.assertEqual(delete.status_code, 409)
+            self.assertEqual(ownership.status_code, 409)
+            self.assertEqual(tree.status_code, 409)
             self.assertIn("running sync", upload.get_json()["error"])
+            self.assertIn("running sync", ownership.get_json()["error"])
             self.assertTrue(victim.exists())
             fcntl.flock(sync_lock, fcntl.LOCK_UN)
 

@@ -316,8 +316,9 @@ def _ensure_ownership_manifest(directories=None):
 
 
 def _depot_ownership_inventory():
-    directories = _depot_comp_directories()
-    manifest = _ensure_ownership_manifest(directories)
+    with _depot_discovery_guard():
+        directories = _depot_comp_directories()
+        manifest = _ensure_ownership_manifest(directories)
     rows = []
     for path in directories:
         content_library = (path / "items.json").is_file() and (
@@ -343,8 +344,8 @@ def _depot_ownership_inventory():
 def _depot_relative_path(value, *, allow_root=True, must_exist=False):
     if not isinstance(value, str) or "\x00" in value or "\\" in value:
         raise DepotError("the depot path is invalid")
-    normalized = value.strip().strip("/")
-    if value.strip().startswith("/"):
+    normalized = value.strip("/")
+    if value.startswith("/"):
         raise DepotError("absolute paths are not allowed")
     if not normalized:
         if not allow_root:
@@ -390,10 +391,16 @@ def _entry_usage(path):
     return _tree_usage(path)
 
 
-def _protected_trees_for_path(relative, *, include_descendants=False):
+def _protected_trees_for_path(
+    relative, *, include_descendants=False, ownership_manifest=None
+):
     path, _ = _depot_relative_path(relative)
     requested = path.resolve().relative_to(DEPOT.resolve()).parts
-    manifest = _ensure_ownership_manifest()
+    manifest = (
+        ownership_manifest
+        if ownership_manifest is not None
+        else _ensure_ownership_manifest()
+    )
     matches = []
     for name, entry in manifest["trees"].items():
         if not entry.get("protected"):
@@ -448,6 +455,17 @@ def _forget_deleted_trees(relative):
                 del manifest["trees"][name]
         if removed:
             _write_ownership_manifest(manifest)
+
+
+@contextmanager
+def _depot_discovery_guard():
+    STATE.mkdir(parents=True, exist_ok=True)
+    sync_lock = open(STATE / "sync.lock", "a+", encoding="utf-8")
+    try:
+        fcntl.flock(sync_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        yield
+    finally:
+        sync_lock.close()
 
 
 @contextmanager
@@ -2002,6 +2020,8 @@ def vcfdt_status():
 def depot_ownership():
     try:
         trees = _depot_ownership_inventory()
+    except BlockingIOError:
+        return jsonify({"error": "wait for the running sync to finish"}), 409
     except OSError as exc:
         return jsonify({"error": f"depot ownership could not be read: {exc}"}), 500
     return jsonify(
@@ -2016,6 +2036,8 @@ def depot_ownership():
 @app.get("/api/depot/tree")
 def depot_tree():
     try:
+        with _depot_discovery_guard():
+            ownership_manifest = _ensure_ownership_manifest()
         directory, relative = _depot_relative_path(
             request.args.get("path", ""), must_exist=True
         )
@@ -2032,7 +2054,9 @@ def depot_tree():
                 _depot_relative_path(child_relative, must_exist=True)
                 accessible_directory = path.is_dir()
                 protected = _protected_trees_for_path(
-                    child_relative, include_descendants=True
+                    child_relative,
+                    include_descendants=True,
+                    ownership_manifest=ownership_manifest,
                 )
             except DepotError:
                 accessible_directory = False
@@ -2055,6 +2079,8 @@ def depot_tree():
                     "protectedTrees": protected,
                 }
             )
+    except BlockingIOError:
+        return jsonify({"error": "wait for the running sync to finish"}), 409
     except (DepotError, OSError) as exc:
         return jsonify({"error": str(exc)}), 400
     parent = "" if not relative or "/" not in relative else relative.rsplit("/", 1)[0]
@@ -2095,72 +2121,75 @@ def upload_depot_entry():
                 tempfile.mkdtemp(prefix=".vcf-services-upload-", dir=DEPOT)
             )
             uploaded_paths = []
-            if extract:
-                archive_path = staging / "archive"
-                content = staging / "content"
-                content.mkdir()
-                upload.save(archive_path)
-                try:
-                    kind = _archive_kind(filename)
-                except ToolArchiveError as exc:
-                    raise DepotError(
-                        "choose a .tar.gz, .tgz, or .zip archive to extract"
-                    ) from exc
-                if kind == "tar":
-                    _extract_tar(archive_path, content)
+            published = []
+            try:
+                if extract:
+                    archive_path = staging / "archive"
+                    content = staging / "content"
+                    content.mkdir()
+                    upload.save(archive_path)
+                    try:
+                        kind = _archive_kind(filename)
+                    except ToolArchiveError as exc:
+                        raise DepotError(
+                            "choose a .tar.gz, .tgz, or .zip archive to extract"
+                        ) from exc
+                    if kind == "tar":
+                        _extract_tar(archive_path, content)
+                    else:
+                        _extract_zip(archive_path, content)
+                    _validate_depot_staging(content)
+                    children = list(content.iterdir())
+                    if not children:
+                        raise DepotError("the archive contains no files")
+                    for child in children:
+                        target_relative = "/".join(
+                            filter(None, (destination_relative, child.name))
+                        )
+                        protected = _protected_trees_for_path(target_relative)
+                        if protected:
+                            raise DepotError(
+                                f"unprotect PROD/COMP/{protected[0]} before uploading there"
+                            )
+                        if (destination / child.name).exists() or (
+                            destination / child.name
+                        ).is_symlink():
+                            raise DepotError(
+                                f"{target_relative} already exists; delete it explicitly first"
+                            )
+                        uploaded_paths.append(target_relative)
+                    for child in children:
+                        target = destination / child.name
+                        os.replace(child, target)
+                        published.append((child, target))
                 else:
-                    _extract_zip(archive_path, content)
-                _validate_depot_staging(content)
-                children = list(content.iterdir())
-                if not children:
-                    raise DepotError("the archive contains no files")
-                for child in children:
                     target_relative = "/".join(
-                        filter(None, (destination_relative, child.name))
+                        filter(None, (destination_relative, filename))
                     )
                     protected = _protected_trees_for_path(target_relative)
                     if protected:
                         raise DepotError(
                             f"unprotect PROD/COMP/{protected[0]} before uploading there"
                         )
-                    if (destination / child.name).exists() or (
-                        destination / child.name
-                    ).is_symlink():
+                    target = destination / filename
+                    if target.exists() or target.is_symlink():
                         raise DepotError(
                             f"{target_relative} already exists; delete it explicitly first"
                         )
+                    staged_file = staging / filename
+                    upload.save(staged_file)
+                    os.replace(staged_file, target)
                     uploaded_paths.append(target_relative)
-                moved = []
-                try:
-                    for child in children:
-                        target = destination / child.name
-                        os.replace(child, target)
-                        moved.append((child, target))
-                except OSError:
-                    for child, target in reversed(moved):
-                        if target.exists() and not child.exists():
-                            os.replace(target, child)
-                    raise
-            else:
-                target_relative = "/".join(
-                    filter(None, (destination_relative, filename))
+                    published.append((staged_file, target))
+                public = _paths_publicly_exposed(
+                    uploaded_paths, include_ancestors=True
                 )
-                protected = _protected_trees_for_path(target_relative)
-                if protected:
-                    raise DepotError(
-                        f"unprotect PROD/COMP/{protected[0]} before uploading there"
-                    )
-                target = destination / filename
-                if target.exists() or target.is_symlink():
-                    raise DepotError(
-                        f"{target_relative} already exists; delete it explicitly first"
-                    )
-                staged_file = staging / filename
-                upload.save(staged_file)
-                os.replace(staged_file, target)
-                uploaded_paths.append(target_relative)
-            public = _paths_publicly_exposed(uploaded_paths, include_ancestors=True)
-            _record_operator_trees(_top_level_comp_trees() - before)
+                _record_operator_trees(_top_level_comp_trees() - before)
+            except (DepotError, OSError):
+                for staged_path, published_path in reversed(published):
+                    if published_path.exists() and not staged_path.exists():
+                        os.replace(published_path, staged_path)
+                raise
     except BlockingIOError:
         return jsonify(
             {"error": "wait for the running sync or tool update to finish"}
@@ -2253,7 +2282,7 @@ def update_depot_ownership():
                 return jsonify(
                     {"error": "choose one real top-level PROD/COMP tree"}
                 ), 400
-            _depot_ownership_inventory()
+            _ensure_ownership_manifest()
             with _ownership_lock():
                 manifest = _read_ownership_manifest()
                 entry = manifest["trees"].get(name)
