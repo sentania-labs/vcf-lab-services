@@ -3,7 +3,9 @@
 
 import json
 import os
+import re
 import secrets
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +16,11 @@ SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/etc/vcf-services/secrets"))
 SETTINGS = CONFIG_DIR / "settings.env"
 VERSION_MARKER = CONFIG_DIR / ".vcf-services-version"
 VERSION_STATUS = CONFIG_DIR / ".vcf-services-version-status.json"
+SCHEMA_MARKER = CONFIG_DIR / ".vcf-services-schema"
+MIGRATION_STATUS = CONFIG_DIR / ".vcf-services-migration.json"
+MIGRATION_BACKUPS = CONFIG_DIR / "migration-backups"
 CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
+CURRENT_SCHEMA = 1
 
 DEFAULT_SETTINGS = {
     "AUTH_USERNAME": "vcf",
@@ -35,6 +41,52 @@ DEFAULT_SETTINGS = {
     "VKR_MATCH": "",
     "VKR_OS": "",
 }
+
+
+def _release_key(value):
+    if value == "dev":
+        return (10**9,)
+    match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", value or "")
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _settings_keys():
+    keys = set()
+    try:
+        lines = SETTINGS.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return keys
+    for line in lines:
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", line)
+        if match:
+            keys.add(match.group(1))
+    return keys
+
+
+def _fill_settings_defaults():
+    existing = _settings_keys()
+    additions = [
+        f'{key}="{value}"' for key, value in DEFAULT_SETTINGS.items() if key not in existing
+    ]
+    if not SETTINGS.exists():
+        write_atomic(SETTINGS, "\n".join(additions) + "\n", 0o640)
+    elif additions:
+        original = SETTINGS.read_text(encoding="utf-8")
+        separator = "" if not original or original.endswith("\n") else "\n"
+        write_atomic(
+            SETTINGS,
+            original + separator + "\n".join(additions) + "\n",
+            0o640,
+        )
+
+
+def _migrate_schema_0_to_1():
+    _fill_settings_defaults()
+
+
+MIGRATIONS = (_migrate_schema_0_to_1,)
 
 
 def write_once(path, content, mode=0o600):
@@ -65,30 +117,7 @@ def write_atomic(path, content, mode=0o600):
         raise
 
 
-def verify_config_version(config_was_empty):
-    found = None
-    try:
-        found = VERSION_MARKER.read_text(encoding="utf-8").strip() or None
-    except OSError:
-        pass
-
-    if found == CURRENT_VERSION:
-        VERSION_STATUS.unlink(missing_ok=True)
-        return True
-    if found is None and config_was_empty:
-        write_once(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
-        VERSION_STATUS.unlink(missing_ok=True)
-        return True
-
-    found_label = found or "unversioned state"
-    message = (
-        f"Startup is blocked because the config volume contains {found_label}, "
-        f"but this appliance is {CURRENT_VERSION}. Existing settings, secrets, and "
-        "service identity were not trusted or changed; only this diagnostic block "
-        "record was added so the console can explain the problem. Stop the stack, "
-        f"preserve any data you need, then start {CURRENT_VERSION} with a new config "
-        f"volume or restore a config volume marked for {CURRENT_VERSION}."
-    )
+def _block_config(found, message):
     status = {
         "blocked": True,
         "expectedVersion": CURRENT_VERSION,
@@ -101,21 +130,112 @@ def verify_config_version(config_was_empty):
     return False
 
 
+def _backup_config(from_schema):
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup = MIGRATION_BACKUPS / f"{stamp}-schema-{from_schema}-to-{CURRENT_SCHEMA}"
+    backup.mkdir(parents=True)
+    for path in CONFIG_DIR.iterdir():
+        if path == MIGRATION_BACKUPS or not path.is_file():
+            continue
+        if path.stat().st_size > 1024 * 1024:
+            continue
+        shutil.copy2(path, backup / path.name)
+    return backup
+
+
+def _read_schema():
+    if not SCHEMA_MARKER.exists():
+        return 0
+    try:
+        return int(SCHEMA_MARKER.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def prepare_config(config_was_empty):
+    found = None
+    try:
+        found = VERSION_MARKER.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        pass
+
+    if found is None and config_was_empty:
+        _fill_settings_defaults()
+        write_once(SCHEMA_MARKER, f"{CURRENT_SCHEMA}\n", 0o640)
+        write_once(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
+        VERSION_STATUS.unlink(missing_ok=True)
+        return True
+
+    current_key = _release_key(CURRENT_VERSION)
+    found_key = _release_key(found) if found else None
+    if found and found != CURRENT_VERSION and (
+        current_key is None or found_key is None or found_key > current_key
+    ):
+        message = (
+            f"Startup is blocked because the config volume contains {found}, "
+            f"which is newer than or incompatible with this appliance {CURRENT_VERSION}. "
+            "Existing settings, secrets, and service identity were not trusted or "
+            "changed; only this diagnostic block record was added so the console can "
+            "explain the problem. Start the release that wrote this config volume or "
+            "restore a backup created before that upgrade."
+        )
+        return _block_config(found, message)
+
+    schema = _read_schema()
+    if schema is None or schema < 0 or schema > CURRENT_SCHEMA:
+        schema_label = schema if schema is not None else "unreadable"
+        message = (
+            f"Startup is blocked because the config volume schema is {schema_label}, "
+            f"but this appliance supports schema {CURRENT_SCHEMA}. Existing settings, "
+            "secrets, and service identity were not changed. Start a compatible newer "
+            "release or restore a pre-upgrade backup."
+        )
+        return _block_config(found, message)
+
+    if schema < CURRENT_SCHEMA or found != CURRENT_VERSION:
+        backup = _backup_config(schema)
+        migrated_at = datetime.now(timezone.utc).isoformat()
+        original_schema = schema
+        try:
+            while schema < CURRENT_SCHEMA:
+                MIGRATIONS[schema]()
+                schema += 1
+                write_atomic(SCHEMA_MARKER, f"{schema}\n", 0o640)
+            _fill_settings_defaults()
+            result = {
+                "status": "completed",
+                "fromSchema": original_schema,
+                "toSchema": schema,
+                "fromVersion": found,
+                "toVersion": CURRENT_VERSION,
+                "backupPath": str(backup),
+                "migratedAt": migrated_at,
+            }
+            write_atomic(MIGRATION_STATUS, json.dumps(result) + "\n", 0o640)
+            write_atomic(VERSION_MARKER, CURRENT_VERSION + "\n", 0o640)
+        except Exception as exc:
+            message = (
+                f"Config migration failed after a backup was written to {backup}: {exc}. "
+                "The stack is blocked so the backup can be inspected or restored."
+            )
+            return _block_config(found, message)
+
+    VERSION_STATUS.unlink(missing_ok=True)
+    return True
+
+
 def main():
     config_existed = CONFIG_DIR.exists()
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config_was_empty = not config_existed or not any(CONFIG_DIR.iterdir())
-    if not verify_config_version(config_was_empty):
+    if not prepare_config(config_was_empty):
         return
 
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CONFIG_DIR, 0o750)
     os.chmod(SECRETS_DIR, 0o700)
 
-    settings_text = "".join(
-        f'{key}="{value}"\n' for key, value in DEFAULT_SETTINGS.items()
-    )
-    write_once(SETTINGS, settings_text, 0o640)
+    _fill_settings_defaults()
 
     for consumer in ("redis", "sync", "sftp", "ui"):
         subdir = SECRETS_DIR / consumer

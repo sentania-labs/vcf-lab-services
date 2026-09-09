@@ -27,6 +27,7 @@ files=(
 	docker-compose.yml
 	compose.sh
 	install.sh
+	uninstall.sh
 	caddy/Caddyfile
 	docs/kubernetes.md
 	docs/redis-contract.md
@@ -70,5 +71,6 @@ tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
 	sha256sum "$release_name.tar.gz" > "$release_name.tar.gz.sha256"
 )
 cp "$project_dir/install.sh" "$output_dir/install.sh"
+cp "$project_dir/uninstall.sh" "$output_dir/uninstall.sh"
 
 echo "$archive"

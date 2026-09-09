@@ -55,17 +55,29 @@ every state write:
   "startedAt": "2026-08-13T00:00:00Z",
   "finishedAt": "2026-08-13T00:10:00Z",
   "targets": "esx patches",
-  "lastRun": {"esx": {"status": "OK", "finishedAt": "2026-08-13T00:05:00Z"}}
+  "lastRun": {"esx": {"status": "OK", "finishedAt": "2026-08-13T00:05:00Z", "toolVersion": "9.1.2", "toolReleaseId": "example-release-id"}}
 }
 ```
 
 Consumers must fall back to reading `state.json` from the sync state volume
 when the key is absent, because the bus is not persistent.
 
+`lastRun` is the source of tool provenance, recorded separately for each target
+after its attempt, including failures. For tool-backed targets (`esx`,
+`install`, `upgrade`, and `patches`), `toolVersion` and `toolReleaseId` come
+from the active extracted release's metadata, with `unknown` when unavailable.
+For non-tool targets such as `vkr`, both fields are `not applicable` because
+the target uses a separate helper.
+Targets not attempted retain their earlier records. Older records may omit
+these fields. A failed attempt identifies the tool used, not a guarantee that
+all content for that target was replaced. Consumers derive summaries from
+these rows rather than a single depot-wide version.
+
 When the config volume fails its version check at startup, the scheduler
 refuses to dispatch and publishes the same shape with `running` and `armed`
 false plus `startupBlocked: true` and a `startupError` message, republished
-every poll interval until the config volume is replaced or restored.
+every poll interval while the startup block remains. See the
+[config recovery guidance](../README.md#storage-ownership).
 
 ## Versions shape (`vcf-services:sync:versions`)
 

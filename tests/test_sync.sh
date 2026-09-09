@@ -10,6 +10,8 @@ mkdir -p "$work_dir/tool" "$work_dir/depot" "$work_dir/state" "$work_dir/secrets
 tar -xzf "$work_dir/vcf-download-tool-0.0.0-stub.tar.gz" \
 	-C "$work_dir/tool" --strip-components=1
 touch "$work_dir/tool/.update.lock"
+printf '%s\n' '{"releaseId":"base-stub","version":"0.0.0-stub","uploadedAt":"2026-09-08T00:00:00Z"}' \
+	> "$work_dir/tool/.vcf-services.json"
 
 run_sync() {
 	SETTINGS_FILE="$work_dir/missing-settings.env" \
@@ -40,7 +42,9 @@ sync_rc=$?
 set -e
 [ "$sync_rc" -eq 23 ]
 jq -e '.running == false and .armed == true and .lastRun.esx.status == "OK"
-  and .lastRun.install.status == "FAILED:23" and .lastRun.patches.status == "OK"' \
+  and .lastRun.install.status == "FAILED:23" and .lastRun.patches.status == "OK"
+  and .lastRun.esx.toolVersion == "0.0.0-stub"
+  and .lastRun.install.toolVersion == "0.0.0-stub"' \
 	"$work_dir/state/state.json" >/dev/null
 test -f "$work_dir/depot/STUB/patches/20000000.bin"
 
@@ -119,5 +123,64 @@ set -e
 grep -q 'Re-upload the VCF Download Tool in the admin console' "$work_dir/missing-lock.log"
 jq -e '.running == false' "$work_dir/state/state.json" >/dev/null
 mv "$work_dir/tool/update.lock.saved" "$work_dir/tool/.update.lock"
+
+# A replacement keeps one prior release through failed runs, then a fully
+# successful run records its producing version and removes the retained copy.
+tool_store="$work_dir/tool-store"
+mkdir -p "$tool_store/releases/current-release" "$tool_store/releases/previous-release" \
+	"$work_dir/promotion-state"
+cp -a "$work_dir/tool/." "$tool_store/releases/current-release/"
+cp -a "$work_dir/tool/." "$tool_store/releases/previous-release/"
+printf '%s\n' '{"releaseId":"current-release","version":"0.0.1-stub","uploadedAt":"2026-09-08T01:00:00Z"}' \
+	> "$tool_store/releases/current-release/.vcf-services.json"
+printf '%s\n' '{"releaseId":"previous-release","version":"0.0.0-stub","uploadedAt":"2026-09-08T00:00:00Z"}' \
+	> "$tool_store/releases/previous-release/.vcf-services.json"
+ln -s releases/current-release "$tool_store/current"
+ln -s releases/previous-release "$tool_store/previous"
+touch "$tool_store/.update.lock"
+
+run_promoted_sync() {
+	SETTINGS_FILE="$work_dir/missing-settings.env" \
+	DEPOT_DIR="$work_dir/depot" \
+	STATE_DIR="$work_dir/promotion-state" \
+	AUTH_FILE="$work_dir/secrets/activation-code.txt" \
+	TOOL_ROOT="$tool_store/current" \
+	VCFDT_TOOL_STORE="$tool_store" \
+	LOG_RETENTION=3 \
+	"$project_dir/sync/sync.sh" "$@"
+}
+
+set +e
+STUB_FAIL_TARGET=patches run_promoted_sync patches > "$work_dir/promotion-failed.log"
+promotion_rc=$?
+set -e
+[ "$promotion_rc" -eq 23 ]
+test -L "$tool_store/previous"
+test -d "$tool_store/releases/previous-release"
+
+cat > "$work_dir/vkr-stub.bash" <<'STUB'
+function /usr/local/lib/vcf-services/targets/vkr.sh() {
+	mkdir -p "$1/PROD/COMP/VKR"
+	printf 'stub VKR content\n' > "$1/PROD/COMP/VKR/content.txt"
+}
+STUB
+BASH_ENV="$work_dir/vkr-stub.bash" run_promoted_sync vkr > "$work_dir/promotion-vkr.log"
+test -L "$tool_store/previous"
+test -d "$tool_store/releases/previous-release"
+grep -qx 'stub VKR content' "$work_dir/depot/PROD/COMP/VKR/content.txt"
+jq -e '.lastRun.vkr.status == "OK"
+  and .lastRun.vkr.toolVersion == "not applicable"
+  and .lastRun.vkr.toolReleaseId == "not applicable"' \
+	"$work_dir/promotion-state/state.json" >/dev/null
+
+run_promoted_sync patches > "$work_dir/promotion-success.log"
+test ! -e "$tool_store/previous"
+test ! -e "$tool_store/releases/previous-release"
+test -d "$tool_store/releases/current-release"
+jq -e '.lastRun.patches.toolVersion == "0.0.1-stub"
+  and .lastRun.patches.toolReleaseId == "current-release"
+  and (has("depotContentToolVersion") | not)
+  and (has("depotContentToolReleaseId") | not)' \
+	"$work_dir/promotion-state/state.json" >/dev/null
 
 echo "sync behavior tests passed"

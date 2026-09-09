@@ -3,6 +3,8 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -110,6 +112,7 @@ class UiApiTests(unittest.TestCase):
             "SETTINGS_PENDING_FILE": str(root / ".settings-pending.json"),
             "VERSION_MARKER_FILE": str(root / ".vcf-services-version"),
             "VERSION_STATUS_FILE": str(root / ".vcf-services-version-status.json"),
+            "MIGRATION_STATUS_FILE": str(root / ".vcf-services-migration.json"),
             "VCF_SERVICES_VERSION": "v0.2.1",
         }
         (root / ".vcf-services-version").write_text("v0.2.1\n")
@@ -289,6 +292,15 @@ class UiApiTests(unittest.TestCase):
         current = self.tool_store / "current"
         self.assertTrue(current.is_symlink())
         self.assertEqual(response.get_json()["version"], "9.1.2")
+        self.assertIsNotNone(
+            datetime.fromisoformat(response.get_json()["uploadedAt"])
+        )
+        self.assertNotIn("installedAt", response.get_json())
+        metadata = json.loads((current / ".vcf-services.json").read_text())
+        self.assertEqual(metadata["uploadedAt"], response.get_json()["uploadedAt"])
+        self.assertNotIn("installedAt", metadata)
+        status = self.get("/api/status").get_json()
+        self.assertEqual(status["vcfdtUploadedAt"], metadata["uploadedAt"])
         self.assertEqual(
             response.get_json()["patchedFiles"],
             [
@@ -571,10 +583,18 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertTrue(current.is_symlink())
         self.assertNotEqual(os.readlink(current), original)
         self.assertTrue((current / "bin" / "vcf-download-tool").is_file())
-        self.assertFalse(original_release.exists())
+        self.assertTrue(original_release.exists())
+        self.assertEqual(
+            (self.tool_store / "previous").resolve(), original_release
+        )
         self.assertEqual(
             sorted(path.name for path in (self.tool_store / "releases").iterdir()),
-            [os.path.basename(os.readlink(current))],
+            sorted(
+                [
+                    os.path.basename(os.readlink(current)),
+                    os.path.basename(os.readlink(self.tool_store / "previous")),
+                ]
+            ),
         )
         self.assertFalse(
             (self.tool_store / ".incoming").exists()
@@ -603,9 +623,110 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.get_json()["version"], "unverified")
         self.assertFalse(response.get_json()["versionVerified"])
+        releases = list((self.tool_store / "releases").iterdir())
+        self.assertEqual(len(releases), 2)
+        self.assertEqual(
+            self.get("/api/vcfdt").get_json()["previous"]["version"],
+            "9.1.0.0400.25570101",
+        )
         registration = self.get("/api/registration")
         self.assertEqual(registration.status_code, 409)
         self.assertEqual(registration.get_json()["machineId"], verified_id)
+
+    def test_tool_rollback_swaps_current_and_previous_under_the_update_lock(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        original_target = (self.tool_store / "current").resolve()
+        archive = self.seed_depot_tool("9.1.0.0400.25570101")
+        self.assertEqual(self.install_from_depot(archive.name).status_code, 201)
+        replacement_target = (self.tool_store / "current").resolve()
+
+        response = self.post("/api/vcfdt/rollback")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["version"], "9.1.2")
+        self.assertEqual(body["previous"]["version"], "9.1.0.0400.25570101")
+        self.assertEqual((self.tool_store / "current").resolve(), original_target)
+        self.assertEqual((self.tool_store / "previous").resolve(), replacement_target)
+
+        current = self.get("/api/vcfdt").get_json()
+        self.write_state(
+            depotContentToolVersion=current["version"],
+            depotContentToolReleaseId=current["releaseId"],
+            finishedAt="2099-01-01T00:00:00Z",
+            lastRun={"esx": {"status": "FAILED:23", "toolVersion": current["version"]}},
+        )
+        self.assertEqual(self.get("/api/status").status_code, 200)
+        self.assertTrue((self.tool_store / "previous").exists())
+
+        self.write_state(running=True)
+        refused = self.post("/api/vcfdt/rollback")
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("running sync", refused.get_json()["error"])
+
+    def test_status_poll_preserves_previous_release_after_successful_sync(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        original_target = (self.tool_store / "current").resolve()
+        archive = self.seed_depot_tool("9.1.0.0400.25570101")
+        self.assertEqual(self.install_from_depot(archive.name).status_code, 201)
+        current = self.get("/api/vcfdt").get_json()
+        self.write_state(
+            lastRun={
+                "patches": {
+                    "status": "OK",
+                    "toolVersion": current["version"],
+                    "toolReleaseId": current["releaseId"],
+                }
+            },
+            finishedAt="2099-09-08T12:00:00Z",
+        )
+
+        status = self.get("/api/status")
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(
+            status.get_json()["lastRun"]["patches"]["toolVersion"], "9.1.0.0400.25570101"
+        )
+        self.assertTrue((self.tool_store / "previous").exists())
+        self.assertTrue(original_target.exists())
+        self.assertIsNotNone(self.get("/api/vcfdt").get_json()["previous"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_renders_per_target_tool_versions_for_partial_runs(self):
+        self.claim()
+        self.write_state(
+            depotContentToolVersion="stale-summary",
+            depotContentToolReleaseId="stale-release",
+            lastRun={
+                "esx": {"status": "OK", "toolVersion": "B"},
+                "install": {"status": "FAILED:23", "toolVersion": "B"},
+                "patches": {"status": "OK", "toolVersion": "A"},
+                "upgrade": {"status": "OK"},
+            },
+        )
+        payload = {
+            "html": self.get("/").get_data(as_text=True),
+            "status": self.get("/api/status").get_json(),
+        }
+        self.assertNotIn("depotContentToolVersion", payload["status"])
+        self.assertNotIn("depotContentToolReleaseId", payload["status"])
+        result = subprocess.run(
+            ["node", str(APP_PATH.parents[1] / "tests" / "console-status.cjs")],
+            input=json.dumps(payload), text=True, capture_output=True, check=True,
+        )
+        rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["error"], "")
+        self.assertIn("esx: tool B (OK)", rendered["summary"])
+        self.assertIn("install: tool B (FAILED:23)", rendered["summary"])
+        self.assertIn("patches: tool A (OK)", rendered["summary"])
+        self.assertIn("upgrade: tool unknown (OK)", rendered["summary"])
+        self.assertNotIn("stale-summary", rendered["summary"])
+        self.assertIn("tool A", rendered["rows"])
+        self.assertIn("tool B", rendered["rows"])
+        self.assertIn("FAILED:23", rendered["rows"])
+        self.assertIn("tool unknown", rendered["rows"])
 
     def test_install_from_depot_refuses_paths_outside_the_vcfdt_tree(self):
         self.claim()
@@ -834,6 +955,22 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         )
         self.assertEqual(depot_auth.status_code, 503)
 
+    def test_bootstrap_reports_the_last_config_migration(self):
+        self.claim()
+        migration = {
+            "status": "completed",
+            "fromSchema": 0,
+            "toSchema": 1,
+            "fromVersion": "v0.1.0",
+            "toVersion": "v0.2.1",
+            "backupPath": "/config/migration-backups/test",
+            "migratedAt": "2026-09-08T12:00:00+00:00",
+        }
+        Path(self.module.MIGRATION_STATUS_FILE).write_text(json.dumps(migration))
+        response = self.get("/api/bootstrap")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["migration"], migration)
+
     def test_settings_reject_bad_schedule_and_bad_uid(self):
         self.claim()
         self.write_state()
@@ -1023,6 +1160,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "vcfdt-depot-version",
                 "vcfdt-depot-install",
                 "vcfdt-depot-refresh",
+                "vcfdt-rollback",
                 "vcfdt-archive",
                 "vcfdt-upload",
                 "activation-code",
@@ -1075,6 +1213,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn('id="cron-wrap" hidden', body)
         self.assertIn('id="log"', body)
         self.assertIn('id="versions"', body)
+        self.assertIn('id="vcfdt-previous"', body)
+        self.assertIn('id="vcfdt-produced"', body)
+        self.assertIn('id="migration-result"', body)
 
     def test_concurrent_settings_writes_do_not_drop_updates(self):
         keys = [f"CONCURRENT_TEST_KEY_{index}" for index in range(8)]
@@ -1332,7 +1473,9 @@ class BootstrapVersionTests(unittest.TestCase):
     def test_clean_boot_writes_version_marker(self):
         module = self.run_bootstrap()
         self.assertEqual(module.VERSION_MARKER.read_text().strip(), "v0.2.1")
+        self.assertEqual(module.SCHEMA_MARKER.read_text().strip(), "1")
         self.assertFalse(module.VERSION_STATUS.exists())
+        self.assertFalse(module.MIGRATION_STATUS.exists())
 
     def test_matching_boot_repairs_fsgroup_bits_on_private_files(self):
         self.config.mkdir()
@@ -1363,30 +1506,132 @@ class BootstrapVersionTests(unittest.TestCase):
             self.assertEqual(path.read_text(), "preserved\n")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
-    def test_existing_unmarked_config_is_quarantined_without_rewriting_setup(self):
+    def test_existing_unmarked_config_is_backed_up_and_migrated(self):
         self.config.mkdir()
         settings = self.config / "settings.env"
         settings.write_text('SETUP_COMPLETE="true"\n')
         self.secrets.mkdir()
         (self.secrets / "restored-secret").write_text("preserve me\n")
-        config_before = self.persistent_snapshot(self.config)
-        secrets_before = self.persistent_snapshot(self.secrets)
         module = self.run_bootstrap()
-        status = json.loads(module.VERSION_STATUS.read_text())
-        self.assertTrue(status["blocked"])
-        self.assertIsNone(status["foundVersion"])
-        self.assertIn("unversioned state", status["message"])
+        result = json.loads(module.MIGRATION_STATUS.read_text())
+        self.assertEqual(result["fromSchema"], 0)
+        self.assertEqual(result["toSchema"], 1)
+        self.assertIsNone(result["fromVersion"])
+        backup = Path(result["backupPath"])
+        self.assertTrue(backup.is_relative_to(self.config))
+        self.assertEqual((backup / "settings.env").read_text(), 'SETUP_COMPLETE="true"\n')
+        migrated = settings.read_text()
+        self.assertIn('SETUP_COMPLETE="true"', migrated)
+        self.assertIn('DEPOT_ENDPOINT="dl.broadcom.com"', migrated)
         self.assertEqual(
-            self.persistent_snapshot(self.config, {module.VERSION_STATUS.name}),
-            config_before,
+            (self.secrets / "restored-secret").read_text(), "preserve me\n"
         )
-        self.assertEqual(self.persistent_snapshot(self.secrets), secrets_before)
-        self.assertFalse(module.VERSION_MARKER.exists())
+        self.assertEqual(module.VERSION_MARKER.read_text().strip(), "v0.2.1")
+        self.assertEqual(module.SCHEMA_MARKER.read_text().strip(), "1")
+        self.assertFalse(module.VERSION_STATUS.exists())
 
-    def test_mismatched_marker_is_quarantined(self):
+    def test_older_marker_is_migrated_forward(self):
         self.config.mkdir()
         (self.config / ".vcf-services-version").write_text("v0.1.0\n")
-        (self.config / "restored-config").write_text("preserve me\n")
+        (self.config / "settings.env").write_text(
+            'DEPOT_ENDPOINT="operator.example.test"\n'
+        )
+        module = self.run_bootstrap()
+        result = json.loads(module.MIGRATION_STATUS.read_text())
+        self.assertEqual(result["fromVersion"], "v0.1.0")
+        self.assertEqual(result["toVersion"], "v0.2.1")
+        self.assertIn(
+            'DEPOT_ENDPOINT="operator.example.test"',
+            (self.config / "settings.env").read_text(),
+        )
+        self.assertEqual(module.VERSION_MARKER.read_text().strip(), "v0.2.1")
+
+    def test_same_schema_upgrade_backs_up_before_filling_defaults(self):
+        self.config.mkdir()
+        original = 'DEPOT_ENDPOINT="operator.example.test"\n'
+        (self.config / "settings.env").write_text(original)
+        (self.config / ".vcf-services-version").write_text("v0.2.0\n")
+        (self.config / ".vcf-services-schema").write_text("1\n")
+        (self.config / "software-depot-id").write_text("preserved-identity\n")
+        module = self.run_bootstrap()
+        result = json.loads(module.MIGRATION_STATUS.read_text())
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual((result["fromSchema"], result["toSchema"]), (1, 1))
+        self.assertEqual((result["fromVersion"], result["toVersion"]), ("v0.2.0", "v0.2.1"))
+        backup = Path(result["backupPath"])
+        self.assertEqual((backup / "settings.env").read_text(), original)
+        self.assertEqual((backup / ".vcf-services-version").read_text(), "v0.2.0\n")
+        self.assertEqual((backup / "software-depot-id").read_text(), "preserved-identity\n")
+        self.assertEqual((self.config / "software-depot-id").read_text(), "preserved-identity\n")
+        self.assertIn(original, module.SETTINGS.read_text())
+        self.assertIn('TOKEN_URL="https://eapi.broadcom.com/vcf/generateToken"', module.SETTINGS.read_text())
+        snapshot = self.persistent_snapshot(self.config)
+        self.run_bootstrap()
+        self.assertEqual(self.persistent_snapshot(self.config), snapshot)
+
+    def test_interrupted_migration_keeps_old_marker_and_retries_with_report(self):
+        self.config.mkdir()
+        marker = self.config / ".vcf-services-version"
+        report = self.config / ".vcf-services-migration.json"
+        marker.write_text("v0.2.0\n")
+        (self.config / ".vcf-services-schema").write_text("1\n")
+        original = 'DEPOT_ENDPOINT="operator.example.test"\n'
+        (self.config / "settings.env").write_text(original)
+        replace = os.replace
+
+        def interrupt_after_report(source, destination):
+            replace(source, destination)
+            if Path(destination) == report:
+                raise KeyboardInterrupt("startup interrupted")
+
+        with mock.patch.object(os, "replace", side_effect=interrupt_after_report):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_bootstrap()
+        self.assertEqual(marker.read_text(), "v0.2.0\n")
+        interrupted_result = json.loads(report.read_text())
+        backup = Path(interrupted_result["backupPath"])
+        self.assertEqual((backup / "settings.env").read_text(), original)
+        module = self.run_bootstrap()
+        result = json.loads(report.read_text())
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["fromVersion"], "v0.2.0")
+        self.assertEqual(result["toVersion"], "v0.2.1")
+        self.assertNotEqual(result["backupPath"], interrupted_result["backupPath"])
+        self.assertEqual(marker.read_text(), "v0.2.1\n")
+        self.assertFalse(module.VERSION_STATUS.exists())
+
+    def test_unsupported_release_formats_block_without_migrating(self):
+        module = self.run_bootstrap()
+        for version in ("0.1.0", "v0.1.0-rc1", "v0.1.0+build", "v٠.١.٠"):
+            with self.subTest(version=version):
+                module.VERSION_MARKER.write_text(version + "\n")
+                before = self.persistent_snapshot(self.config, {module.VERSION_STATUS.name})
+                module.main()
+                status = json.loads(module.VERSION_STATUS.read_text())
+                self.assertTrue(status["blocked"])
+                self.assertEqual(status["foundVersion"], version)
+                self.assertEqual(
+                    self.persistent_snapshot(self.config, {module.VERSION_STATUS.name}),
+                    before,
+                )
+
+    def test_dev_sentinel_allows_upgrade_and_refuses_release_downgrade(self):
+        module = self.run_bootstrap()
+        with mock.patch.object(module, "CURRENT_VERSION", "dev"):
+            module.main()
+            self.assertEqual(module.VERSION_MARKER.read_text(), "dev\n")
+            result = json.loads(module.MIGRATION_STATUS.read_text())
+            self.assertEqual(result["toVersion"], "dev")
+            self.assertFalse(module.VERSION_STATUS.exists())
+        module.main()
+        self.assertEqual(module.VERSION_MARKER.read_text(), "dev\n")
+        self.assertTrue(json.loads(module.VERSION_STATUS.read_text())["blocked"])
+
+    def test_newer_marker_is_quarantined_without_rewriting_state(self):
+        self.config.mkdir()
+        (self.config / ".vcf-services-version").write_text("v0.3.0\n")
+        (self.config / ".vcf-services-schema").write_text("1\n")
+        (self.config / "settings.env").write_text('SETUP_COMPLETE="true"\n')
         self.secrets.mkdir()
         (self.secrets / "restored-secret").write_text("preserve me\n")
         config_before = self.persistent_snapshot(self.config)
@@ -1394,13 +1639,13 @@ class BootstrapVersionTests(unittest.TestCase):
         module = self.run_bootstrap()
         status = json.loads(module.VERSION_STATUS.read_text())
         self.assertEqual(status["expectedVersion"], "v0.2.1")
-        self.assertEqual(status["foundVersion"], "v0.1.0")
+        self.assertEqual(status["foundVersion"], "v0.3.0")
+        self.assertIn("newer", status["message"])
         self.assertEqual(
             self.persistent_snapshot(self.config, {module.VERSION_STATUS.name}),
             config_before,
         )
         self.assertEqual(self.persistent_snapshot(self.secrets), secrets_before)
-        self.assertFalse((self.config / "settings.env").exists())
 
 
 if __name__ == "__main__":

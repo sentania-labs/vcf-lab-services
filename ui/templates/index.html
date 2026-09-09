@@ -131,7 +131,13 @@
 
       <div class="setup-card">
         <h3>Licensed VCF Download Tool</h3>
-        <div class="stat"><div class="key">Installed version</div><div id="vcfdt-installed" class="value">Not installed</div></div>
+        <div class="grid">
+          <div class="stat"><div class="key">Installed version</div><div id="vcfdt-installed" class="value">Not installed</div></div>
+          <div class="stat"><div class="key">Previous version</div><div id="vcfdt-previous" class="value">None retained</div></div>
+          <div class="stat"><div class="key">Depot content produced by</div><div id="vcfdt-produced" class="value">No successful sync recorded</div></div>
+        </div>
+        <div class="row" style="margin-top:12px"><button id="vcfdt-rollback" class="secondary">Roll back to previous</button><span id="vcfdt-rollback-flash" class="muted"></span></div>
+        <p class="help">The previous release remains available until the replacement completes a successful sync.</p>
         <div class="two" style="margin-top:12px">
           <div>
             <div class="formgrid"><div class="field full"><label for="vcfdt-depot-version">Install from the depot</label>
@@ -146,6 +152,11 @@
             <div class="row"><button id="vcfdt-upload">Upload or replace tool</button><span id="vcfdt-flash" class="muted"></span></div>
           </div>
         </div>
+      </div>
+
+      <div class="setup-card" id="migration-card" hidden>
+        <h3>Last appliance migration</h3>
+        <div id="migration-result" class="value"></div>
       </div>
 
       <div class="setup-card">
@@ -385,8 +396,10 @@ function toolLabel(tool) {
 
 let depotArchiveCount=0;
 let syncRunning=false;
+let previousToolAvailable=false;
 function updateDepotInstallState() {
   $('vcfdt-depot-install').disabled=syncRunning || depotArchiveCount===0 || Boolean(bootstrap?.versionProblem?.blocked);
+  $('vcfdt-rollback').disabled=syncRunning || !previousToolAvailable || Boolean(bootstrap?.versionProblem?.blocked);
 }
 async function loadDepotArchives(report=false) {
   const select=$('vcfdt-depot-version'); const flash=$('vcfdt-depot-flash');
@@ -425,6 +438,11 @@ function populateSetup(data) {
   $('machine-id').textContent=data.machineId || data.machineIdError || 'Install the tool first';
   $('vcfdt-flash').textContent=data.tool.installed ? (data.tool.versionVerified ? `${data.tool.version} is ready` : 'Installed; the reported version could not be verified') : 'Not installed';
   $('vcfdt-installed').textContent=toolLabel(data.tool);
+  previousToolAvailable=Boolean(data.tool.previous?.installed);
+  $('vcfdt-previous').textContent=previousToolAvailable ? toolLabel(data.tool.previous) : 'None retained';
+  const migration=data.migration;
+  $('migration-card').hidden=!migration;
+  $('migration-result').textContent=migration ? `Schema ${migration.fromSchema} to ${migration.toSchema} completed ${fmt(migration.migratedAt)}. Recovery copy: ${migration.backupPath}` : '';
   $('activation-flash').textContent=data.activationConfigured ? 'Activation code saved' : '';
   $('depot-storage').textContent=storageText(data.storage.depot);
   $('backup-storage').textContent=storageText(data.storage.backup);
@@ -442,6 +460,7 @@ function populateSetup(data) {
   $('progress-storage').className=`step ${settings.storageConfirmed ? 'done' : data.activationConfigured ? 'active' : ''}`;
   $('progress-settings').className=`step ${data.setupComplete ? 'done' : settings.storageConfirmed ? 'active' : ''}`;
   if (!landed) { landed=true; showTab(data.setupComplete ? 'sync' : 'setup'); }
+  updateDepotInstallState();
 }
 
 async function boot() {
@@ -486,6 +505,15 @@ $('vcfdt-depot-install').onclick=async()=>{
     populateSetup(await api('api/bootstrap')); await loadDepotArchives();
     $('vcfdt-depot-flash').textContent=toolInstallMessage(result,' from the depot');
   } catch(error){$('vcfdt-depot-flash').textContent=error.message;} finally{updateDepotInstallState();}
+};
+
+$('vcfdt-rollback').onclick=async()=>{
+  $('vcfdt-rollback').disabled=true; $('vcfdt-rollback-flash').textContent='Rolling back';
+  try {
+    const result=await api('api/vcfdt/rollback',{method:'POST'});
+    populateSetup(await api('api/bootstrap')); await loadDepotArchives();
+    $('vcfdt-rollback-flash').textContent=`Rolled back to ${result.version}`;
+  } catch(error){$('vcfdt-rollback-flash').textContent=error.message;} finally{updateDepotInstallState();}
 };
 
 $('save-activation').onclick=async()=>{
@@ -626,8 +654,10 @@ async function poll(){
     const status=await api('api/status'); const running=status.running, armed=status.armed;
     $('st-state').innerHTML=running?'<span class="pill run">running</span>':armed?'<span class="pill ok">armed, idle</span>':'<span class="pill bad">not armed</span>';
     $('st-current').textContent=status.currentTarget||'none'; $('st-next').textContent=fmt(status.nextRun); $('st-tool').textContent=status.vcfdtVersion;
+    const targetRuns=status.targets.filter(target=>status.lastRun[target]);
+    $('vcfdt-produced').textContent=targetRuns.length ? targetRuns.map(target=>{const result=status.lastRun[target];return `${target}: tool ${result.toolVersion||'unknown'} (${result.status})`;}).join('; ') : 'No sync recorded';
     savedNextRun=status.nextRun; renderScheduleNext();
-    $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}</span></div></div>`;}).join('');
+    $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}${result?`<br>tool ${esc(result.toolVersion||'unknown')}`:''}</span></div></div>`;}).join('');
     showPending(status);
     $('sync-btn').disabled=running||!armed; $('refresh-remote').disabled=running||!armed; $('vcfdt-upload').disabled=running;
     syncRunning=running; updateDepotInstallState();

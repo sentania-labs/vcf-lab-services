@@ -81,7 +81,7 @@ Software Depot ID probe never blocks the install and never replaces the last
 verified saved ID; the registration screen reports the probe failure.
 
 The release bundle contains only the Compose and Kubernetes definitions, Caddy
-configuration, thin optional bootstrap helper, operational documentation,
+configuration, optional install/upgrade and uninstall helpers, operational documentation,
 license, and Range verification script. It contains no product source and no
 licensed content.
 

@@ -24,9 +24,10 @@ VCF_SERVICES_SFTP_IMAGE=vcf-services-sftp:local \
 
 The UI test covers first-person ownership, login, live depot authentication,
 licensed archive staging by upload, listing and installing tool archives
-from a stub `PROD/COMP/VCFDT` depot tree through the same atomic release swap
+from a stub `PROD/COMP/VCFDT` depot tree through the same locked release swap
 (with the depot left untouched, paths outside that tree refused, and a
-running sync refused), persistent Software Depot ID retrieval, activation
+running sync refused), previous-release retention and rollback, persistent
+Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 the schedule preview endpoint computing an unsaved schedule's next run in
 the configured or supplied timezone and rejecting bad input,
@@ -38,14 +39,18 @@ run publishes its state still being flagged for the next run, the live backup
 service settings being reported as applied now instead of deferred, the tabbed
 console rendering every control including the daily, weekly, and custom cron
 schedule picker with its next-run readout, advisory tool version and Software Depot ID
-probes that preserve the last verified ID, and config version marker
-quarantine. The Compose test enforces the latest-tracking published-image defaults,
+probes that preserve the last verified ID, forward config migration with an
+in-volume backup, and newer-version downgrade refusal. The Compose test
+enforces the latest-tracking published-image defaults,
 their always-pull behavior, and their override variables,
 first-boot state initialization, internal TLS, the platform-provided storage
 boundary, protected Redis, fixed mount contracts, version mismatch safe-stop
 wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
 single-writer sync behavior, sync safe-stop on a version mismatch, log
-retention, SFTP identity and host keys, Range serving, packaging, the release
+retention, tool-version run state, post-success release promotion, retention
+after a successful VKR-only run with non-tool provenance, lifecycle
+script behavior through a stub Compose command, SFTP identity and host keys,
+Range serving, packaging, the release
 tag gate (well formed tags on main pass, malformed or unmerged tags are
 refused), idempotent release publication, and license isolation. The
 Kubernetes manifest test also asserts that product images default to the
@@ -99,14 +104,18 @@ backup store. That guarantee comes from the manifest ownership contract and
 the populated-store SFTP regression test. Those remain deployment-environment
 validation responsibilities.
 
-`tests/test_install_checks.sh` is a regression guard, not a gate for a
-reachable operator path. It exercises the retained depot-adoption scripts
-(`scripts/install-checks.sh`, `scripts/import-vcfdt-state.sh`, and
-`scripts/validate-adopted-depot.sh`) that let an existing VCFDT depot and
-Software Depot ID be adopted without re-downloading. The GUI-first prototype
-removed their installer entry point, so adoption currently has no reachable
-path and needs a console path before that flow can be claimed working. The
-scripts stay in place until that console path exists.
+`tests/test_install_checks.sh` runs the supported upgrade and uninstall
+commands against a stub Docker and Compose executable. It proves upgrade pulls
+and recreates services, then refuses to claim success when persistent-state
+migration is blocked. It proves default uninstall omits volume removal, reports
+Compose-resolved volume names, removes only product images, and retains shared
+Caddy and Redis images. A cancelled purge changes nothing, and a confirmed
+purge requests volume removal. The same test remains the regression guard for
+the depot-adoption scripts (`scripts/install-checks.sh`,
+`scripts/import-vcfdt-state.sh`, and `scripts/validate-adopted-depot.sh`) that
+let an existing VCFDT depot and Software Depot ID be adopted without
+re-downloading. Adoption still needs its separate console path before that flow
+can be claimed working.
 
 Release validation also requires a live HTTP walk through claim, upload,
 registration, and settings, plus an authenticated HTTPS Range request. The
