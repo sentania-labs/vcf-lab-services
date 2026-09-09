@@ -146,6 +146,12 @@ are not protected automatically; enable protection in the Depot tab before
 allowing product actions to change them. Newly uploaded top-level trees are
 recorded as operator-provided and protected automatically.
 
+Ownership failures block operations rather than reset protection. The console
+refuses inventory and mutations when the manifest cannot be read or fails JSON
+or schema validation; only an absent manifest starts empty. Sync refuses further
+target dispatch when ownership cannot be read or persisted, preserving the
+existing manifest if an update fails.
+
 Protection skips the `esx` target when `ESX_HOST` is protected and the `vkr`
 target when `VKR` is protected. The `install`, `upgrade`, and `patches` targets
 are skipped whenever any tree is protected, because their writes can span
