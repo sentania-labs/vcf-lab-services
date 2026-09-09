@@ -26,8 +26,10 @@ The UI test covers first-person ownership, login, live depot authentication,
 licensed archive staging by upload, listing and installing tool archives
 from a stub `PROD/COMP/VCFDT` depot tree through the same locked release swap
 (with the depot left untouched, paths outside that tree refused, and a
-running sync refused), previous-release retention and rollback, persistent
-Software Depot ID retrieval, activation
+running sync refused), previous-release retention and rollback, Software Depot
+ID adoption before installation, confirmation by the first tool probe,
+adoption with a tool already present, invalid ID and active-sync refusals,
+persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 the schedule preview endpoint computing an unsaved schedule's next run in
 the configured or supplied timezone and rejecting bad input,
@@ -114,8 +116,17 @@ purge requests volume removal. The same test remains the regression guard for
 the depot-adoption scripts (`scripts/install-checks.sh`,
 `scripts/import-vcfdt-state.sh`, and `scripts/validate-adopted-depot.sh`) that
 let an existing VCFDT depot and Software Depot ID be adopted without
-re-downloading. Adoption still needs its separate console path before that flow
-can be claimed working.
+re-downloading. Those retained scripts remain the file-level migration and
+regression path. The Setup tab now provides the operator-facing Software Depot
+ID adoption path requested in issue #31.
+
+For a retained registration, paste the 36-character Software Depot ID in Setup
+before the first tool install. The console writes `machine_id` to the mounted
+VCFDT state volume and reports that it will be confirmed at first install. The
+install probe must return the same ID before the console reports it confirmed.
+Adopting after installation is supported, but replaces the active identity and
+requires a new activation code unless the saved code was issued for that ID.
+The API refuses invalid UUIDs and adoption during a sync or tool update.
 
 Release validation also requires a live HTTP walk through claim, upload,
 registration, and settings, plus an authenticated HTTPS Range request. The
@@ -129,6 +140,8 @@ The stub cannot verify these claims:
   output is already confirmed against captured licensed tool output (see
   `docs/releasing.md`).
 - Registration and download with a real activation code.
+- Adopting the `infra.int` depot's ID on a fresh appliance, then completing a
+  sync with its existing activation code.
 - A real content sync and consumption by VCF Installer, SDDC Manager, UMDS, or
   Fleet.
 - Consumer trust import for the Caddy internal CA.

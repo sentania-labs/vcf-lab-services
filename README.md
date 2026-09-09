@@ -37,17 +37,28 @@ before exposing it more broadly.
 
 The console then walks through:
 
-1. Installing the licensed VCF Download Tool, either from an archive the sync
+1. When retaining an existing registration, pasting its 36-character Software
+   Depot ID into **Adopt an existing Software Depot ID** before the first tool
+   install. The console writes `machine_id` to the durable VCFDT state volume.
+2. Installing the licensed VCF Download Tool, either from an archive the sync
    already mirrored under `PROD/COMP/VCFDT` in the depot or by uploading the
    portal-downloaded archive. Both paths validate the archive the same way.
-2. Reading the persistent Software Depot ID and saving its activation code.
-3. Confirming the platform-provided depot and backup mounts.
-4. Choosing the VCF filter, SKU, targets, recurring schedule, timezone, CEIP,
+3. Confirming the persistent Software Depot ID with the tool and saving its
+   activation code.
+4. Confirming the platform-provided depot and backup mounts.
+5. Choosing the VCF filter, SKU, targets, recurring schedule, timezone, CEIP,
    backup service state, SFTP identity, and download endpoints. The schedule
    is picked as daily, weekly, or custom cron (with an advanced cron toggle),
    and the console shows the next run the choice would produce before it is
    saved.
-5. Running a sync and inspecting live state, logs, and available versions.
+6. Running a sync and inspecting live state, logs, and available versions.
+
+The ordering rule for a retained identity is strict: adopt the existing ID
+before installing the tool. The console reports it as adopted and pending, then
+the first installation probe must confirm the same ID. Adopting after a tool is
+installed replaces the current identity immediately and re-probes it. Any
+activation code issued for a different ID is no longer valid. A mismatch is
+reported with both the adopted ID and the ID returned by the tool.
 
 The console is organised into Setup, Sync, Settings, Backup, and Logs tabs.
 Every operator setting in this prototype remains editable in the console. The
@@ -116,6 +127,12 @@ tool rewrites its telemetry flag during every sync. Tool installation and sync
 share an update lock, so they cannot modify the volume at the same time.
 Restore it from the Setup tab by installing a tool archive already mirrored in
 the depot, or by uploading the licensed archive again.
+
+The retained depot-adoption helpers in `scripts/` remain available for
+file-level migrations and validation. The Setup tab's **Adopt an existing
+Software Depot ID** control is the operator-facing console path requested in
+issue #31, so adopting the 36-byte `machine_id` file no longer requires shell
+access.
 
 The config volume carries separate product release and config schema markers.
 An older schema is migrated forward in order. Every release marker change on
@@ -211,9 +228,10 @@ Deferred work is explicit:
 
 - Native in-product NFS configuration. Storage is platform-provided.
 - Backup status by product and product release checking.
-- A console path for adopting an existing VCFDT depot and Software Depot ID.
-  The adoption scripts remain in `scripts/`, but removing the installer left
-  no reachable way to run them (see [docs/validation.md](docs/validation.md)).
+- A console path for adopting an existing depot content tree. The Software
+  Depot ID now has a reachable Setup-tab path, while the broader depot-content
+  adoption scripts remain in `scripts/` (see
+  [docs/validation.md](docs/validation.md)).
 - Restricting on-demand TLS certificate issuance to configured or observed
   appliance hostnames. The prototype keeps the open ask behavior unchanged.
 

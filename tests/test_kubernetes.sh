@@ -58,12 +58,20 @@ deployment = documents.find { |doc| doc["kind"] == "Deployment" && doc.dig("meta
 abort "vcf-services Deployment missing" unless deployment
 containers = deployment.fetch("spec").fetch("template").fetch("spec").fetch("containers")
 sync = containers.find { |container| container["name"] == "depot-sync" }
+ui = containers.find { |container| container["name"] == "admin-ui" }
 abort "depot-sync container missing" unless sync
 mounts = sync.fetch("volumeMounts").select { |mount| mount["mountPath"] == "/opt/vcfdt" }
 abort "expected one sync tool mount" unless mounts.length == 1
 mount = mounts.first
 abort "sync tool volume is incorrect" unless mount["name"] == "vcfdt-tool"
 abort "sync tool volume must be writable" unless mount.fetch("readOnly", false) == false
+abort "admin-ui container missing" unless ui
+state_mounts = ui.fetch("volumeMounts").select do |candidate|
+  candidate["mountPath"] == "/home/vcf/.local/share/vmware/vdt"
+end
+abort "admin-ui durable VCFDT state mount is incorrect" unless state_mounts.length == 1 && state_mounts.first["name"] == "vcfdt-state"
+state_env = ui.fetch("env").find { |entry| entry["name"] == "VCFDT_STATE_DIR" }
+abort "admin-ui adoption path does not match the durable state mount" unless state_env && state_env["value"] == "/home/vcf/.local/share/vmware/vdt"
 ' "$rendered"
 for annotation in proxy-body-size proxy-read-timeout proxy-send-timeout proxy-request-buffering; do
 	grep -q "nginx.ingress.kubernetes.io/$annotation" "$rendered" \
