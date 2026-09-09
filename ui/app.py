@@ -810,21 +810,7 @@ def _replace_tool(install):
             if _state().get("running", False):
                 return jsonify({"error": "wait for the running sync to finish"}), 409
             metadata, old_target, machine_id = install()
-            adoption = _machine_id_adoption()
-            if machine_id:
-                _remember_machine_id(machine_id)
-            else:
-                _machine_id_cache["value"] = None
-            if adoption is not None:
-                matches = bool(
-                    machine_id
-                    and machine_id.lower() == adoption["adoptedId"].lower()
-                )
-                _record_machine_id_adoption(
-                    adoption["adoptedId"],
-                    "confirmed" if matches else "mismatch",
-                    machine_id,
-                )
+            _reconcile_machine_id_adoption(machine_id)
             old_previous = _release_target("previous")
             previous = VCFDT_STORE / "previous"
             if old_target:
@@ -882,7 +868,11 @@ def _rollback_tool():
             finally:
                 next_current.unlink(missing_ok=True)
                 next_previous.unlink(missing_ok=True)
-            _machine_id_cache["value"] = None
+            try:
+                machine_id = _probe_machine_id(previous_target)
+            except ToolArchiveError:
+                machine_id = None
+            _reconcile_machine_id_adoption(machine_id)
             return jsonify(_current_tool_info())
     except BlockingIOError:
         return jsonify(
@@ -1260,6 +1250,24 @@ def _record_machine_id_adoption(adopted_id, status, reported_id=None):
     return document
 
 
+def _reconcile_machine_id_adoption(machine_id):
+    adoption = _machine_id_adoption()
+    if machine_id:
+        _remember_machine_id(machine_id)
+    else:
+        _machine_id_cache["value"] = None
+    if adoption is None:
+        return None
+    matches = bool(
+        machine_id and machine_id.lower() == adoption["adoptedId"].lower()
+    )
+    return _record_machine_id_adoption(
+        adoption["adoptedId"],
+        "confirmed" if matches else "mismatch",
+        machine_id,
+    )
+
+
 def _adoption_message(adoption, tool_installed):
     if adoption is None:
         return None
@@ -1331,6 +1339,9 @@ def _registration_details(tool=None):
                 "confirmed" if matches else "mismatch",
                 machine_id,
             )
+    elif adoption is not None and not tool["installed"]:
+        machine_id = adoption["adoptedId"]
+        error = None
     else:
         machine_id, error = _machine_id()
     status = None

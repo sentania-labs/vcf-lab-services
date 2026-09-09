@@ -674,6 +674,45 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(refused.status_code, 409)
         self.assertIn("running sync", refused.get_json()["error"])
 
+    def test_tool_rollback_revalidates_adopted_identity(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        replacement_id = "33333333-3333-4333-8333-333333333333"
+        adopted = self.post(
+            "/api/registration/adopt", json={"machineId": adopted_id}
+        )
+        self.assertEqual(adopted.status_code, 200)
+        installed = self.post(
+            "/api/vcfdt",
+            data={
+                "archive": (
+                    self.tar_tool(machine_id_file=self.vcfdt_state / "machine_id"),
+                    "vcf-download-tool-9.1.2.tar.gz",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(installed.status_code, 201)
+        self.assertEqual(
+            installed.get_json()["registration"]["machineIdStatus"], "confirmed"
+        )
+
+        archive = self.seed_depot_tool("9.2.0", machine_id=replacement_id)
+        replacement = self.install_from_depot(archive.name)
+        self.assertEqual(replacement.status_code, 201)
+        self.assertEqual(
+            replacement.get_json()["registration"]["machineIdStatus"], "mismatch"
+        )
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+
+        rolled_back = self.post("/api/vcfdt/rollback")
+        self.assertEqual(rolled_back.status_code, 200)
+        registration = self.get("/api/registration")
+        self.assertEqual(registration.status_code, 200)
+        self.assertEqual(registration.get_json()["machineId"], adopted_id)
+        self.assertEqual(registration.get_json()["machineIdStatus"], "confirmed")
+
     def test_status_poll_preserves_previous_release_after_successful_sync(self):
         self.claim()
         self.write_state()
@@ -848,6 +887,25 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(confirmed["machineId"], adopted_id)
         self.assertEqual(confirmed["machineIdStatus"], "confirmed")
         self.assertIn("Confirmed", confirmed["machineIdMessage"])
+
+    def test_pending_adoption_uses_durable_record_across_workers(self):
+        self.claim()
+        self.write_state()
+        first_id = "22222222-2222-4222-8222-222222222222"
+        corrected_id = "33333333-3333-4333-8333-333333333333"
+        adopted = self.post(
+            "/api/registration/adopt", json={"machineId": first_id}
+        )
+        self.assertEqual(adopted.status_code, 200)
+
+        self.module._write_secret(self.module.VCFDT_MACHINE_ID_FILE, corrected_id)
+        self.module._record_machine_id_adoption(corrected_id, "adopted")
+        self.assertEqual(self.module._machine_id_cache["value"], first_id)
+
+        pending = self.get("/api/bootstrap").get_json()
+        self.assertEqual(pending["machineId"], corrected_id)
+        self.assertEqual(pending["adoptedMachineId"], corrected_id)
+        self.assertEqual(pending["machineIdStatus"], "adopted")
 
     def test_adopt_with_tool_installed_preserves_identity_and_activation(self):
         self.claim()
