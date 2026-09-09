@@ -28,7 +28,7 @@ from a stub `PROD/COMP/VCFDT` depot tree through the same locked release swap
 (with the depot left untouched, paths outside that tree refused, and a
 running sync refused), previous-release retention and rollback, Software Depot
 ID adoption before installation, confirmation by the first tool probe,
-adoption with a tool already present, invalid ID and active-sync refusals,
+refusal with a tool already present, invalid ID and active-sync refusals,
 persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 the schedule preview endpoint computing an unsaved schedule's next run in
@@ -124,8 +124,7 @@ For a retained registration, paste the 36-character Software Depot ID in Setup
 before the first tool install. The console writes `machine_id` to the mounted
 VCFDT state volume and reports that it will be confirmed at first install. The
 install probe must return the same ID before the console reports it confirmed.
-Adopting after installation is supported, but replaces the active identity and
-requires a new activation code unless the saved code was issued for that ID.
+Adoption after installation is refused without changing the active identity.
 The API refuses invalid UUIDs and adoption during a sync or tool update.
 
 Release validation also requires a live HTTP walk through claim, upload,

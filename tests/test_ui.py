@@ -849,7 +849,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(confirmed["machineIdStatus"], "confirmed")
         self.assertIn("Confirmed", confirmed["machineIdMessage"])
 
-    def test_adopt_with_tool_installed_reprobes_and_confirms(self):
+    def test_adopt_with_tool_installed_preserves_identity_and_activation(self):
         self.claim()
         self.write_state()
         original_id = "11111111-1111-4111-8111-111111111111"
@@ -870,37 +870,50 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         )
         self.assertEqual(installed.status_code, 201)
 
-        adopted = self.post(
-            "/api/registration/adopt", json={"machineId": adopted_id}
+        saved = self.post(
+            "/api/registration", json={"activationCode": "retained-code"}
         )
-        self.assertEqual(adopted.status_code, 200)
-        self.assertTrue(adopted.get_json()["confirmed"])
-        self.assertEqual(adopted.get_json()["status"], "confirmed")
-        self.assertEqual(
-            self.get("/api/registration").get_json()["machineId"], adopted_id
-        )
-        self.assertEqual(
-            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), adopted_id
-        )
-
-    def test_adopt_with_tool_installed_reports_probe_mismatch(self):
-        self.claim()
-        self.write_state()
-        self.assertEqual(self.upload_tool().status_code, 201)
-        adopted_id = "22222222-2222-4222-8222-222222222222"
-
+        self.assertEqual(saved.status_code, 200)
         response = self.post(
             "/api/registration/adopt", json={"machineId": adopted_id}
         )
         self.assertEqual(response.status_code, 409)
-        body = response.get_json()
-        self.assertEqual(body["status"], "mismatch")
-        self.assertIn(adopted_id, body["error"])
-        self.assertIn("11111111-1111-4111-8111-111111111111", body["error"])
+        self.assertIn("before installing", response.get_json()["error"])
+        self.assertEqual(
+            (self.vcfdt_state / "machine_id").read_text(), original_id + "\n"
+        )
+        self.assertEqual(
+            self.get("/api/registration").get_json()["machineId"], original_id
+        )
+        self.assertEqual(
+            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), original_id
+        )
+        self.assertFalse(self.module.SOFTWARE_DEPOT_ADOPTION_FILE.exists())
+        self.assertEqual(
+            (self.secrets / "activation-code.txt").read_text(), "retained-code\n"
+        )
+
+    def test_adopt_before_install_reports_installation_probe_mismatch(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        response = self.post(
+            "/api/registration/adopt", json={"machineId": adopted_id}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.upload_tool().status_code, 201)
         status = self.get("/api/bootstrap").get_json()
         self.assertEqual(status["machineIdStatus"], "mismatch")
-        self.assertIn("Identity mismatch", status["machineIdMessage"])
+        self.assertIn(adopted_id, status["machineIdMessage"])
+        self.assertIn(
+            "11111111-1111-4111-8111-111111111111", status["machineIdMessage"]
+        )
         self.assertEqual(self.get("/api/registration").status_code, 409)
+        self.assertEqual(
+            self.post("/api/registration", json={"activationCode": "wrong-code"}).status_code,
+            409,
+        )
+        self.assertFalse((self.secrets / "activation-code.txt").exists())
 
     def test_adopt_rejects_invalid_software_depot_id(self):
         self.claim()

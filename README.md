@@ -55,10 +55,9 @@ The console then walks through:
 
 The ordering rule for a retained identity is strict: adopt the existing ID
 before installing the tool. The console reports it as adopted and pending, then
-the first installation probe must confirm the same ID. Adopting after a tool is
-installed replaces the current identity immediately and re-probes it. Any
-activation code issued for a different ID is no longer valid. A mismatch is
-reported with both the adopted ID and the ID returned by the tool.
+the first installation probe must confirm the same ID. Adoption is refused once
+a tool is installed. A mismatch is reported with both the adopted ID and the ID
+returned by the tool.
 
 The console is organised into Setup, Sync, Settings, Backup, and Logs tabs.
 Every operator setting in this prototype remains editable in the console. The

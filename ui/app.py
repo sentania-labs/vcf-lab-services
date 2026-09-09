@@ -824,7 +824,6 @@ def _replace_tool(install):
                     adoption["adoptedId"],
                     "confirmed" if matches else "mismatch",
                     machine_id,
-                    adoption["activationCodeNeedsReview"],
                 )
             old_previous = _release_target("previous")
             previous = VCFDT_STORE / "previous"
@@ -1247,18 +1246,14 @@ def _machine_id_adoption():
         "status": status,
         "adoptedId": adopted_id,
         "reportedId": reported_id,
-        "activationCodeNeedsReview": bool(document.get("activationCodeNeedsReview")),
     }
 
 
-def _record_machine_id_adoption(
-    adopted_id, status, reported_id=None, activation_code_needs_review=False
-):
+def _record_machine_id_adoption(adopted_id, status, reported_id=None):
     document = {
         "status": status,
         "adoptedId": adopted_id,
         "reportedId": reported_id,
-        "activationCodeNeedsReview": activation_code_needs_review,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
     _write_secret(SOFTWARE_DEPOT_ADOPTION_FILE, json.dumps(document) + "\n")
@@ -1278,8 +1273,6 @@ def _adoption_message(adoption, tool_installed):
     else:
         reported = adoption.get("reportedId") or "no recognizable ID"
         message = f"Identity mismatch: adopted {adopted_id}, but the tool reported {reported}."
-    if adoption.get("activationCodeNeedsReview"):
-        message += " Replace the saved activation code unless it was issued for this ID."
     return message
 
 
@@ -1337,7 +1330,6 @@ def _registration_details(tool=None):
                 adoption["adoptedId"],
                 "confirmed" if matches else "mismatch",
                 machine_id,
-                adoption["activationCodeNeedsReview"],
             )
     else:
         machine_id, error = _machine_id()
@@ -1353,9 +1345,6 @@ def _registration_details(tool=None):
         "adoptedMachineId": adoption["adoptedId"] if adoption else None,
         "reportedMachineId": adoption.get("reportedId") if adoption else None,
         "machineIdMessage": _adoption_message(adoption, tool["installed"]),
-        "activationCodeNeedsReview": bool(
-            adoption and adoption["activationCodeNeedsReview"]
-        ),
     }
 
 
@@ -1751,72 +1740,20 @@ def adopt_registration():
         with _tool_update_lock():
             if _state().get("running", False):
                 return jsonify({"error": "wait for the running sync to finish"}), 409
-            previous_id = _persisted_machine_id()
-            activation_needs_review = bool(
-                _activation_configured() and previous_id != value
-            )
+            if _current_tool_info()["installed"]:
+                return jsonify(
+                    {"error": "adopt an existing Software Depot ID before installing the tool"}
+                ), 409
             _write_secret(VCFDT_MACHINE_ID_FILE, value)
-            tool = _current_tool_info()
-            if not tool["installed"]:
-                _remember_machine_id(value)
-                adoption = _record_machine_id_adoption(
-                    value, "adopted", activation_code_needs_review=activation_needs_review
-                )
-                return jsonify(
-                    {
-                        "adopted": True,
-                        "confirmed": False,
-                        "machineId": value,
-                        "status": "adopted",
-                        "message": _adoption_message(adoption, False),
-                    }
-                )
-            try:
-                reported_id = _probe_machine_id(VCFDT_STORE / "current")
-            except ToolArchiveError:
-                _machine_id_cache["value"] = None
-                adoption = _record_machine_id_adoption(
-                    value,
-                    "mismatch",
-                    activation_code_needs_review=activation_needs_review,
-                )
-                return jsonify(
-                    {
-                        "error": _adoption_message(adoption, True),
-                        "adopted": True,
-                        "confirmed": False,
-                        "machineId": None,
-                        "status": "mismatch",
-                    }
-                ), 409
-            if reported_id.lower() != value.lower():
-                _remember_machine_id(reported_id)
-                adoption = _record_machine_id_adoption(
-                    value,
-                    "mismatch",
-                    reported_id,
-                    activation_needs_review,
-                )
-                return jsonify(
-                    {
-                        "error": _adoption_message(adoption, True),
-                        "adopted": True,
-                        "confirmed": False,
-                        "machineId": reported_id,
-                        "status": "mismatch",
-                    }
-                ), 409
             _remember_machine_id(value)
-            adoption = _record_machine_id_adoption(
-                value, "confirmed", value, activation_needs_review
-            )
+            adoption = _record_machine_id_adoption(value, "adopted")
             return jsonify(
                 {
                     "adopted": True,
-                    "confirmed": True,
+                    "confirmed": False,
                     "machineId": value,
-                    "status": "confirmed",
-                    "message": _adoption_message(adoption, True),
+                    "status": "adopted",
+                    "message": _adoption_message(adoption, False),
                 }
             )
     except BlockingIOError:
