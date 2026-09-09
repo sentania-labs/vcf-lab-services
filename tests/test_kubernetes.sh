@@ -66,6 +66,12 @@ mount = mounts.first
 abort "sync tool volume is incorrect" unless mount["name"] == "vcfdt-tool"
 abort "sync tool volume must be writable" unless mount.fetch("readOnly", false) == false
 abort "admin-ui container missing" unless ui
+depot_mounts = ui.fetch("volumeMounts").select { |candidate| candidate["mountPath"] == "/depot" }
+abort "admin-ui depot mount is incorrect" unless depot_mounts.length == 1 && depot_mounts.first["name"] == "depot-store"
+abort "admin-ui depot mount must be writable" unless depot_mounts.first.fetch("readOnly", false) == false
+sync_state_mounts = ui.fetch("volumeMounts").select { |candidate| candidate["mountPath"] == "/state" }
+abort "admin-ui sync-state mount is incorrect" unless sync_state_mounts.length == 1 && sync_state_mounts.first["name"] == "sync-state"
+abort "admin-ui sync-state mount must be writable" unless sync_state_mounts.first.fetch("readOnly", false) == false
 state_mounts = ui.fetch("volumeMounts").select do |candidate|
   candidate["mountPath"] == "/home/vcf/.local/share/vmware/vdt"
 end

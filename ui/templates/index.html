@@ -43,6 +43,7 @@
   button { border:0; border-radius:7px; padding:9px 16px; background:var(--accent); color:white;
     cursor:pointer; font-weight:700; }
   button.secondary { background:#2b3946; } button.ghost { background:transparent; border:1px solid var(--line); }
+  button.danger { background:#a93934; }
   .button-link { display:inline-block; border-radius:7px; padding:9px 16px; background:#2b3946;
     color:white; text-decoration:none; font-weight:700; }
   button:disabled { background:#34404b; color:#82909d; cursor:not-allowed; }
@@ -111,6 +112,7 @@
   <nav class="tabs" id="tabs" aria-label="Console sections">
     <button class="tab-button active" data-tab="setup">Setup</button>
     <button class="tab-button" data-tab="sync">Sync</button>
+    <button class="tab-button" data-tab="depot">Depot</button>
     <button class="tab-button" data-tab="settings">Settings</button>
     <button class="tab-button" data-tab="backup">Backup</button>
     <button class="tab-button" data-tab="logs">Logs</button>
@@ -142,7 +144,7 @@
           <div>
             <div class="formgrid"><div class="field full"><label for="vcfdt-depot-version">Install from the depot</label>
               <select id="vcfdt-depot-version"><option value="">Checking the depot</option></select></div></div>
-            <p class="help">Tool archives the sync already mirrored under PROD/COMP/VCFDT install without a browser upload. The depot stays read-only.</p>
+            <p class="help">Tool archives the sync already mirrored under PROD/COMP/VCFDT install without a browser upload. Installation leaves the depot archive unchanged.</p>
             <div class="row"><button id="vcfdt-depot-install">Install from depot</button><button id="vcfdt-depot-refresh" class="secondary">Refresh</button><span id="vcfdt-depot-flash" class="muted"></span></div>
           </div>
           <div>
@@ -228,6 +230,53 @@
     <section class="panel">
       <h2>Available versions <span id="version-meta" class="muted"></span></h2>
       <div class="tablewrap"><table><thead><tr><th>Component</th><th>Version</th><th>Type</th><th>Date</th><th>Size</th><th>Depot</th></tr></thead><tbody id="versions"><tr><td colspan="6" class="muted">Check versions after registration.</td></tr></tbody></table></div>
+    </section>
+  </div>
+
+  <div class="tabpanel" id="tab-depot" hidden>
+    <section class="panel">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <h2>Depot ownership</h2>
+          <p class="muted">Top-level trees under PROD/COMP are inventoried independently of the depot volume.</p>
+        </div>
+        <button id="depot-refresh" class="secondary">Refresh inventory</button>
+      </div>
+      <div class="tablewrap" style="margin-top:12px"><table>
+        <thead><tr><th>Tree</th><th>Ownership</th><th>Size</th><th>Files</th><th>Library items</th><th>Protection</th></tr></thead>
+        <tbody id="depot-ownership"><tr><td colspan="6" class="muted">Open this tab to inventory the depot.</td></tr></tbody>
+      </table></div>
+      <p id="depot-ownership-flash" class="muted"></p>
+      <p class="help">Content-library trees, identified by items.json plus lib.json, are recorded as operator-provided and protected on first sight. Unprotect a tree only when a product action should be allowed to change it.</p>
+    </section>
+    <section class="panel">
+      <h2>Depot explorer</h2>
+      <p class="muted">Browse, upload, and explicitly delete content below /depot. Existing entries are never overwritten by an upload.</p>
+      <div class="row" style="margin-top:12px">
+        <button id="depot-up" class="secondary">Up one level</button>
+        <div class="field" style="flex:1 1 320px"><label for="depot-path">Current path</label><input id="depot-path" value="" placeholder="Depot root"></div>
+        <button id="depot-browse" class="secondary">Browse path</button>
+      </div>
+      <div id="patch-store-notice" class="notice" hidden>Content placed under /umds-patch-store is downloadable without credentials.</div>
+      <div class="tablewrap" style="margin-top:12px"><table>
+        <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Files</th><th>Protection</th><th>Action</th></tr></thead>
+        <tbody id="depot-tree"><tr><td colspan="6" class="muted">Open this tab to browse the depot.</td></tr></tbody>
+      </table></div>
+      <p id="depot-tree-flash" class="muted"></p>
+      <div class="setup-card">
+        <h3>Upload a file or folder archive</h3>
+        <div class="formgrid">
+          <div class="field"><label for="depot-upload">File or .tar.gz, .tgz, or .zip archive</label><input id="depot-upload" type="file"></div>
+          <div class="field"><label>Folder archive handling</label><label class="choice"><input id="depot-extract" type="checkbox"> Extract archive into the current path</label></div>
+        </div>
+        <div class="row" style="margin-top:12px"><button id="depot-upload-button">Upload</button><span id="depot-upload-flash" class="muted"></span></div>
+      </div>
+      <div class="setup-card" id="depot-delete-card" hidden>
+        <h3>Confirm delete</h3>
+        <p id="depot-delete-summary"></p>
+        <div class="field"><label for="depot-delete-confirm">Type the full relative path shown above</label><input id="depot-delete-confirm" autocomplete="off"></div>
+        <div class="row" style="margin-top:12px"><button id="depot-delete-button" class="danger">Delete permanently</button><button id="depot-delete-cancel" class="secondary">Cancel</button><span id="depot-delete-flash" class="error"></span></div>
+      </div>
     </section>
   </div>
 
@@ -365,8 +414,100 @@ function showTab(name) {
 }
 
 document.querySelectorAll('.tab-button').forEach(button => {
-  button.onclick = () => showTab(button.dataset.tab);
+  button.onclick = () => {
+    showTab(button.dataset.tab);
+    if(button.dataset.tab === 'depot') { loadDepotOwnership(); loadDepotTree(currentDepotPath); }
+  };
 });
+
+async function loadDepotOwnership(report=false) {
+  const body=$('depot-ownership'); const flash=$('depot-ownership-flash');
+  try {
+    const result=await api('api/depot/ownership'); const rows=result.trees||[];
+    body.innerHTML=rows.length ? rows.map(tree=>`<tr>
+      <td><strong>${esc(tree.name)}</strong>${tree.contentLibrary ? '<br><span class="help">content library</span>' : ''}</td>
+      <td>${esc(tree.ownership)}</td><td>${bytes(tree.sizeBytes)}</td><td>${tree.fileCount}</td>
+      <td>${tree.itemCount === null ? 'not applicable' : tree.itemCount}</td>
+      <td><label class="choice"><input type="checkbox" class="depot-protect" data-name="${esc(tree.name)}" ${tree.protected ? 'checked' : ''}> Protected</label></td>
+    </tr>`).join('') : '<tr><td colspan="6" class="muted">No top-level PROD/COMP trees found.</td></tr>';
+    if(report) flash.textContent=`${rows.length} tree${rows.length === 1 ? '' : 's'} inventoried`;
+  } catch(error) { body.innerHTML='<tr><td colspan="6" class="error">Inventory unavailable</td></tr>'; flash.textContent=error.message; }
+}
+
+$('depot-refresh').onclick=()=>loadDepotOwnership(true);
+$('depot-ownership').onchange=async event=>{
+  const control=event.target; if(!control.classList.contains('depot-protect')) return;
+  control.disabled=true; $('depot-ownership-flash').textContent=control.checked ? 'Protecting tree' : 'Removing protection';
+  try {
+    await api('api/depot/ownership',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:control.dataset.name,protected:control.checked})});
+    $('depot-ownership-flash').textContent=control.checked ? `${control.dataset.name} is protected` : `${control.dataset.name} is unprotected`;
+  } catch(error) { control.checked=!control.checked; $('depot-ownership-flash').textContent=error.message; }
+  finally { control.disabled=false; }
+};
+
+let currentDepotPath='';
+let currentDepotParent='';
+let deleteSelection=null;
+
+function showPatchStoreNotice(path) {
+  const normalized=String(path||'').replace(/^\/+|\/+$/g,'');
+  $('patch-store-notice').hidden=!(normalized==='umds-patch-store'||normalized.startsWith('umds-patch-store/'));
+}
+
+async function loadDepotTree(path='') {
+  const body=$('depot-tree'); const flash=$('depot-tree-flash');
+  try {
+    const query=new URLSearchParams({path}); const result=await api(`api/depot/tree?${query}`);
+    currentDepotPath=result.path||''; currentDepotParent=result.parent||''; $('depot-path').value=currentDepotPath;
+    showPatchStoreNotice(currentDepotPath);
+    const rows=result.entries||[];
+    body.innerHTML=rows.length ? rows.map(entry=>`<tr>
+      <td>${entry.type==='directory' ? `<button class="ghost depot-open" data-path="${esc(entry.path)}">${esc(entry.name)}</button>` : esc(entry.name)}</td>
+      <td>${esc(entry.type)}</td><td>${bytes(entry.sizeBytes)}</td><td>${entry.fileCount}</td>
+      <td>${entry.protected ? `<span class="pill bad">protected: ${esc((entry.protectedTrees||[]).join(', '))}</span>` : 'not protected'}</td>
+      <td><button class="danger depot-delete" data-path="${esc(entry.path)}" data-size="${entry.sizeBytes}" data-files="${entry.fileCount}" ${entry.protected||entry.type==='symlink' ? 'disabled' : ''}>Delete</button></td>
+    </tr>`).join('') : '<tr><td colspan="6" class="muted">This directory is empty.</td></tr>';
+    flash.textContent=`Viewing /depot${currentDepotPath ? `/${currentDepotPath}` : ''}`;
+  } catch(error) { flash.textContent=error.message; }
+}
+
+$('depot-browse').onclick=()=>loadDepotTree($('depot-path').value);
+$('depot-up').onclick=()=>loadDepotTree(currentDepotParent);
+$('depot-path').oninput=()=>showPatchStoreNotice($('depot-path').value);
+$('depot-tree').onclick=event=>{
+  const open=event.target.closest('.depot-open');
+  if(open){ loadDepotTree(open.dataset.path); return; }
+  const remove=event.target.closest('.depot-delete');
+  if(!remove) return;
+  deleteSelection={path:remove.dataset.path,sizeBytes:Number(remove.dataset.size),fileCount:Number(remove.dataset.files)};
+  $('depot-delete-summary').textContent=`Delete /depot/${deleteSelection.path}, ${bytes(deleteSelection.sizeBytes)} across ${deleteSelection.fileCount} file${deleteSelection.fileCount===1?'':'s'}.`;
+  $('depot-delete-confirm').value=''; $('depot-delete-flash').textContent=''; $('depot-delete-card').hidden=false;
+  $('depot-delete-confirm').focus();
+};
+
+$('depot-delete-cancel').onclick=()=>{ deleteSelection=null; $('depot-delete-card').hidden=true; };
+$('depot-delete-button').onclick=async()=>{
+  if(!deleteSelection) return;
+  const button=$('depot-delete-button'); button.disabled=true; $('depot-delete-flash').textContent='Deleting';
+  try {
+    const result=await api('api/depot/entry',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:deleteSelection.path,confirm:$('depot-delete-confirm').value})});
+    $('depot-tree-flash').textContent=`Deleted ${result.path}, ${bytes(result.sizeBytes)} across ${result.fileCount} file${result.fileCount===1?'':'s'}`;
+    deleteSelection=null; $('depot-delete-card').hidden=true; await loadDepotOwnership(); await loadDepotTree(currentDepotPath);
+  } catch(error) { $('depot-delete-flash').textContent=error.message; }
+  finally { button.disabled=false; }
+};
+
+$('depot-upload-button').onclick=async()=>{
+  const upload=$('depot-upload').files[0]; if(!upload){$('depot-upload-flash').textContent='Choose a file or archive';return;}
+  const button=$('depot-upload-button'); button.disabled=true; $('depot-upload-flash').textContent='Uploading';
+  const payload=new FormData(); payload.append('upload',upload); payload.append('path',currentDepotPath); payload.append('extract',$('depot-extract').checked ? 'true' : 'false');
+  try {
+    const result=await api('api/depot/upload',{method:'POST',body:payload});
+    $('depot-upload').value=''; $('depot-upload-flash').textContent=result.notice||'Upload complete';
+    await loadDepotOwnership(); await loadDepotTree(currentDepotPath);
+  } catch(error) { $('depot-upload-flash').textContent=error.message; }
+  finally { button.disabled=false; }
+};
 
 function saveMessage(result) {
   const pending=result.appliesToNextRun ? (result.pendingFields||[]) : [];

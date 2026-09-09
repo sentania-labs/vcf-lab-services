@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
@@ -140,6 +141,9 @@ class UiApiTests(unittest.TestCase):
     def post(self, path, **kwargs):
         return self.client.post(path, base_url="https://localhost", **kwargs)
 
+    def delete(self, path, **kwargs):
+        return self.client.delete(path, base_url="https://localhost", **kwargs)
+
     def claim(self, password="a strong test password"):
         return self.post("/api/claim", json={"username": "vcf", "password": password})
 
@@ -152,6 +156,16 @@ class UiApiTests(unittest.TestCase):
         bus = mock.MagicMock()
         bus.get.side_effect = lambda key: (values or {}).get(key)
         return bus
+
+    def seed_content_library(self, name="SUPERVISOR"):
+        tree = self.depot / "PROD" / "COMP" / name
+        tree.mkdir(parents=True)
+        (tree / "lib.json").write_text(json.dumps({"name": name}))
+        (tree / "items.json").write_text(
+            json.dumps({"items": [{"id": "one"}, {"id": "two"}]})
+        )
+        (tree / "payload.bin").write_bytes(b"content")
+        return tree
 
     @staticmethod
     def tar_tool(
@@ -1370,7 +1384,14 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         panels, controls = parse_console_tabs(page.get_data(as_text=True))
         self.assertEqual(
             panels,
-            ["tab-setup", "tab-sync", "tab-settings", "tab-backup", "tab-logs"],
+            [
+                "tab-setup",
+                "tab-sync",
+                "tab-depot",
+                "tab-settings",
+                "tab-backup",
+                "tab-logs",
+            ],
         )
         expected = {
             "tab-setup": {
@@ -1392,6 +1413,18 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "save-password",
             },
             "tab-sync": {"sync-btn", "refresh-remote"},
+            "tab-depot": {
+                "depot-refresh",
+                "depot-up",
+                "depot-path",
+                "depot-browse",
+                "depot-upload",
+                "depot-extract",
+                "depot-upload-button",
+                "depot-delete-confirm",
+                "depot-delete-button",
+                "depot-delete-cancel",
+            },
             "tab-settings": {
                 "vcf-version",
                 "sku",
@@ -1435,6 +1468,539 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn('id="vcfdt-previous"', body)
         self.assertIn('id="vcfdt-produced"', body)
         self.assertIn('id="migration-result"', body)
+
+    def test_depot_ownership_errors_refuse_reads_and_mutations(self):
+        self.claim()
+        tree = self.depot / "PROD" / "COMP" / "ESX_HOST"
+        tree.mkdir(parents=True)
+        sentinel = tree / "operator.bin"
+        sentinel.write_bytes(b"operator")
+        manifest = self.module.DEPOT_OWNERSHIP_FILE
+        valid = {"version": 1, "trees": {
+            "ESX_HOST": {"ownership": "operator-provided", "protected": True}
+        }}
+        invalid_documents = [
+            [], {}, {"version": 2, "trees": {}},
+            {"version": True, "trees": {}}, {"version": 1, "trees": []},
+        ]
+        for entry in (
+            None, {}, {"ownership": "invalid", "protected": True},
+            {"ownership": [], "protected": True},
+            {"ownership": "operator-provided"},
+            {"ownership": "operator-provided", "protected": "false"},
+            {"ownership": "operator-provided", "protected": 0},
+        ):
+            invalid_documents.append({"version": 1, "trees": {"ESX_HOST": entry}})
+        invalid_documents.append({"version": 1, "trees": {
+            "ESX_HOST/child": valid["trees"]["ESX_HOST"]
+        }})
+        cases = [("unreadable", json.dumps(valid).encode()),
+                 ("invalid-json", b"{broken"), ("empty", b""),
+                 ("invalid-encoding", b"\xff")]
+        cases += [(f"schema-{index}", json.dumps(document).encode())
+                  for index, document in enumerate(invalid_documents)]
+        original_read = Path.read_text
+        for failure, stored in cases:
+            with self.subTest(failure=failure):
+                manifest.write_bytes(stored)
+
+                def read_text(path, *args, **kwargs):
+                    if failure == "unreadable" and path == manifest:
+                        raise PermissionError("ownership state is unreadable")
+                    return original_read(path, *args, **kwargs)
+
+                operations = (
+                    lambda: self.get("/api/depot/ownership"),
+                    lambda: self.get("/api/depot/tree?path=PROD/COMP/ESX_HOST"),
+                    lambda: self.post("/api/depot/ownership", json={
+                        "name": "ESX_HOST", "protected": False,
+                    }),
+                    lambda: self.post("/api/depot/upload", data={
+                        "path": "PROD/COMP/ESX_HOST",
+                        "upload": (io.BytesIO(b"new"), "new.bin"),
+                    }, content_type="multipart/form-data"),
+                    lambda: self.delete("/api/depot/entry", json={
+                        "path": "PROD/COMP/ESX_HOST",
+                        "confirm": "PROD/COMP/ESX_HOST",
+                    }),
+                )
+                with mock.patch.object(Path, "read_text", read_text):
+                    for operation in operations:
+                        response = operation()
+                        self.assertIn(response.status_code, (400, 500), response.get_json())
+                        self.assertIn("ownership", response.get_json()["error"])
+                        self.assertEqual(manifest.read_bytes(), stored)
+                        self.assertEqual(sentinel.read_bytes(), b"operator")
+                        self.assertFalse((tree / "new.bin").exists())
+                        self.assertEqual(list(self.depot.glob(".vcf-services-upload-*")), [])
+
+    def test_depot_dangling_ownership_manifest_is_not_initialized(self):
+        self.claim()
+        self.seed_content_library()
+        manifest = self.module.DEPOT_OWNERSHIP_FILE
+        missing = self.state_dir / "missing-ownership.json"
+        manifest.symlink_to(missing)
+
+        response = self.get("/api/depot/ownership")
+
+        self.assertEqual(response.status_code, 500, response.get_json())
+        self.assertTrue(manifest.is_symlink())
+        self.assertFalse(missing.exists())
+
+    def test_content_library_is_inventoried_and_protected_by_default(self):
+        self.claim()
+        tree = self.seed_content_library()
+
+        response = self.get("/api/depot/ownership")
+
+        self.assertEqual(response.status_code, 200)
+        row = response.get_json()["trees"][0]
+        self.assertEqual(row["name"], "SUPERVISOR")
+        self.assertEqual(row["path"], "PROD/COMP/SUPERVISOR")
+        self.assertEqual(row["ownership"], "operator-provided")
+        self.assertTrue(row["protected"])
+        self.assertTrue(row["contentLibrary"])
+        self.assertEqual(row["itemCount"], 2)
+        self.assertEqual(row["fileCount"], 3)
+        self.assertEqual(
+            row["sizeBytes"], sum(path.stat().st_size for path in tree.iterdir())
+        )
+        manifest = json.loads(
+            (self.state_dir / "depot-ownership.json").read_text()
+        )
+        self.assertEqual(
+            manifest["trees"]["SUPERVISOR"],
+            {"ownership": "operator-provided", "protected": True},
+        )
+
+        unprotected = self.post(
+            "/api/depot/ownership",
+            json={"name": "SUPERVISOR", "protected": False},
+        )
+        self.assertEqual(unprotected.status_code, 200)
+        self.assertFalse(unprotected.get_json()["protected"])
+        refreshed = self.get("/api/depot/ownership").get_json()["trees"][0]
+        self.assertEqual(refreshed["ownership"], "operator-provided")
+        self.assertFalse(refreshed["protected"])
+
+    def test_depot_tree_refuses_traversal_and_symlink_escape(self):
+        self.claim()
+        (self.depot / "safe").mkdir()
+        (self.depot / "safe" / "file.bin").write_bytes(b"safe")
+        outside = self.depot.parent / "outside"
+        outside.mkdir()
+        (self.depot / "escape").symlink_to(outside)
+
+        listing = self.get("/api/depot/tree?path=safe")
+
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(listing.get_json()["entries"][0]["path"], "safe/file.bin")
+        for unsafe in ("../outside", "/etc", "escape", "safe/../../outside"):
+            response = self.get(
+                "/api/depot/tree", query_string={"path": unsafe}
+            )
+            self.assertEqual(response.status_code, 400, unsafe)
+
+        for unsafe in ("../outside", "/etc", "escape"):
+            response = self.post(
+                "/api/depot/upload",
+                data={
+                    "path": unsafe,
+                    "upload": (io.BytesIO(b"blocked"), "blocked.bin"),
+                },
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(response.status_code, 400, unsafe)
+        delete_link = self.delete(
+            "/api/depot/entry", json={"path": "escape", "confirm": "escape"}
+        )
+        self.assertEqual(delete_link.status_code, 400)
+        self.assertTrue(outside.exists())
+
+    def test_depot_contained_patch_store_link_uploads_and_protection(self):
+        self.claim()
+        backing = "PROD/COMP/ESX_HOST/patch-store"
+        patch_store = self.depot / backing
+        patch_store.mkdir(parents=True)
+        (self.depot / "umds-patch-store").symlink_to(backing)
+        (self.depot / "patch-store-private").mkdir()
+        (self.depot / "component-alias").symlink_to("PROD/COMP")
+        for index, destination in enumerate(("umds-patch-store", backing)):
+            with self.subTest(destination=destination):
+                listing = self.get(
+                    "/api/depot/tree", query_string={"path": destination}
+                )
+                self.assertEqual(listing.status_code, 200)
+                self.assertTrue(listing.get_json()["publicDownload"])
+                for extract in (False, True):
+                    name = f"uploaded-{index}-{extract}.txt"
+                    payload = io.BytesIO(b"content")
+                    filename = name
+                    if extract:
+                        payload = io.BytesIO()
+                        with zipfile.ZipFile(payload, "w") as archive:
+                            archive.writestr(name, b"content")
+                        payload.seek(0)
+                        filename = "content.zip"
+                    response = self.post(
+                        "/api/depot/upload",
+                        data={"path": destination, "extract": str(extract).lower(),
+                              "upload": (payload, filename)},
+                        content_type="multipart/form-data",
+                    )
+                    self.assertEqual(response.status_code, 201, response.get_json())
+                    self.assertTrue(response.get_json()["publicDownload"])
+                    self.assertIn("downloadable without credentials", response.get_json()["notice"])
+                    self.assertEqual((patch_store / name).read_bytes(), b"content")
+        root = self.get("/api/depot/tree").get_json()
+        entry = next(row for row in root["entries"] if row["name"] == "umds-patch-store")
+        self.assertEqual(entry["type"], "directory")
+        self.assertEqual((entry["sizeBytes"], entry["fileCount"]), (28, 4))
+        private = self.post(
+            "/api/depot/upload",
+            data={"path": "patch-store-private", "upload": (io.BytesIO(b"private"), "file")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(private.status_code, 201)
+        self.assertFalse(private.get_json()["publicDownload"])
+        protected = self.post(
+            "/api/depot/ownership", json={"name": "ESX_HOST", "protected": True}
+        )
+        self.assertEqual(protected.status_code, 200)
+        for destination in ("umds-patch-store", backing):
+            response = self.post(
+                "/api/depot/upload",
+                data={"path": destination, "upload": (io.BytesIO(b"blocked"), "blocked")},
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("unprotect PROD/COMP/ESX_HOST", response.get_json()["error"])
+        for relative in ("umds-patch-store/uploaded-0-False.txt", "component-alias/ESX_HOST"):
+            response = self.delete(
+                "/api/depot/entry", json={"path": relative, "confirm": relative}
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("unprotect PROD/COMP/ESX_HOST", response.get_json()["error"])
+        self.assertFalse((patch_store / "blocked").exists())
+        self.assertEqual((patch_store / "uploaded-0-False.txt").read_bytes(), b"content")
+
+    def test_depot_public_notice_for_link_and_directory_restores(self):
+        self.claim()
+        backing = "PROD/COMP/ESX_HOST/patch-store"
+        patch_store = self.depot / backing
+        patch_store.mkdir(parents=True)
+        public_link = self.depot / "umds-patch-store"
+        public_link.symlink_to(backing)
+        shapes = (
+            (None, "umds-patch-store", "restored.bin"),
+            (backing, "PROD/COMP/ESX_HOST", "patch-store/restored.bin"),
+            ("PROD/COMP/ESX_HOST", "PROD/COMP", "ESX_HOST/patch-store/restored.bin"),
+        )
+        for removed, destination, member in shapes:
+            with self.subTest(destination=destination):
+                if removed:
+                    deleted = self.delete(
+                        "/api/depot/entry", json={"path": removed, "confirm": removed}
+                    )
+                    self.assertEqual(deleted.status_code, 200, deleted.get_json())
+                    self.assertTrue(public_link.is_symlink())
+                    self.assertFalse(public_link.exists())
+                    payload = io.BytesIO()
+                    with zipfile.ZipFile(payload, "w") as package:
+                        package.writestr(member, b"restored content")
+                    payload.seek(0)
+                    filename = "restore.zip"
+                else:
+                    payload = io.BytesIO(b"restored content")
+                    filename = member
+
+                response = self.post(
+                    "/api/depot/upload",
+                    data={
+                        "path": destination,
+                        "extract": "true" if removed else "false",
+                        "upload": (payload, filename),
+                    },
+                    content_type="multipart/form-data",
+                )
+
+                self.assertEqual(response.status_code, 201, response.get_json())
+                self.assertTrue(response.get_json()["publicDownload"])
+                self.assertIn(
+                    "downloadable without credentials", response.get_json()["notice"]
+                )
+                self.assertEqual(
+                    (public_link / "restored.bin").read_bytes(), b"restored content"
+                )
+                self.assertEqual(public_link.resolve(), patch_store)
+
+    def test_depot_upload_extracts_folder_archive_and_reports_patch_store_notice(self):
+        self.claim()
+        patch_store = self.depot / "umds-patch-store"
+        patch_store.mkdir()
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("operator-folder/one.txt", b"one")
+            package.writestr("operator-folder/two.txt", b"two")
+        archive.seek(0)
+
+        response = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "umds-patch-store",
+                "extract": "true",
+                "upload": (archive, "operator-folder.zip"),
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        result = response.get_json()
+        self.assertTrue(result["publicDownload"])
+        self.assertIn("without credentials", result["notice"])
+        self.assertEqual(
+            (patch_store / "operator-folder" / "one.txt").read_text(), "one"
+        )
+        self.assertEqual(
+            (patch_store / "operator-folder" / "two.txt").read_text(), "two"
+        )
+
+        page = self.get("/").get_data(as_text=True)
+        self.assertIn('id="patch-store-notice"', page)
+        self.assertIn("downloadable without credentials", page)
+
+    def test_depot_upload_reuses_archive_path_checks_and_refuses_tool_archives(self):
+        self.claim()
+        unsafe = io.BytesIO()
+        with zipfile.ZipFile(unsafe, "w") as package:
+            package.writestr("../outside.txt", b"escape")
+        unsafe.seek(0)
+        response = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "",
+                "extract": "true",
+                "upload": (unsafe, "unsafe.zip"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse((self.depot.parent / "outside.txt").exists())
+
+        licensed = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "",
+                "extract": "false",
+                "upload": (io.BytesIO(b"licensed"), "vcf-download-tool-9.1.tar.gz"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(licensed.status_code, 400)
+        self.assertIn("Setup tab", licensed.get_json()["error"])
+
+    def test_depot_paths_preserve_valid_leading_and_trailing_whitespace(self):
+        self.claim()
+        (self.depot / "umds-patch-store").mkdir()
+
+        uploaded = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "",
+                "upload": (io.BytesIO(b"plain"), " file .bin "),
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(uploaded.status_code, 201, uploaded.get_json())
+        self.assertEqual((self.depot / " file .bin ").read_bytes(), b"plain")
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr(" folder / item .bin ", b"archive")
+        archive.seek(0)
+        extracted = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "",
+                "extract": "true",
+                "upload": (archive, "whitespace.zip"),
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(extracted.status_code, 201, extracted.get_json())
+        self.assertEqual(
+            (self.depot / " folder " / " item .bin ").read_bytes(), b"archive"
+        )
+        names = {
+            entry["name"]
+            for entry in self.get("/api/depot/tree").get_json()["entries"]
+        }
+        self.assertIn(" file .bin ", names)
+        self.assertIn(" folder ", names)
+        deleted = self.delete(
+            "/api/depot/entry",
+            json={"path": " file .bin ", "confirm": " file .bin "},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.get_json())
+
+    def test_depot_archive_rolls_back_when_ownership_cannot_be_recorded(self):
+        self.claim()
+        component_root = self.depot / "PROD" / "COMP"
+        component_root.mkdir(parents=True)
+
+        def operator_archive():
+            payload = io.BytesIO()
+            with zipfile.ZipFile(payload, "w") as package:
+                package.writestr("OPERATOR/lib.json", "{}")
+                package.writestr("OPERATOR/items.json", "[]")
+            payload.seek(0)
+            return payload
+
+        with mock.patch.object(
+            self.module,
+            "_record_operator_trees",
+            side_effect=OSError("state volume is full"),
+        ):
+            failed = self.post(
+                "/api/depot/upload",
+                data={
+                    "path": "PROD/COMP",
+                    "extract": "true",
+                    "upload": (operator_archive(), "operator.zip"),
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(failed.status_code, 500, failed.get_json())
+        self.assertIn("state volume is full", failed.get_json()["error"])
+        self.assertFalse((component_root / "OPERATOR").exists())
+
+        retried = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "PROD/COMP",
+                "extract": "true",
+                "upload": (operator_archive(), "operator.zip"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(retried.status_code, 201, retried.get_json())
+        manifest = json.loads(
+            (self.state_dir / "depot-ownership.json").read_text()
+        )
+        self.assertEqual(
+            manifest["trees"]["OPERATOR"],
+            {"ownership": "operator-provided", "protected": True},
+        )
+
+    def test_depot_delete_requires_named_confirmation_and_reports_impact(self):
+        self.claim()
+        tree = self.depot / "remove-me"
+        tree.mkdir()
+        (tree / "one.bin").write_bytes(b"123")
+        (tree / "two.bin").write_bytes(b"4567")
+
+        listing = self.get("/api/depot/tree").get_json()["entries"]
+        entry = next(row for row in listing if row["name"] == "remove-me")
+        self.assertEqual(entry["sizeBytes"], 7)
+        self.assertEqual(entry["fileCount"], 2)
+
+        refused = self.delete(
+            "/api/depot/entry", json={"path": "remove-me", "confirm": "wrong"}
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertTrue(tree.exists())
+
+        deleted = self.delete(
+            "/api/depot/entry",
+            json={"path": "remove-me", "confirm": "remove-me"},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()["sizeBytes"], 7)
+        self.assertEqual(deleted.get_json()["fileCount"], 2)
+        self.assertFalse(tree.exists())
+
+    def test_protected_tree_must_be_unprotected_before_delete(self):
+        self.claim()
+        tree = self.seed_content_library("VKR")
+        self.get("/api/depot/ownership")
+
+        refused = self.delete(
+            "/api/depot/entry",
+            json={"path": "PROD/COMP/VKR", "confirm": "PROD/COMP/VKR"},
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("unprotect", refused.get_json()["error"])
+        self.assertTrue(tree.exists())
+
+        upload = self.post(
+            "/api/depot/upload",
+            data={
+                "path": "PROD/COMP/VKR",
+                "upload": (io.BytesIO(b"blocked"), "blocked.bin"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(upload.status_code, 400)
+        self.assertIn("unprotect", upload.get_json()["error"])
+        self.assertFalse((tree / "blocked.bin").exists())
+
+        self.post(
+            "/api/depot/ownership", json={"name": "VKR", "protected": False}
+        )
+        deleted = self.delete(
+            "/api/depot/entry",
+            json={"path": "PROD/COMP/VKR", "confirm": "PROD/COMP/VKR"},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(tree.exists())
+
+    def test_depot_mutations_refuse_sync_and_tool_update_locks(self):
+        self.claim()
+        victim = self.depot / "victim.bin"
+        victim.write_bytes(b"victim")
+        sync_lock_path = self.state_dir / "sync.lock"
+        with sync_lock_path.open("a+") as sync_lock:
+            fcntl.flock(sync_lock, fcntl.LOCK_EX)
+            ownership = self.get("/api/depot/ownership")
+            tree = self.get("/api/depot/tree")
+            upload = self.post(
+                "/api/depot/upload",
+                data={
+                    "path": "",
+                    "upload": (io.BytesIO(b"new"), "new.bin"),
+                },
+                content_type="multipart/form-data",
+            )
+            delete = self.delete(
+                "/api/depot/entry",
+                json={"path": "victim.bin", "confirm": "victim.bin"},
+            )
+            self.assertEqual(upload.status_code, 409)
+            self.assertEqual(delete.status_code, 409)
+            self.assertEqual(ownership.status_code, 409)
+            self.assertEqual(tree.status_code, 409)
+            self.assertIn("running sync", upload.get_json()["error"])
+            self.assertIn("running sync", ownership.get_json()["error"])
+            self.assertTrue(victim.exists())
+            fcntl.flock(sync_lock, fcntl.LOCK_UN)
+
+        self.tool_store.mkdir(exist_ok=True)
+        with (self.tool_store / ".update.lock").open("a+") as tool_lock:
+            fcntl.flock(tool_lock, fcntl.LOCK_EX)
+            refused = self.post(
+                "/api/depot/upload",
+                data={
+                    "path": "",
+                    "upload": (io.BytesIO(b"new"), "new.bin"),
+                },
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(refused.status_code, 409)
+            self.assertIn("tool update", refused.get_json()["error"])
+            fcntl.flock(tool_lock, fcntl.LOCK_UN)
 
     def test_concurrent_settings_writes_do_not_drop_updates(self):
         keys = [f"CONCURRENT_TEST_KEY_{index}" for index in range(8)]

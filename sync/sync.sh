@@ -25,6 +25,8 @@ load_settings() {
 : "${REDIS_HOST:=}"
 : "${REDIS_PORT:=6379}"
 : "${REDIS_PASSWORD_FILE:=/etc/vcf-services/secrets/redis-password}"
+: "${DEPOT_OWNERSHIP_FILE:=$STATE_DIR/depot-ownership.json}"
+: "${DEPOT_OWNERSHIP_LOCK:=$STATE_DIR/depot-ownership.lock}"
 
 # Defaults for the keys the console owns, applied after settings.env is read so
 # a missing or blank value still lands on a working default.
@@ -47,6 +49,63 @@ mkdir -p "$STATE_DIR"
 
 now() { date -u +%FT%TZ; }
 log() { echo "[sync $(now)] $*"; }
+
+protected_trees_for_target() {
+	local label="$1"
+	[ -e "$DEPOT_OWNERSHIP_FILE" ] || [ -L "$DEPOT_OWNERSHIP_FILE" ] || return 0
+	jq -er --arg label "$label" 'if (.trees | type) != "object" then error("invalid ownership manifest") else . end | [.trees | to_entries[] |
+		select(.value.protected == true) |
+		select(if $label == "esx-image-library" then .key == "ESX_HOST"
+		       elif $label == "vkr-content-library" then .key == "VKR"
+		       else true end) | .key] | join("\n")' "$DEPOT_OWNERSHIP_FILE"
+}
+
+record_tree_if_absent() {
+	local name="$1"
+	local ownership="$2"
+	local protected="$3"
+	local tmp
+	(
+		flock -x 5 || exit 1
+		tmp="$(mktemp "$STATE_DIR/depot-ownership.json.XXXXXX")" || exit 1
+		trap 'rm -f "$tmp"' EXIT
+		if [ -e "$DEPOT_OWNERSHIP_FILE" ] || [ -L "$DEPOT_OWNERSHIP_FILE" ]; then
+			jq -e --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
+				'if (.trees | type) != "object" then error("invalid ownership manifest") else . end |
+				 .version = 1 |
+				 if .trees[$name] then .
+				 else .trees[$name] = {ownership:$ownership, protected:$protected}
+				 end' "$DEPOT_OWNERSHIP_FILE" > "$tmp" || exit 1
+		else
+			jq -en --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
+				'{version:1, trees:{($name):{ownership:$ownership, protected:$protected}}}' \
+				> "$tmp" || exit 1
+		fi
+		mv -- "$tmp" "$DEPOT_OWNERSHIP_FILE" || exit 1
+	) 5>"$DEPOT_OWNERSHIP_LOCK" || {
+		log "ERROR: could not record ownership for PROD/COMP/$name; refusing sync"
+		return 1
+	}
+}
+
+record_product_tree() {
+	record_tree_if_absent "$1" product-managed false
+}
+
+declare -A known_depot_trees=()
+comp_root="$DEPOT_DIR/PROD/COMP"
+
+record_new_product_trees() {
+	local tree name
+	[ -d "$comp_root" ] || return 0
+	while IFS= read -r -d '' tree; do
+		name="$(basename "$tree")"
+		if [ -z "${known_depot_trees[$name]+present}" ]; then
+			record_product_tree "$name" || return 1
+			known_depot_trees["$name"]=1
+		fi
+	done < <(find "$comp_root" -mindepth 1 -maxdepth 1 -type d -print0)
+}
 
 redis_cmd() {
 	[ -n "$REDIS_HOST" ] || return 1
@@ -99,6 +158,18 @@ exec 9>"$STATE_DIR/sync.lock"
 if ! flock -n 9; then
 	log "another sync is already running, skipping this trigger"
 	exit 0
+fi
+
+if [ -d "$comp_root" ]; then
+	while IFS= read -r -d '' tree; do
+		name="$(basename "$tree")"
+		if [ -f "$tree/items.json" ] && [ -f "$tree/lib.json" ]; then
+			record_tree_if_absent "$name" operator-provided true || exit 1
+		else
+			record_tree_if_absent "$name" unknown false || exit 1
+		fi
+		known_depot_trees["$name"]=1
+	done < <(find "$comp_root" -mindepth 1 -maxdepth 1 -type d -print0)
 fi
 
 # Take the settings snapshot lock before reading settings.env and hold it for
@@ -222,6 +293,19 @@ run_target() {
 	local label="$1"
 	shift
 	log ">>> $label"
+	local protected name
+	if ! protected="$(protected_trees_for_target "$label")"; then
+		log "ERROR: could not read depot ownership; refusing sync"
+		exit 1
+	fi
+	if [ -n "$protected" ]; then
+		while IFS= read -r name; do
+			log "PROD/COMP/$name is protected, skipping the target without changing it"
+		done <<< "$protected"
+		last_status="SKIPPED:PROTECTED"
+		log "<<< $label $last_status"
+		return
+	fi
 	if "$@"; then
 		log "<<< $label OK"
 		last_status=OK
@@ -271,6 +355,7 @@ for target in $SYNC_TARGETS; do
 			log "unknown sync target '$target', continuing"
 			;;
 	esac
+	record_new_product_trees || exit 1
 	if [ "$tool_backed_target" = true ] && [ "$last_status" = OK ]; then
 		successful_tool_sync=true
 	fi

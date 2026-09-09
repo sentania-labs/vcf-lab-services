@@ -61,7 +61,7 @@ running. A mismatch shows the adopted ID and the ID returned by the tool (or
 reports that no recognizable ID was returned). Activation-code saving and setup
 completion remain blocked until the adopted ID is confirmed.
 
-The console is organised into Setup, Sync, Settings, Backup, and Logs tabs.
+The console is organised into Setup, Sync, Depot, Settings, Backup, and Logs tabs.
 Every operator setting in this prototype remains editable in the console. The
 settings file is the storage contract inside the `vcf-services-config` volume,
 not an operator editing interface.
@@ -102,8 +102,9 @@ after rollback; a failed sync keeps the retained release.
 
 The product consumes two fixed mounted paths:
 
-- `/depot`, read-write in the sync service and read-only in the web and console
-  services.
+- `/depot`, read-write in the sync service and console, and read-only in the
+  web service. The console takes the existing sync and tool locks before an
+  upload or delete, so it does not race either writer.
 - `/mnt/backup`, read-write only in the SFTP service and read-only in the
   console.
 
@@ -128,6 +129,61 @@ tool rewrites its telemetry flag during every sync. Tool installation and sync
 share an update lock, so they cannot modify the volume at the same time.
 Restore it from the Setup tab by installing a tool archive already mirrored in
 the depot, or by uploading the licensed archive again.
+
+### Operator-provided depot content
+
+Place operator-provided content as a top-level tree under `/depot/PROD/COMP`,
+for example `/depot/PROD/COMP/SUPERVISOR`. The Depot tab inventories every tree
+at that level. A tree containing both `items.json` and `lib.json` is detected as
+a vSphere content library, recorded as operator-provided, and protected by
+default. Its size, file count, and item count are visible in the console.
+
+Ownership is stored in `/state/depot-ownership.json` on the durable sync-state
+volume rather than inside `/depot`. This keeps the protection record when a
+depot volume is replaced or reattached. Product-created trees are recorded as
+product-managed. Other previously existing trees are recorded as unknown and
+are not protected automatically; enable protection in the Depot tab before
+allowing product actions to change them. Newly uploaded top-level trees are
+recorded as operator-provided and protected automatically.
+
+Ownership failures block operations rather than reset protection. The console
+refuses inventory and mutations when the manifest cannot be read or fails JSON
+or schema validation; only an absent manifest starts empty. Sync refuses further
+target dispatch when ownership cannot be read or persisted, preserving the
+existing manifest if an update fails.
+
+Protection skips the `esx` target when `ESX_HOST` is protected and the `vkr`
+target when `VKR` is protected. The `install`, `upgrade`, and `patches` targets
+are skipped whenever any tree is protected, because their writes can span
+multiple trees. The run log names the protected trees. Protection remains
+until an operator turns it off in the Depot tab.
+
+Adopting an existing VKR content tree as the VKR sync target is a follow-up.
+This release inventories and protects that tree but does not adopt it.
+
+The Depot tab also browses `/depot` and provides authenticated file uploads,
+folder uploads from `.tar.gz`, `.tgz`, or `.zip` archives, and explicit
+deletion. Archive uploads use the same member-count, expanded-size, path, and
+file-type validation as the licensed-tool installer, then reject symbolic links
+for depot content. Uploads refuse to overwrite an existing entry. A delete
+shows recursive size and file count and proceeds only when the operator types
+the displayed relative path exactly. Deleting a protected tree, anything below
+it, or an ancestor containing it is refused until the tree is unprotected in the
+Depot tab.
+
+Every explorer path is resolved below `/depot`; absolute paths, parent
+traversal, and links escaping the depot are refused. Existing directory links
+whose targets remain inside the depot support browsing and uploads, with
+protection checked against the resolved destination. The link itself cannot
+be deleted through the explorer. Upload and delete take both the
+sync lock and licensed-tool update lock, so they fail clearly while either job
+is active. Uploading below `/umds-patch-store` is allowed, but the console shows
+that those files are downloadable without credentials. This notice also
+applies to uploads through its backing path and archive restores containing
+the public directory, based on the link's resolved target after upload.
+Licensed VCF Download
+Tool archives remain restricted to the Setup workflow and are not accepted by
+the explorer.
 
 For console-based identity migration, follow [First run](#first-run).
 The retained depot-adoption helpers in `scripts/` are covered in
@@ -163,8 +219,9 @@ and retained in their dedicated volume.
 
 ## Sync behavior
 
-The sync service is the only depot writer. Scheduled and console-triggered runs
-use the same lock, so only one can write at a time. Targets run sequentially,
+Scheduled syncs, console-triggered syncs, and
+[Depot explorer actions](#operator-provided-depot-content) share the depot
+lock, so only one can write at a time. Targets run sequentially,
 later targets still run after a failure, state is written atomically, and only
 the newest configured run logs are retained. Until an activation code is
 saved, the stack stays healthy but sync reports `not armed`.

@@ -32,6 +32,14 @@ refusal with a tool already present, invalid ID, active-sync and tool-update
 refusals, installation-probe mismatch reporting and activation blocking,
 persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
+content-library ownership detection and default protection,
+refusal of inventory and mutations on unreadable or invalid ownership state
+without replacing the manifest,
+depot browsing, guarded file and folder-archive upload, explicit delete
+confirmation with size and file count, protected-tree enforcement, path
+traversal and symlink escape refusal, contained directory-link access,
+public patch-store notices for direct uploads and directory restores, and mutation refusal
+during a running sync or tool update,
 the schedule preview endpoint computing an unsaved schedule's next run in
 the configured or supplied timezone and rejecting bad input,
 setup completion, shared password replacement, sync dispatch, partial settings
@@ -58,6 +66,11 @@ tag gate (well formed tags on main pass, malformed or unmerged tags are
 refused), idempotent release publication, and license isolation. The
 Kubernetes manifest test also asserts that product images default to the
 latest tags with an always-pull policy.
+
+`tests/test_sync.sh` also runs `tests/test_sync_protection.py`, which checks
+protected-target dispatch refusal and dispatch after unprotecting for all five
+sync targets, plus dispatch refusal and manifest preservation when ownership
+reads or persistence fail.
 
 `tests/make-stub-depot.sh <dir> [version ...]` builds a stub depot tree that
 models the reference depot layout for the tool itself, a flat
