@@ -4,6 +4,7 @@ Run the repository gates before release:
 
 ```bash
 ./tests/test_sync.sh
+python3 tests/test_sync_protection.py
 ./tests/test_scheduler.sh
 ./tests/test_install_checks.sh
 ./tests/test_compose.sh
@@ -35,7 +36,8 @@ secret storage, storage confirmation, recurring schedule and endpoint editing,
 content-library ownership detection and default protection,
 depot browsing, guarded file and folder-archive upload, explicit delete
 confirmation with size and file count, protected-tree enforcement, path
-traversal and symlink refusal, public patch-store notice, and mutation refusal
+traversal and symlink escape refusal, contained directory-link access,
+public patch-store notices for direct uploads and directory restores, and mutation refusal
 during a running sync or tool update,
 the schedule preview endpoint computing an unsaved schedule's next run in
 the configured or supplied timezone and rejecting bad input,
@@ -63,6 +65,9 @@ tag gate (well formed tags on main pass, malformed or unmerged tags are
 refused), idempotent release publication, and license isolation. The
 Kubernetes manifest test also asserts that product images default to the
 latest tags with an always-pull policy.
+
+`tests/test_sync_protection.py` checks protected-target dispatch refusal and
+dispatch after unprotecting for all five sync targets.
 
 `tests/make-stub-depot.sh <dir> [version ...]` builds a stub depot tree that
 models the reference depot layout for the tool itself, a flat

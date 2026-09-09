@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """VCF Services admin console.
 
-The sync container remains the only writer of product-managed depot content.
-This app performs operator-confirmed explorer mutations under the same locks,
-reads config and state files, and exchanges jobs with the sync service over the
+Depot ownership and explorer rules are documented in README.md under
+"Operator-provided depot content". This app reads config and state files
+and exchanges jobs with the sync service over the
 password-protected Redis bus documented in docs/redis-contract.md. It never
 talks to the Docker daemon.
 """

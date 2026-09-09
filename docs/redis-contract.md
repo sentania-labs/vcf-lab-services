@@ -68,7 +68,11 @@ after its attempt, including failures. For tool-backed targets (`esx`,
 from the active extracted release's metadata, with `unknown` when unavailable.
 For non-tool targets such as `vkr`, both fields are `not applicable` because
 the target uses a separate helper.
-Targets not attempted retain their earlier records. Older records may omit
+Targets skipped for depot protection receive `status: "SKIPPED:PROTECTED"`
+and the current provenance fields even though the target was not invoked.
+See [depot protection](../README.md#operator-provided-depot-content) for which
+targets are skipped. Targets not selected for the run retain their earlier
+records. Older records may omit
 these fields. A failed attempt identifies the tool used, not a guarantee that
 all content for that target was replaced. Consumers derive summaries from
 these rows rather than a single depot-wide version.
