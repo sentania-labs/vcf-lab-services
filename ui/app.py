@@ -2087,7 +2087,7 @@ def upload_depot_entry():
             staging = Path(
                 tempfile.mkdtemp(prefix=".vcf-services-upload-", dir=DEPOT)
             )
-            public_paths = []
+            uploaded_paths = []
             if extract:
                 archive_path = staging / "archive"
                 content = staging / "content"
@@ -2122,8 +2122,7 @@ def upload_depot_entry():
                         raise DepotError(
                             f"{target_relative} already exists; delete it explicitly first"
                         )
-                    if _is_patch_store_path(target_relative):
-                        public_paths.append(target_relative)
+                    uploaded_paths.append(target_relative)
                 moved = []
                 try:
                     for child in children:
@@ -2152,8 +2151,8 @@ def upload_depot_entry():
                 staged_file = staging / filename
                 upload.save(staged_file)
                 os.replace(staged_file, target)
-                if _is_patch_store_path(target_relative):
-                    public_paths.append(target_relative)
+                uploaded_paths.append(target_relative)
+            public = any(_is_patch_store_path(path) for path in uploaded_paths)
             _record_operator_trees(_top_level_comp_trees() - before)
     except BlockingIOError:
         return jsonify(
@@ -2166,7 +2165,6 @@ def upload_depot_entry():
     finally:
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
-    public = bool(public_paths)
     return jsonify(
         {
             "uploaded": True,
