@@ -41,8 +41,8 @@ blocked, a save that lands under the run's settings snapshot lock before the
 run publishes its state still being flagged for the next run, the live backup
 service settings being reported as applied now instead of deferred, the tabbed
 console rendering every control including the daily, weekly, and custom cron
-schedule picker with its next-run readout, advisory tool version and Software Depot ID
-probes that preserve the last verified ID, forward config migration with an
+schedule picker with its next-run readout, advisory tool probes as described in
+[release validation](releasing.md), forward config migration with an
 in-volume backup, and newer-version downgrade refusal. The Compose test
 enforces the latest-tracking published-image defaults,
 their always-pull behavior, and their override variables,
