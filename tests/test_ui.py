@@ -1606,44 +1606,55 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertFalse((patch_store / "blocked").exists())
         self.assertEqual((patch_store / "uploaded-0-False.txt").read_bytes(), b"content")
 
-    def test_depot_upload_restores_dangling_patch_store_with_public_notice(self):
+    def test_depot_public_notice_for_link_and_directory_restores(self):
         self.claim()
         backing = "PROD/COMP/ESX_HOST/patch-store"
         patch_store = self.depot / backing
         patch_store.mkdir(parents=True)
-        (patch_store / "old.bin").write_bytes(b"old content")
         public_link = self.depot / "umds-patch-store"
         public_link.symlink_to(backing)
-        deleted = self.delete(
-            "/api/depot/entry", json={"path": backing, "confirm": backing}
+        shapes = (
+            (None, "umds-patch-store", "restored.bin"),
+            (backing, "PROD/COMP/ESX_HOST", "patch-store/restored.bin"),
+            ("PROD/COMP/ESX_HOST", "PROD/COMP", "ESX_HOST/patch-store/restored.bin"),
         )
-        self.assertEqual(deleted.status_code, 200, deleted.get_json())
-        self.assertTrue(public_link.is_symlink())
-        self.assertFalse(public_link.exists())
-        archive = io.BytesIO()
-        with zipfile.ZipFile(archive, "w") as package:
-            package.writestr("patch-store/restored.bin", b"restored content")
-        archive.seek(0)
+        for removed, destination, member in shapes:
+            with self.subTest(destination=destination):
+                if removed:
+                    deleted = self.delete(
+                        "/api/depot/entry", json={"path": removed, "confirm": removed}
+                    )
+                    self.assertEqual(deleted.status_code, 200, deleted.get_json())
+                    self.assertTrue(public_link.is_symlink())
+                    self.assertFalse(public_link.exists())
+                    payload = io.BytesIO()
+                    with zipfile.ZipFile(payload, "w") as package:
+                        package.writestr(member, b"restored content")
+                    payload.seek(0)
+                    filename = "restore.zip"
+                else:
+                    payload = io.BytesIO(b"restored content")
+                    filename = member
 
-        response = self.post(
-            "/api/depot/upload",
-            data={
-                "path": "PROD/COMP/ESX_HOST",
-                "extract": "true",
-                "upload": (archive, "restore.zip"),
-            },
-            content_type="multipart/form-data",
-        )
+                response = self.post(
+                    "/api/depot/upload",
+                    data={
+                        "path": destination,
+                        "extract": "true" if removed else "false",
+                        "upload": (payload, filename),
+                    },
+                    content_type="multipart/form-data",
+                )
 
-        self.assertEqual(response.status_code, 201, response.get_json())
-        self.assertTrue(response.get_json()["publicDownload"])
-        self.assertIn(
-            "downloadable without credentials", response.get_json()["notice"]
-        )
-        self.assertEqual(
-            (public_link / "restored.bin").read_bytes(), b"restored content"
-        )
-        self.assertEqual(public_link.resolve(), patch_store)
+                self.assertEqual(response.status_code, 201, response.get_json())
+                self.assertTrue(response.get_json()["publicDownload"])
+                self.assertIn(
+                    "downloadable without credentials", response.get_json()["notice"]
+                )
+                self.assertEqual(
+                    (public_link / "restored.bin").read_bytes(), b"restored content"
+                )
+                self.assertEqual(public_link.resolve(), patch_store)
 
     def test_depot_upload_extracts_folder_archive_and_reports_patch_store_notice(self):
         self.claim()

@@ -479,13 +479,20 @@ def _validate_depot_staging(staging):
                 )
 
 
-def _is_patch_store_path(relative):
-    path, _ = _depot_relative_path(relative)
+def _paths_publicly_exposed(relatives, *, include_ancestors=False):
     try:
-        public_root, _ = _depot_relative_path("umds-patch-store")
+        public_root, _ = _depot_relative_path("umds-patch-store", must_exist=True)
     except DepotError:
         return False
-    return path.resolve().is_relative_to(public_root.resolve())
+    public_root = public_root.resolve()
+    for relative in relatives:
+        path, _ = _depot_relative_path(relative, must_exist=True)
+        resolved = path.resolve()
+        if resolved.is_relative_to(public_root) or (
+            include_ancestors and path.is_dir() and public_root.is_relative_to(resolved)
+        ):
+            return True
+    return False
 
 
 def _auth_doc():
@@ -2055,7 +2062,7 @@ def depot_tree():
         {
             "path": relative,
             "parent": parent,
-            "publicDownload": _is_patch_store_path(relative),
+            "publicDownload": _paths_publicly_exposed([relative]),
             "entries": entries,
         }
     )
@@ -2152,7 +2159,7 @@ def upload_depot_entry():
                 upload.save(staged_file)
                 os.replace(staged_file, target)
                 uploaded_paths.append(target_relative)
-            public = any(_is_patch_store_path(path) for path in uploaded_paths)
+            public = _paths_publicly_exposed(uploaded_paths, include_ancestors=True)
             _record_operator_trees(_top_level_comp_trees() - before)
     except BlockingIOError:
         return jsonify(
