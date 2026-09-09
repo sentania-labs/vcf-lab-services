@@ -25,6 +25,8 @@ load_settings() {
 : "${REDIS_HOST:=}"
 : "${REDIS_PORT:=6379}"
 : "${REDIS_PASSWORD_FILE:=/etc/vcf-services/secrets/redis-password}"
+: "${DEPOT_OWNERSHIP_FILE:=$STATE_DIR/depot-ownership.json}"
+: "${DEPOT_OWNERSHIP_LOCK:=$STATE_DIR/depot-ownership.lock}"
 
 # Defaults for the keys the console owns, applied after settings.env is read so
 # a missing or blank value still lands on a working default.
@@ -47,6 +49,54 @@ mkdir -p "$STATE_DIR"
 
 now() { date -u +%FT%TZ; }
 log() { echo "[sync $(now)] $*"; }
+
+protected_tree() {
+	local name="$1"
+	[ -s "$DEPOT_OWNERSHIP_FILE" ] || return 1
+	jq -e --arg name "$name" '.trees[$name].protected == true' \
+		"$DEPOT_OWNERSHIP_FILE" >/dev/null 2>&1
+}
+
+record_tree_if_absent() {
+	local name="$1"
+	local ownership="$2"
+	local protected="$3"
+	local tmp
+	(
+		flock -x 5
+		tmp="$(mktemp "$STATE_DIR/depot-ownership.json.XXXXXX")" || exit 1
+		if ! jq --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
+			'.version = 1 | .trees = (.trees // {}) |
+			 if .trees[$name] then .
+			 else .trees[$name] = {ownership:$ownership, protected:$protected}
+			 end' \
+			"${DEPOT_OWNERSHIP_FILE:-/dev/null}" > "$tmp" 2>/dev/null; then
+			jq -n --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
+				'{version:1, trees:{($name):{ownership:$ownership, protected:$protected}}}' \
+				> "$tmp"
+		fi
+		mv "$tmp" "$DEPOT_OWNERSHIP_FILE"
+	) 5>"$DEPOT_OWNERSHIP_LOCK" || log "WARNING: could not record ownership for PROD/COMP/$name"
+}
+
+record_product_tree() {
+	record_tree_if_absent "$1" product-managed false
+}
+
+declare -A known_depot_trees=()
+comp_root="$DEPOT_DIR/PROD/COMP"
+
+record_new_product_trees() {
+	local tree name
+	[ -d "$comp_root" ] || return 0
+	while IFS= read -r -d '' tree; do
+		name="$(basename "$tree")"
+		if [ -z "${known_depot_trees[$name]+present}" ]; then
+			record_product_tree "$name"
+			known_depot_trees["$name"]=1
+		fi
+	done < <(find "$comp_root" -mindepth 1 -maxdepth 1 -type d -print0)
+}
 
 redis_cmd() {
 	[ -n "$REDIS_HOST" ] || return 1
@@ -99,6 +149,18 @@ exec 9>"$STATE_DIR/sync.lock"
 if ! flock -n 9; then
 	log "another sync is already running, skipping this trigger"
 	exit 0
+fi
+
+if [ -d "$comp_root" ]; then
+	while IFS= read -r -d '' tree; do
+		name="$(basename "$tree")"
+		if [ -f "$tree/items.json" ] && [ -f "$tree/lib.json" ]; then
+			record_tree_if_absent "$name" operator-provided true
+		else
+			record_tree_if_absent "$name" unknown false
+		fi
+		known_depot_trees["$name"]=1
+	done < <(find "$comp_root" -mindepth 1 -maxdepth 1 -type d -print0)
 fi
 
 # Take the settings snapshot lock before reading settings.env and hold it for
@@ -262,8 +324,15 @@ for target in $SYNC_TARGETS; do
 				"--sku=$SKU" --patches-only
 			;;
 		vkr)
-			run_target vkr-content-library /usr/local/lib/vcf-services/targets/vkr.sh \
-				"$DEPOT_DIR" "$VKR_MATCH" "$VKR_OS"
+			if protected_tree VKR; then
+				last_status="SKIPPED:PROTECTED"
+				log ">>> vkr-content-library"
+				log "PROD/COMP/VKR is protected, skipping the target without changing it"
+				log "<<< vkr-content-library SKIPPED:PROTECTED"
+			else
+				run_target vkr-content-library /usr/local/lib/vcf-services/targets/vkr.sh \
+					"$DEPOT_DIR" "$VKR_MATCH" "$VKR_OS"
+			fi
 			;;
 		*)
 			last_status=INVALID
@@ -271,6 +340,7 @@ for target in $SYNC_TARGETS; do
 			log "unknown sync target '$target', continuing"
 			;;
 	esac
+	record_new_product_trees
 	if [ "$tool_backed_target" = true ] && [ "$last_status" = OK ]; then
 		successful_tool_sync=true
 	fi

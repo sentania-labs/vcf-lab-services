@@ -124,6 +124,25 @@ grep -q 'Re-upload the VCF Download Tool in the admin console' "$work_dir/missin
 jq -e '.running == false' "$work_dir/state/state.json" >/dev/null
 mv "$work_dir/tool/update.lock.saved" "$work_dir/tool/.update.lock"
 
+# A protected operator content library is not handed to its matching sync
+# target, even when that target would otherwise replace content in place.
+mkdir -p "$work_dir/depot/PROD/COMP/VKR"
+printf 'operator content\n' > "$work_dir/depot/PROD/COMP/VKR/content.txt"
+printf '%s\n' '{"version":1,"trees":{"VKR":{"ownership":"operator-provided","protected":true}}}' \
+	> "$work_dir/state/depot-ownership.json"
+cat > "$work_dir/protected-vkr-stub.bash" <<'STUB'
+function /usr/local/lib/vcf-services/targets/vkr.sh() {
+	printf 'replaced\n' > "$1/PROD/COMP/VKR/content.txt"
+}
+STUB
+BASH_ENV="$work_dir/protected-vkr-stub.bash" run_sync vkr > "$work_dir/protected-vkr.log"
+grep -qx 'operator content' "$work_dir/depot/PROD/COMP/VKR/content.txt"
+grep -q 'PROD/COMP/VKR is protected, skipping the target without changing it' \
+	"$work_dir/protected-vkr.log"
+jq -e '.lastRun.vkr.status == "SKIPPED:PROTECTED"' "$work_dir/state/state.json" >/dev/null
+rm -rf "$work_dir/depot/PROD/COMP/VKR"
+rm -f "$work_dir/state/depot-ownership.json"
+
 # A replacement keeps one prior release through failed runs, then a fully
 # successful run records its producing version and removes the retained copy.
 tool_store="$work_dir/tool-store"
@@ -168,6 +187,8 @@ BASH_ENV="$work_dir/vkr-stub.bash" run_promoted_sync vkr > "$work_dir/promotion-
 test -L "$tool_store/previous"
 test -d "$tool_store/releases/previous-release"
 grep -qx 'stub VKR content' "$work_dir/depot/PROD/COMP/VKR/content.txt"
+jq -e '.trees.VKR == {ownership:"product-managed", protected:false}' \
+	"$work_dir/promotion-state/depot-ownership.json" >/dev/null
 jq -e '.lastRun.vkr.status == "OK"
   and .lastRun.vkr.toolVersion == "not applicable"
   and .lastRun.vkr.toolReleaseId == "not applicable"' \

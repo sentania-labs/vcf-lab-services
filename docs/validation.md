@@ -32,6 +32,7 @@ refusal with a tool already present, invalid ID, active-sync and tool-update
 refusals, installation-probe mismatch reporting and activation blocking,
 persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
+content-library ownership detection and default protection,
 the schedule preview endpoint computing an unsaved schedule's next run in
 the configured or supplied timezone and rejecting bad input,
 setup completion, shared password replacement, sync dispatch, partial settings

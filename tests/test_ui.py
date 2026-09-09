@@ -153,6 +153,16 @@ class UiApiTests(unittest.TestCase):
         bus.get.side_effect = lambda key: (values or {}).get(key)
         return bus
 
+    def seed_content_library(self, name="SUPERVISOR"):
+        tree = self.depot / "PROD" / "COMP" / name
+        tree.mkdir(parents=True)
+        (tree / "lib.json").write_text(json.dumps({"name": name}))
+        (tree / "items.json").write_text(
+            json.dumps({"items": [{"id": "one"}, {"id": "two"}]})
+        )
+        (tree / "payload.bin").write_bytes(b"content")
+        return tree
+
     @staticmethod
     def tar_tool(
         version="9.1.2",
@@ -1370,7 +1380,14 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         panels, controls = parse_console_tabs(page.get_data(as_text=True))
         self.assertEqual(
             panels,
-            ["tab-setup", "tab-sync", "tab-settings", "tab-backup", "tab-logs"],
+            [
+                "tab-setup",
+                "tab-sync",
+                "tab-depot",
+                "tab-settings",
+                "tab-backup",
+                "tab-logs",
+            ],
         )
         expected = {
             "tab-setup": {
@@ -1392,6 +1409,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "save-password",
             },
             "tab-sync": {"sync-btn", "refresh-remote"},
+            "tab-depot": {"depot-refresh"},
             "tab-settings": {
                 "vcf-version",
                 "sku",
@@ -1435,6 +1453,42 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn('id="vcfdt-previous"', body)
         self.assertIn('id="vcfdt-produced"', body)
         self.assertIn('id="migration-result"', body)
+
+    def test_content_library_is_inventoried_and_protected_by_default(self):
+        self.claim()
+        tree = self.seed_content_library()
+
+        response = self.get("/api/depot/ownership")
+
+        self.assertEqual(response.status_code, 200)
+        row = response.get_json()["trees"][0]
+        self.assertEqual(row["name"], "SUPERVISOR")
+        self.assertEqual(row["path"], "PROD/COMP/SUPERVISOR")
+        self.assertEqual(row["ownership"], "operator-provided")
+        self.assertTrue(row["protected"])
+        self.assertTrue(row["contentLibrary"])
+        self.assertEqual(row["itemCount"], 2)
+        self.assertEqual(row["fileCount"], 3)
+        self.assertEqual(
+            row["sizeBytes"], sum(path.stat().st_size for path in tree.iterdir())
+        )
+        manifest = json.loads(
+            (self.state_dir / "depot-ownership.json").read_text()
+        )
+        self.assertEqual(
+            manifest["trees"]["SUPERVISOR"],
+            {"ownership": "operator-provided", "protected": True},
+        )
+
+        unprotected = self.post(
+            "/api/depot/ownership",
+            json={"name": "SUPERVISOR", "protected": False},
+        )
+        self.assertEqual(unprotected.status_code, 200)
+        self.assertFalse(unprotected.get_json()["protected"])
+        refreshed = self.get("/api/depot/ownership").get_json()["trees"][0]
+        self.assertEqual(refreshed["ownership"], "operator-provided")
+        self.assertFalse(refreshed["protected"])
 
     def test_concurrent_settings_writes_do_not_drop_updates(self):
         keys = [f"CONCURRENT_TEST_KEY_{index}" for index in range(8)]

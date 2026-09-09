@@ -61,7 +61,7 @@ running. A mismatch shows the adopted ID and the ID returned by the tool (or
 reports that no recognizable ID was returned). Activation-code saving and setup
 completion remain blocked until the adopted ID is confirmed.
 
-The console is organised into Setup, Sync, Settings, Backup, and Logs tabs.
+The console is organised into Setup, Sync, Depot, Settings, Backup, and Logs tabs.
 Every operator setting in this prototype remains editable in the console. The
 settings file is the storage contract inside the `vcf-services-config` volume,
 not an operator editing interface.
@@ -102,8 +102,8 @@ after rollback; a failed sync keeps the retained release.
 
 The product consumes two fixed mounted paths:
 
-- `/depot`, read-write in the sync service and read-only in the web and console
-  services.
+- `/depot`, read-write in the sync service and read-only in the web service.
+  The console inventory reads the same mounted tree.
 - `/mnt/backup`, read-write only in the SFTP service and read-only in the
   console.
 
@@ -128,6 +128,25 @@ tool rewrites its telemetry flag during every sync. Tool installation and sync
 share an update lock, so they cannot modify the volume at the same time.
 Restore it from the Setup tab by installing a tool archive already mirrored in
 the depot, or by uploading the licensed archive again.
+
+### Operator-provided depot content
+
+Place operator-provided content as a top-level tree under `/depot/PROD/COMP`,
+for example `/depot/PROD/COMP/SUPERVISOR`. The Depot tab inventories every tree
+at that level. A tree containing both `items.json` and `lib.json` is detected as
+a vSphere content library, recorded as operator-provided, and protected by
+default. Its size, file count, and item count are visible in the console.
+
+Ownership is stored in `/state/depot-ownership.json` on the durable sync-state
+volume rather than inside `/depot`. This keeps the protection record when a
+depot volume is replaced or reattached. Product-created trees are recorded as
+product-managed. Other previously existing trees are recorded as unknown until
+their origin can be established. Protected trees are skipped by matching sync
+targets and remain protected until an operator turns protection off in the
+Depot tab.
+
+Adopting an existing VKR content tree as the VKR sync target is a follow-up.
+This release inventories and protects that tree but does not adopt it.
 
 For console-based identity migration, follow [First run](#first-run).
 The retained depot-adoption helpers in `scripts/` are covered in

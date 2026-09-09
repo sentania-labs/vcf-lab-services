@@ -151,7 +151,7 @@ services:
       - caddy_data:/caddy-data:ro
       - vcfdt_tool:/opt/vcfdt:rw
       - vcfdt_state:/root/.local/share/vmware/vdt:rw
-      - sync_state:/state:ro
+      - sync_state:/state:rw
       - config_state:/config:rw
       - secrets_state:/run/vcf-services-secrets:rw
     networks:

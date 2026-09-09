@@ -74,6 +74,12 @@ SYNC_SNAPSHOT_LOCK = Path(
 SYNC_SNAPSHOT_RUN_FILE = Path(
     os.environ.get("SYNC_SNAPSHOT_RUN_FILE", str(STATE / "settings-snapshot.run"))
 )
+DEPOT_OWNERSHIP_FILE = Path(
+    os.environ.get("DEPOT_OWNERSHIP_FILE", str(STATE / "depot-ownership.json"))
+)
+DEPOT_OWNERSHIP_LOCK = Path(
+    os.environ.get("DEPOT_OWNERSHIP_LOCK", str(STATE / "depot-ownership.lock"))
+)
 CURRENT_VERSION = os.environ.get("VCF_SERVICES_VERSION", "dev")
 VCFDT_STORE = Path(os.environ.get("VCFDT_STORE", "/opt/vcfdt"))
 SECRETS_ROOT = "/etc/vcf-services/secrets"
@@ -172,6 +178,147 @@ MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 
 class ToolArchiveError(ValueError):
     """An operator-supplied archive failed validation."""
+
+
+OWNERSHIP_VALUES = {"product-managed", "operator-provided", "unknown"}
+
+
+@contextmanager
+def _ownership_lock():
+    DEPOT_OWNERSHIP_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(DEPOT_OWNERSHIP_LOCK, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+    finally:
+        lock_file.close()
+
+
+def _read_ownership_manifest():
+    try:
+        document = json.loads(DEPOT_OWNERSHIP_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        document = {}
+    trees = document.get("trees") if isinstance(document, dict) else None
+    if not isinstance(trees, dict):
+        trees = {}
+    clean = {}
+    for name, entry in trees.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        ownership = entry.get("ownership")
+        if ownership not in OWNERSHIP_VALUES:
+            continue
+        clean[name] = {
+            "ownership": ownership,
+            "protected": bool(entry.get("protected", False)),
+        }
+    return {"version": 1, "trees": clean}
+
+
+def _write_ownership_manifest(document):
+    DEPOT_OWNERSHIP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        prefix=f".{DEPOT_OWNERSHIP_FILE.name}.", dir=DEPOT_OWNERSHIP_FILE.parent
+    )
+    try:
+        os.fchmod(handle, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(document, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, DEPOT_OWNERSHIP_FILE)
+    except Exception:
+        try:
+            os.close(handle)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _content_library_item_count(path):
+    try:
+        document = json.loads((path / "items.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if isinstance(document, list):
+        return len(document)
+    if isinstance(document, dict):
+        items = document.get("items")
+        if isinstance(items, (list, dict)):
+            return len(items)
+        return len(document)
+    return None
+
+
+def _tree_usage(path):
+    size_bytes = 0
+    file_count = 0
+    try:
+        for root, dirs, files in os.walk(path, followlinks=False):
+            root_path = Path(root)
+            dirs[:] = [name for name in dirs if not (root_path / name).is_symlink()]
+            for name in files:
+                candidate = root_path / name
+                try:
+                    if candidate.is_symlink():
+                        continue
+                    size_bytes += candidate.stat().st_size
+                    file_count += 1
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return size_bytes, file_count
+
+
+def _depot_ownership_inventory():
+    root = DEPOT / "PROD" / "COMP"
+    try:
+        directories = sorted(
+            path for path in root.iterdir() if path.is_dir() and not path.is_symlink()
+        )
+    except OSError:
+        directories = []
+    changed = False
+    with _ownership_lock():
+        manifest = _read_ownership_manifest()
+        entries = manifest["trees"]
+        rows = []
+        for path in directories:
+            content_library = (path / "items.json").is_file() and (
+                path / "lib.json"
+            ).is_file()
+            item_count = _content_library_item_count(path) if content_library else None
+            entry = entries.get(path.name)
+            if entry is None:
+                ownership = "operator-provided" if content_library else "unknown"
+                entry = {
+                    "ownership": ownership,
+                    "protected": ownership == "operator-provided",
+                }
+                entries[path.name] = entry
+                changed = True
+            size_bytes, file_count = _tree_usage(path)
+            rows.append(
+                {
+                    "name": path.name,
+                    "path": f"PROD/COMP/{path.name}",
+                    "sizeBytes": size_bytes,
+                    "fileCount": file_count,
+                    "itemCount": item_count,
+                    "contentLibrary": content_library,
+                    **entry,
+                }
+            )
+        if changed:
+            _write_ownership_manifest(manifest)
+    return rows
 
 
 def _auth_doc():
@@ -1675,6 +1822,58 @@ def status():
 @app.get("/api/vcfdt")
 def vcfdt_status():
     return jsonify(_current_tool_info())
+
+
+@app.get("/api/depot/ownership")
+def depot_ownership():
+    try:
+        trees = _depot_ownership_inventory()
+    except OSError as exc:
+        return jsonify({"error": f"depot ownership could not be read: {exc}"}), 500
+    return jsonify(
+        {
+            "manifest": str(DEPOT_OWNERSHIP_FILE),
+            "root": str(DEPOT / "PROD" / "COMP"),
+            "trees": trees,
+        }
+    )
+
+
+@app.post("/api/depot/ownership")
+def update_depot_ownership():
+    body = request.get_json(silent=True) or {}
+    name = body.get("name")
+    protected = body.get("protected")
+    if (
+        not isinstance(name, str)
+        or not name
+        or "/" in name
+        or "\\" in name
+        or name in {".", ".."}
+    ):
+        return jsonify({"error": "choose one top-level PROD/COMP tree"}), 400
+    if not isinstance(protected, bool):
+        return jsonify({"error": "protected must be true or false"}), 400
+    tree = DEPOT / "PROD" / "COMP" / name
+    try:
+        root = (DEPOT / "PROD" / "COMP").resolve(strict=True)
+        resolved = tree.resolve(strict=True)
+    except OSError:
+        return jsonify({"error": "that PROD/COMP tree does not exist"}), 404
+    if tree.is_symlink() or resolved.parent != root or not resolved.is_dir():
+        return jsonify({"error": "choose one real top-level PROD/COMP tree"}), 400
+    try:
+        _depot_ownership_inventory()
+        with _ownership_lock():
+            manifest = _read_ownership_manifest()
+            entry = manifest["trees"].get(name)
+            if entry is None:
+                return jsonify({"error": "that PROD/COMP tree is not inventoried"}), 404
+            entry["protected"] = protected
+            _write_ownership_manifest(manifest)
+    except OSError as exc:
+        return jsonify({"error": f"depot ownership could not be saved: {exc}"}), 500
+    return jsonify({"name": name, **entry})
 
 
 @app.post("/api/vcfdt")

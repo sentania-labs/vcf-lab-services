@@ -316,7 +316,6 @@ spec:
               mountPath: /home/vcf/.local/share/vmware/vdt
             - name: sync-state
               mountPath: /state
-              readOnly: true
             - name: config-state
               mountPath: /config
             - name: secrets-state

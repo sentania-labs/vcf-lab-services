@@ -111,6 +111,7 @@
   <nav class="tabs" id="tabs" aria-label="Console sections">
     <button class="tab-button active" data-tab="setup">Setup</button>
     <button class="tab-button" data-tab="sync">Sync</button>
+    <button class="tab-button" data-tab="depot">Depot</button>
     <button class="tab-button" data-tab="settings">Settings</button>
     <button class="tab-button" data-tab="backup">Backup</button>
     <button class="tab-button" data-tab="logs">Logs</button>
@@ -228,6 +229,24 @@
     <section class="panel">
       <h2>Available versions <span id="version-meta" class="muted"></span></h2>
       <div class="tablewrap"><table><thead><tr><th>Component</th><th>Version</th><th>Type</th><th>Date</th><th>Size</th><th>Depot</th></tr></thead><tbody id="versions"><tr><td colspan="6" class="muted">Check versions after registration.</td></tr></tbody></table></div>
+    </section>
+  </div>
+
+  <div class="tabpanel" id="tab-depot" hidden>
+    <section class="panel">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <h2>Depot ownership</h2>
+          <p class="muted">Top-level trees under PROD/COMP are inventoried independently of the depot volume.</p>
+        </div>
+        <button id="depot-refresh" class="secondary">Refresh inventory</button>
+      </div>
+      <div class="tablewrap" style="margin-top:12px"><table>
+        <thead><tr><th>Tree</th><th>Ownership</th><th>Size</th><th>Files</th><th>Library items</th><th>Protection</th></tr></thead>
+        <tbody id="depot-ownership"><tr><td colspan="6" class="muted">Open this tab to inventory the depot.</td></tr></tbody>
+      </table></div>
+      <p id="depot-ownership-flash" class="muted"></p>
+      <p class="help">Content-library trees, identified by items.json plus lib.json, are recorded as operator-provided and protected on first sight. Unprotect a tree only when a product action should be allowed to change it.</p>
     </section>
   </div>
 
@@ -365,8 +384,36 @@ function showTab(name) {
 }
 
 document.querySelectorAll('.tab-button').forEach(button => {
-  button.onclick = () => showTab(button.dataset.tab);
+  button.onclick = () => {
+    showTab(button.dataset.tab);
+    if(button.dataset.tab === 'depot') loadDepotOwnership();
+  };
 });
+
+async function loadDepotOwnership(report=false) {
+  const body=$('depot-ownership'); const flash=$('depot-ownership-flash');
+  try {
+    const result=await api('api/depot/ownership'); const rows=result.trees||[];
+    body.innerHTML=rows.length ? rows.map(tree=>`<tr>
+      <td><strong>${esc(tree.name)}</strong>${tree.contentLibrary ? '<br><span class="help">content library</span>' : ''}</td>
+      <td>${esc(tree.ownership)}</td><td>${bytes(tree.sizeBytes)}</td><td>${tree.fileCount}</td>
+      <td>${tree.itemCount === null ? 'not applicable' : tree.itemCount}</td>
+      <td><label class="choice"><input type="checkbox" class="depot-protect" data-name="${esc(tree.name)}" ${tree.protected ? 'checked' : ''}> Protected</label></td>
+    </tr>`).join('') : '<tr><td colspan="6" class="muted">No top-level PROD/COMP trees found.</td></tr>';
+    if(report) flash.textContent=`${rows.length} tree${rows.length === 1 ? '' : 's'} inventoried`;
+  } catch(error) { body.innerHTML='<tr><td colspan="6" class="error">Inventory unavailable</td></tr>'; flash.textContent=error.message; }
+}
+
+$('depot-refresh').onclick=()=>loadDepotOwnership(true);
+$('depot-ownership').onchange=async event=>{
+  const control=event.target; if(!control.classList.contains('depot-protect')) return;
+  control.disabled=true; $('depot-ownership-flash').textContent=control.checked ? 'Protecting tree' : 'Removing protection';
+  try {
+    await api('api/depot/ownership',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:control.dataset.name,protected:control.checked})});
+    $('depot-ownership-flash').textContent=control.checked ? `${control.dataset.name} is protected` : `${control.dataset.name} is unprotected`;
+  } catch(error) { control.checked=!control.checked; $('depot-ownership-flash').textContent=error.message; }
+  finally { control.disabled=false; }
+};
 
 function saveMessage(result) {
   const pending=result.appliesToNextRun ? (result.pendingFields||[]) : [];

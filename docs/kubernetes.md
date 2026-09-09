@@ -119,7 +119,7 @@ consumer relationships:
 | `backup-store` | `sftp-backup` | `admin-ui` | Console reports backup storage state |
 | `vcfdt-state` | `admin-ui`, licensed tool in `admin-ui` and `depot-sync` | both | Software Depot ID must remain consistent across tool installation, registration, and sync |
 | `vcfdt-tool` | `admin-ui`, `depot-sync` | both | Console installs the licensed tool, and the licensed tool updates its telemetry flag during sync |
-| `sync-state` | `depot-sync` | `admin-ui` read-only | Console displays current state and logs |
+| `sync-state` | `depot-sync`, `admin-ui` | both | Sync status, logs, and depot ownership survive depot replacement |
 | `caddy-data` | `depot-web` | `admin-ui` read-only | Console makes the generated local CA available to operators |
 | `config-state` | `bootstrap`, then `admin-ui` | `depot-sync`, `sftp-backup` read-only | GUI-owned settings and version status |
 | `secrets-state` | `bootstrap`, then `admin-ui` | `depot-sync`, `sftp-backup`, `redis` through scoped subPaths | Shared credentials with per-consumer exposure |
