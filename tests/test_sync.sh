@@ -204,4 +204,6 @@ jq -e '.lastRun.patches.toolVersion == "0.0.1-stub"
   and (has("depotContentToolReleaseId") | not)' \
 	"$work_dir/promotion-state/state.json" >/dev/null
 
+python3 "$project_dir/tests/test_sync_protection.py"
+
 echo "sync behavior tests passed"

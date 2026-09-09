@@ -365,11 +365,11 @@ def _depot_relative_path(value, *, allow_root=True, must_exist=False):
     cursor = DEPOT
     for part in parts:
         cursor /= part
-        if cursor.is_symlink():
-            raise DepotError("symbolic links cannot be used through the depot explorer")
+        if cursor.is_symlink() and not cursor.is_dir():
+            raise DepotError("only directory links can be used through the depot explorer")
     try:
         resolved = candidate.resolve(strict=must_exist)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise DepotError("the depot path does not exist") from exc
     if resolved != resolved_root and not resolved.is_relative_to(resolved_root):
         raise DepotError("the depot path escapes the depot root")
@@ -391,7 +391,8 @@ def _entry_usage(path):
 
 
 def _protected_trees_for_path(relative, *, include_descendants=False):
-    requested = tuple(PurePosixPath(relative).parts) if relative else ()
+    path, _ = _depot_relative_path(relative)
+    requested = path.resolve().relative_to(DEPOT.resolve()).parts
     manifest = _ensure_ownership_manifest()
     matches = []
     for name, entry in manifest["trees"].items():
@@ -479,8 +480,12 @@ def _validate_depot_staging(staging):
 
 
 def _is_patch_store_path(relative):
-    parts = tuple(PurePosixPath(relative).parts) if relative else ()
-    return bool(parts and parts[0] == "umds-patch-store")
+    path, _ = _depot_relative_path(relative)
+    try:
+        public_root, _ = _depot_relative_path("umds-patch-store")
+    except DepotError:
+        return False
+    return path.resolve().is_relative_to(public_root.resolve())
 
 
 def _auth_doc():
@@ -2016,18 +2021,26 @@ def depot_tree():
             if path.name.startswith(".vcf-services-upload-"):
                 continue
             child_relative = "/".join(filter(None, (relative, path.name)))
-            size_bytes, file_count = _entry_usage(path)
-            protected = _protected_trees_for_path(
-                child_relative, include_descendants=True
+            try:
+                _depot_relative_path(child_relative, must_exist=True)
+                accessible_directory = path.is_dir()
+                protected = _protected_trees_for_path(
+                    child_relative, include_descendants=True
+                )
+            except DepotError:
+                accessible_directory = False
+                protected = []
+            size_bytes, file_count = _entry_usage(
+                path.resolve() if accessible_directory else path
             )
             entries.append(
                 {
                     "name": path.name,
                     "path": child_relative,
-                    "type": "symlink"
+                    "type": "directory"
+                    if accessible_directory
+                    else "symlink"
                     if path.is_symlink()
-                    else "directory"
-                    if path.is_dir()
                     else "file",
                     "sizeBytes": size_bytes,
                     "fileCount": file_count,
@@ -2183,6 +2196,7 @@ def delete_depot_entry():
                 raise DepotError(
                     f"unprotect PROD/COMP/{protected[0]} before deleting this path"
                 )
+            resolved_relative = path.resolve().relative_to(DEPOT.resolve()).as_posix()
             size_bytes, file_count = _entry_usage(path)
             if path.is_symlink():
                 raise DepotError("symbolic links cannot be deleted through the explorer")
@@ -2190,7 +2204,7 @@ def delete_depot_entry():
                 shutil.rmtree(path)
             else:
                 path.unlink()
-            _forget_deleted_trees(relative)
+            _forget_deleted_trees(resolved_relative)
     except BlockingIOError:
         return jsonify(
             {"error": "wait for the running sync or tool update to finish"}

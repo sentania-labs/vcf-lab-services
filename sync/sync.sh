@@ -50,11 +50,14 @@ mkdir -p "$STATE_DIR"
 now() { date -u +%FT%TZ; }
 log() { echo "[sync $(now)] $*"; }
 
-protected_tree() {
-	local name="$1"
-	[ -s "$DEPOT_OWNERSHIP_FILE" ] || return 1
-	jq -e --arg name "$name" '.trees[$name].protected == true' \
-		"$DEPOT_OWNERSHIP_FILE" >/dev/null 2>&1
+protected_trees_for_target() {
+	local label="$1"
+	[ -s "$DEPOT_OWNERSHIP_FILE" ] || return 0
+	jq -r --arg label "$label" '.trees | to_entries[] |
+		select(.value.protected == true) |
+		select(if $label == "esx-image-library" then .key == "ESX_HOST"
+		       elif $label == "vkr-content-library" then .key == "VKR"
+		       else true end) | .key' "$DEPOT_OWNERSHIP_FILE"
 }
 
 record_tree_if_absent() {
@@ -284,6 +287,16 @@ run_target() {
 	local label="$1"
 	shift
 	log ">>> $label"
+	local protected name
+	protected="$(protected_trees_for_target "$label")"
+	if [ -n "$protected" ]; then
+		while IFS= read -r name; do
+			log "PROD/COMP/$name is protected, skipping the target without changing it"
+		done <<< "$protected"
+		last_status="SKIPPED:PROTECTED"
+		log "<<< $label $last_status"
+		return
+	fi
 	if "$@"; then
 		log "<<< $label OK"
 		last_status=OK
@@ -324,15 +337,8 @@ for target in $SYNC_TARGETS; do
 				"--sku=$SKU" --patches-only
 			;;
 		vkr)
-			if protected_tree VKR; then
-				last_status="SKIPPED:PROTECTED"
-				log ">>> vkr-content-library"
-				log "PROD/COMP/VKR is protected, skipping the target without changing it"
-				log "<<< vkr-content-library SKIPPED:PROTECTED"
-			else
-				run_target vkr-content-library /usr/local/lib/vcf-services/targets/vkr.sh \
-					"$DEPOT_DIR" "$VKR_MATCH" "$VKR_OS"
-			fi
+			run_target vkr-content-library /usr/local/lib/vcf-services/targets/vkr.sh \
+				"$DEPOT_DIR" "$VKR_MATCH" "$VKR_OS"
 			;;
 		*)
 			last_status=INVALID

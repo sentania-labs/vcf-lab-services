@@ -1539,6 +1539,73 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(delete_link.status_code, 400)
         self.assertTrue(outside.exists())
 
+    def test_depot_contained_patch_store_link_uploads_and_protection(self):
+        self.claim()
+        backing = "PROD/COMP/ESX_HOST/patch-store"
+        patch_store = self.depot / backing
+        patch_store.mkdir(parents=True)
+        (self.depot / "umds-patch-store").symlink_to(backing)
+        (self.depot / "patch-store-private").mkdir()
+        (self.depot / "component-alias").symlink_to("PROD/COMP")
+        for index, destination in enumerate(("umds-patch-store", backing)):
+            with self.subTest(destination=destination):
+                listing = self.get(
+                    "/api/depot/tree", query_string={"path": destination}
+                )
+                self.assertEqual(listing.status_code, 200)
+                self.assertTrue(listing.get_json()["publicDownload"])
+                for extract in (False, True):
+                    name = f"uploaded-{index}-{extract}.txt"
+                    payload = io.BytesIO(b"content")
+                    filename = name
+                    if extract:
+                        payload = io.BytesIO()
+                        with zipfile.ZipFile(payload, "w") as archive:
+                            archive.writestr(name, b"content")
+                        payload.seek(0)
+                        filename = "content.zip"
+                    response = self.post(
+                        "/api/depot/upload",
+                        data={"path": destination, "extract": str(extract).lower(),
+                              "upload": (payload, filename)},
+                        content_type="multipart/form-data",
+                    )
+                    self.assertEqual(response.status_code, 201, response.get_json())
+                    self.assertTrue(response.get_json()["publicDownload"])
+                    self.assertIn("downloadable without credentials", response.get_json()["notice"])
+                    self.assertEqual((patch_store / name).read_bytes(), b"content")
+        root = self.get("/api/depot/tree").get_json()
+        entry = next(row for row in root["entries"] if row["name"] == "umds-patch-store")
+        self.assertEqual(entry["type"], "directory")
+        self.assertEqual((entry["sizeBytes"], entry["fileCount"]), (28, 4))
+        private = self.post(
+            "/api/depot/upload",
+            data={"path": "patch-store-private", "upload": (io.BytesIO(b"private"), "file")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(private.status_code, 201)
+        self.assertFalse(private.get_json()["publicDownload"])
+        protected = self.post(
+            "/api/depot/ownership", json={"name": "ESX_HOST", "protected": True}
+        )
+        self.assertEqual(protected.status_code, 200)
+        for destination in ("umds-patch-store", backing):
+            response = self.post(
+                "/api/depot/upload",
+                data={"path": destination, "upload": (io.BytesIO(b"blocked"), "blocked")},
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("unprotect PROD/COMP/ESX_HOST", response.get_json()["error"])
+        for relative in ("umds-patch-store/uploaded-0-False.txt", "component-alias/ESX_HOST"):
+            response = self.delete(
+                "/api/depot/entry", json={"path": relative, "confirm": relative}
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("unprotect PROD/COMP/ESX_HOST", response.get_json()["error"])
+        self.assertFalse((patch_store / "blocked").exists())
+        self.assertEqual((patch_store / "uploaded-0-False.txt").read_bytes(), b"content")
+
     def test_depot_upload_extracts_folder_archive_and_reports_patch_store_notice(self):
         self.claim()
         patch_store = self.depot / "umds-patch-store"
