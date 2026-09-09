@@ -202,23 +202,35 @@ def _ownership_lock():
 def _read_ownership_manifest():
     try:
         document = json.loads(DEPOT_OWNERSHIP_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        document = {}
-    trees = document.get("trees") if isinstance(document, dict) else None
-    if not isinstance(trees, dict):
-        trees = {}
-    clean = {}
-    for name, entry in trees.items():
-        if not isinstance(name, str) or not isinstance(entry, dict):
-            continue
-        ownership = entry.get("ownership")
-        if ownership not in OWNERSHIP_VALUES:
-            continue
-        clean[name] = {
-            "ownership": ownership,
-            "protected": bool(entry.get("protected", False)),
-        }
-    return {"version": 1, "trees": clean}
+    except FileNotFoundError:
+        try:
+            DEPOT_OWNERSHIP_FILE.lstat()
+        except FileNotFoundError:
+            return {"version": 1, "trees": {}}
+        raise
+    except (ValueError, UnicodeError) as exc:
+        raise OSError("the depot ownership manifest is invalid") from exc
+    if (
+        not isinstance(document, dict)
+        or type(document.get("version")) is not int
+        or document["version"] != 1
+        or not isinstance(document.get("trees"), dict)
+    ):
+        raise OSError("the depot ownership manifest schema is invalid")
+    for name, entry in document["trees"].items():
+        if (
+            not name
+            or name in {".", ".."}
+            or "/" in name
+            or "\\" in name
+            or "\x00" in name
+            or not isinstance(entry, dict)
+            or not isinstance(entry.get("ownership"), str)
+            or entry["ownership"] not in OWNERSHIP_VALUES
+            or not isinstance(entry.get("protected"), bool)
+        ):
+            raise OSError("the depot ownership manifest tree entry is invalid")
+    return document
 
 
 def _write_ownership_manifest(document):

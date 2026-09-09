@@ -1469,6 +1469,84 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn('id="vcfdt-produced"', body)
         self.assertIn('id="migration-result"', body)
 
+    def test_depot_ownership_errors_refuse_reads_and_mutations(self):
+        self.claim()
+        tree = self.depot / "PROD" / "COMP" / "ESX_HOST"
+        tree.mkdir(parents=True)
+        sentinel = tree / "operator.bin"
+        sentinel.write_bytes(b"operator")
+        manifest = self.module.DEPOT_OWNERSHIP_FILE
+        valid = {"version": 1, "trees": {
+            "ESX_HOST": {"ownership": "operator-provided", "protected": True}
+        }}
+        invalid_documents = [
+            [], {}, {"version": 2, "trees": {}},
+            {"version": True, "trees": {}}, {"version": 1, "trees": []},
+        ]
+        for entry in (
+            None, {}, {"ownership": "invalid", "protected": True},
+            {"ownership": [], "protected": True},
+            {"ownership": "operator-provided"},
+            {"ownership": "operator-provided", "protected": "false"},
+            {"ownership": "operator-provided", "protected": 0},
+        ):
+            invalid_documents.append({"version": 1, "trees": {"ESX_HOST": entry}})
+        invalid_documents.append({"version": 1, "trees": {
+            "ESX_HOST/child": valid["trees"]["ESX_HOST"]
+        }})
+        cases = [("unreadable", json.dumps(valid).encode()),
+                 ("invalid-json", b"{broken"), ("empty", b""),
+                 ("invalid-encoding", b"\xff")]
+        cases += [(f"schema-{index}", json.dumps(document).encode())
+                  for index, document in enumerate(invalid_documents)]
+        original_read = Path.read_text
+        for failure, stored in cases:
+            with self.subTest(failure=failure):
+                manifest.write_bytes(stored)
+
+                def read_text(path, *args, **kwargs):
+                    if failure == "unreadable" and path == manifest:
+                        raise PermissionError("ownership state is unreadable")
+                    return original_read(path, *args, **kwargs)
+
+                operations = (
+                    lambda: self.get("/api/depot/ownership"),
+                    lambda: self.get("/api/depot/tree?path=PROD/COMP/ESX_HOST"),
+                    lambda: self.post("/api/depot/ownership", json={
+                        "name": "ESX_HOST", "protected": False,
+                    }),
+                    lambda: self.post("/api/depot/upload", data={
+                        "path": "PROD/COMP/ESX_HOST",
+                        "upload": (io.BytesIO(b"new"), "new.bin"),
+                    }, content_type="multipart/form-data"),
+                    lambda: self.delete("/api/depot/entry", json={
+                        "path": "PROD/COMP/ESX_HOST",
+                        "confirm": "PROD/COMP/ESX_HOST",
+                    }),
+                )
+                with mock.patch.object(Path, "read_text", read_text):
+                    for operation in operations:
+                        response = operation()
+                        self.assertIn(response.status_code, (400, 500), response.get_json())
+                        self.assertIn("ownership", response.get_json()["error"])
+                        self.assertEqual(manifest.read_bytes(), stored)
+                        self.assertEqual(sentinel.read_bytes(), b"operator")
+                        self.assertFalse((tree / "new.bin").exists())
+                        self.assertEqual(list(self.depot.glob(".vcf-services-upload-*")), [])
+
+    def test_depot_dangling_ownership_manifest_is_not_initialized(self):
+        self.claim()
+        self.seed_content_library()
+        manifest = self.module.DEPOT_OWNERSHIP_FILE
+        missing = self.state_dir / "missing-ownership.json"
+        manifest.symlink_to(missing)
+
+        response = self.get("/api/depot/ownership")
+
+        self.assertEqual(response.status_code, 500, response.get_json())
+        self.assertTrue(manifest.is_symlink())
+        self.assertFalse(missing.exists())
+
     def test_content_library_is_inventoried_and_protected_by_default(self):
         self.claim()
         tree = self.seed_content_library()
