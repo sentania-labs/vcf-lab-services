@@ -28,7 +28,8 @@ from a stub `PROD/COMP/VCFDT` depot tree through the same locked release swap
 (with the depot left untouched, paths outside that tree refused, and a
 running sync refused), previous-release retention and rollback, Software Depot
 ID adoption before installation, confirmation by the first tool probe,
-refusal with a tool already present, invalid ID and active-sync refusals,
+refusal with a tool already present, invalid ID, active-sync and tool-update
+refusals, installation-probe mismatch reporting and activation blocking,
 persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 the schedule preview endpoint computing an unsaved schedule's next run in
@@ -117,15 +118,8 @@ the depot-adoption scripts (`scripts/install-checks.sh`,
 `scripts/import-vcfdt-state.sh`, and `scripts/validate-adopted-depot.sh`) that
 let an existing VCFDT depot and Software Depot ID be adopted without
 re-downloading. Those retained scripts remain the file-level migration and
-regression path. The Setup tab now provides the operator-facing Software Depot
-ID adoption path requested in issue #31.
-
-For a retained registration, paste the 36-character Software Depot ID in Setup
-before the first tool install. The console writes `machine_id` to the mounted
-VCFDT state volume and reports that it will be confirmed at first install. The
-install probe must return the same ID before the console reports it confirmed.
-Adoption after installation is refused without changing the active identity.
-The API refuses invalid UUIDs and adoption during a sync or tool update.
+regression path. For the console identity-adoption workflow and required
+ordering, see [First run](../README.md#first-run).
 
 Release validation also requires a live HTTP walk through claim, upload,
 registration, and settings, plus an authenticated HTTPS Range request. The

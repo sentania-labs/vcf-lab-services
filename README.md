@@ -44,7 +44,7 @@ The console then walks through:
    already mirrored under `PROD/COMP/VCFDT` in the depot or by uploading the
    portal-downloaded archive. Both paths validate the archive the same way.
 3. Confirming the persistent Software Depot ID with the tool and saving its
-   activation code.
+   activation code. For a retained ID, paste the already-issued activation code.
 4. Confirming the platform-provided depot and backup mounts.
 5. Choosing the VCF filter, SKU, targets, recurring schedule, timezone, CEIP,
    backup service state, SFTP identity, and download endpoints. The schedule
@@ -56,8 +56,10 @@ The console then walks through:
 The ordering rule for a retained identity is strict: adopt the existing ID
 before installing the tool. The console reports it as adopted and pending, then
 the first installation probe must confirm the same ID. Adoption is refused once
-a tool is installed. A mismatch is reported with both the adopted ID and the ID
-returned by the tool.
+a tool is installed, and adoption must wait while a sync or tool update is
+running. A mismatch shows the adopted ID and the ID returned by the tool (or
+reports that no recognizable ID was returned). Activation-code saving and setup
+completion remain blocked until the adopted ID is confirmed.
 
 The console is organised into Setup, Sync, Settings, Backup, and Logs tabs.
 Every operator setting in this prototype remains editable in the console. The
@@ -127,11 +129,9 @@ share an update lock, so they cannot modify the volume at the same time.
 Restore it from the Setup tab by installing a tool archive already mirrored in
 the depot, or by uploading the licensed archive again.
 
-The retained depot-adoption helpers in `scripts/` remain available for
-file-level migrations and validation. The Setup tab's **Adopt an existing
-Software Depot ID** control is the operator-facing console path requested in
-issue #31, so adopting the 36-byte `machine_id` file no longer requires shell
-access.
+For console-based identity migration, follow [First run](#first-run).
+The retained depot-adoption helpers in `scripts/` are covered in
+[validation boundaries](docs/validation.md).
 
 The config volume carries separate product release and config schema markers.
 An older schema is migrated forward in order. Every release marker change on
