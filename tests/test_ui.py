@@ -95,6 +95,7 @@ class UiApiTests(unittest.TestCase):
         self.secrets = root / "secrets"
         self.secrets.mkdir()
         self.tool_store = root / "vcfdt-tool"
+        self.vcfdt_state = root / "vcfdt-state"
         environment = {
             "STATE_DIR": str(self.state_dir),
             "SETTINGS_FILE": str(self.settings),
@@ -108,7 +109,9 @@ class UiApiTests(unittest.TestCase):
             "SFTP_PASSWORD_FILE": str(self.secrets / "sftp-password"),
             "FLASK_SECRET_FILE": str(self.secrets / "flask-secret"),
             "VCFDT_STORE": str(self.tool_store),
+            "VCFDT_STATE_DIR": str(self.vcfdt_state),
             "SOFTWARE_DEPOT_ID_FILE": str(root / "software-depot-id"),
+            "SOFTWARE_DEPOT_ADOPTION_FILE": str(root / ".software-depot-id-adoption.json"),
             "SETTINGS_PENDING_FILE": str(root / ".settings-pending.json"),
             "VERSION_MARKER_FILE": str(root / ".vcf-services-version"),
             "VERSION_STATUS_FILE": str(root / ".vcf-services-version-status.json"),
@@ -154,15 +157,21 @@ class UiApiTests(unittest.TestCase):
     def tar_tool(
         version="9.1.2",
         machine_id="11111111-1111-4111-8111-111111111111",
+        machine_id_file=None,
         version_output=None,
         profiles=None,
     ):
         if version_output is None:
             version_output = f"Version: {version}\n{version}"
+        machine_id_command = (
+            f"  cat '{machine_id_file}'\n"
+            if machine_id_file is not None
+            else f"  echo 'Software Depot ID: {machine_id}'\n"
+        )
         payload = (
             "#!/bin/sh\n"
             'if [ "${1:-}" = configuration ]; then\n'
-            f"  echo 'Software Depot ID: {machine_id}'\n"
+            f"{machine_id_command}"
             "else\n"
             "  cat <<'VCFDT_VERSION_OUTPUT'\n"
             f"{version_output.rstrip()}\n"
@@ -665,6 +674,45 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(refused.status_code, 409)
         self.assertIn("running sync", refused.get_json()["error"])
 
+    def test_tool_rollback_revalidates_adopted_identity(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        replacement_id = "33333333-3333-4333-8333-333333333333"
+        adopted = self.post(
+            "/api/registration/adopt", json={"machineId": adopted_id}
+        )
+        self.assertEqual(adopted.status_code, 200)
+        installed = self.post(
+            "/api/vcfdt",
+            data={
+                "archive": (
+                    self.tar_tool(machine_id_file=self.vcfdt_state / "machine_id"),
+                    "vcf-download-tool-9.1.2.tar.gz",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(installed.status_code, 201)
+        self.assertEqual(
+            installed.get_json()["registration"]["machineIdStatus"], "confirmed"
+        )
+
+        archive = self.seed_depot_tool("9.2.0", machine_id=replacement_id)
+        replacement = self.install_from_depot(archive.name)
+        self.assertEqual(replacement.status_code, 201)
+        self.assertEqual(
+            replacement.get_json()["registration"]["machineIdStatus"], "mismatch"
+        )
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+
+        rolled_back = self.post("/api/vcfdt/rollback")
+        self.assertEqual(rolled_back.status_code, 200)
+        registration = self.get("/api/registration")
+        self.assertEqual(registration.status_code, 200)
+        self.assertEqual(registration.get_json()["machineId"], adopted_id)
+        self.assertEqual(registration.get_json()["machineIdStatus"], "confirmed")
+
     def test_status_poll_preserves_previous_release_after_successful_sync(self):
         self.claim()
         self.write_state()
@@ -792,6 +840,175 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             "licensed-secret-value\n",
         )
         self.assertNotIn("licensed-secret-value", saved.get_data(as_text=True))
+
+    def test_adopt_before_install_is_confirmed_by_first_tool_probe(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+
+        adopted = self.post(
+            "/api/registration/adopt", json={"machineId": adopted_id}
+        )
+        self.assertEqual(adopted.status_code, 200)
+        self.assertEqual(adopted.get_json()["status"], "adopted")
+        self.assertFalse(adopted.get_json()["confirmed"])
+        self.assertEqual(
+            (self.vcfdt_state / "machine_id").read_text(), adopted_id
+        )
+        self.assertEqual((self.vcfdt_state / "machine_id").stat().st_size, 36)
+        pending = self.get("/api/bootstrap").get_json()
+        self.assertEqual(pending["machineId"], adopted_id)
+        self.assertEqual(pending["machineIdStatus"], "adopted")
+        self.assertIn("first tool install", pending["machineIdMessage"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        refused_activation = self.post(
+            "/api/registration", json={"activationCode": "premature-code"}
+        )
+        self.assertEqual(refused_activation.status_code, 409)
+        self.assertFalse((self.secrets / "activation-code.txt").exists())
+
+        installed = self.post(
+            "/api/vcfdt",
+            data={
+                "archive": (
+                    self.tar_tool(
+                        machine_id_file=self.vcfdt_state / "machine_id"
+                    ),
+                    "vcf-download-tool-9.1.2.tar.gz",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(installed.status_code, 201)
+        self.assertEqual(
+            installed.get_json()["registration"]["machineIdStatus"], "confirmed"
+        )
+        confirmed = self.get("/api/bootstrap").get_json()
+        self.assertEqual(confirmed["machineId"], adopted_id)
+        self.assertEqual(confirmed["machineIdStatus"], "confirmed")
+        self.assertIn("Confirmed", confirmed["machineIdMessage"])
+
+    def test_pending_adoption_uses_durable_record_across_workers(self):
+        self.claim()
+        self.write_state()
+        first_id = "22222222-2222-4222-8222-222222222222"
+        corrected_id = "33333333-3333-4333-8333-333333333333"
+        adopted = self.post(
+            "/api/registration/adopt", json={"machineId": first_id}
+        )
+        self.assertEqual(adopted.status_code, 200)
+
+        self.module._write_secret(self.module.VCFDT_MACHINE_ID_FILE, corrected_id)
+        self.module._record_machine_id_adoption(corrected_id, "adopted")
+        self.assertEqual(self.module._machine_id_cache["value"], first_id)
+
+        pending = self.get("/api/bootstrap").get_json()
+        self.assertEqual(pending["machineId"], corrected_id)
+        self.assertEqual(pending["adoptedMachineId"], corrected_id)
+        self.assertEqual(pending["machineIdStatus"], "adopted")
+
+    def test_adopt_with_tool_installed_preserves_identity_and_activation(self):
+        self.claim()
+        self.write_state()
+        original_id = "11111111-1111-4111-8111-111111111111"
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        self.vcfdt_state.mkdir()
+        (self.vcfdt_state / "machine_id").write_text(original_id + "\n")
+        installed = self.post(
+            "/api/vcfdt",
+            data={
+                "archive": (
+                    self.tar_tool(
+                        machine_id_file=self.vcfdt_state / "machine_id"
+                    ),
+                    "vcf-download-tool-9.1.2.tar.gz",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(installed.status_code, 201)
+
+        saved = self.post(
+            "/api/registration", json={"activationCode": "retained-code"}
+        )
+        self.assertEqual(saved.status_code, 200)
+        response = self.post(
+            "/api/registration/adopt", json={"machineId": adopted_id}
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("before installing", response.get_json()["error"])
+        self.assertEqual(
+            (self.vcfdt_state / "machine_id").read_text(), original_id + "\n"
+        )
+        self.assertEqual(
+            self.get("/api/registration").get_json()["machineId"], original_id
+        )
+        self.assertEqual(
+            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), original_id
+        )
+        self.assertFalse(self.module.SOFTWARE_DEPOT_ADOPTION_FILE.exists())
+        self.assertEqual(
+            (self.secrets / "activation-code.txt").read_text(), "retained-code\n"
+        )
+
+    def test_adopt_before_install_reports_installation_probe_mismatch(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        response = self.post(
+            "/api/registration/adopt", json={"machineId": adopted_id}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.upload_tool().status_code, 201)
+        status = self.get("/api/bootstrap").get_json()
+        self.assertEqual(status["machineIdStatus"], "mismatch")
+        self.assertIn(adopted_id, status["machineIdMessage"])
+        self.assertIn(
+            "11111111-1111-4111-8111-111111111111", status["machineIdMessage"]
+        )
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        self.assertEqual(
+            self.post("/api/registration", json={"activationCode": "wrong-code"}).status_code,
+            409,
+        )
+        self.assertFalse((self.secrets / "activation-code.txt").exists())
+
+    def test_adopt_rejects_invalid_software_depot_id(self):
+        self.claim()
+        self.write_state()
+        for value in (None, "not-a-uuid", "11111111-1111-4111-8111-11111111111"):
+            response = self.post(
+                "/api/registration/adopt", json={"machineId": value}
+            )
+            self.assertEqual(response.status_code, 400)
+        self.assertFalse((self.vcfdt_state / "machine_id").exists())
+
+    def test_adopt_is_refused_during_running_sync(self):
+        self.claim()
+        self.write_state(running=True)
+        response = self.post(
+            "/api/registration/adopt",
+            json={"machineId": "22222222-2222-4222-8222-222222222222"},
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("running sync", response.get_json()["error"])
+        self.assertFalse((self.vcfdt_state / "machine_id").exists())
+
+    def test_adopt_is_refused_during_tool_update(self):
+        self.claim()
+        self.write_state()
+        self.tool_store.mkdir()
+        lock = (self.tool_store / ".update.lock").open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        response = self.post(
+            "/api/registration/adopt",
+            json={"machineId": "22222222-2222-4222-8222-222222222222"},
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("tool update", response.get_json()["error"])
+        self.assertFalse((self.vcfdt_state / "machine_id").exists())
 
     def test_settings_replace_installer_questions_and_patch_tool_endpoints(self):
         self.claim()
@@ -1163,6 +1380,8 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "vcfdt-rollback",
                 "vcfdt-archive",
                 "vcfdt-upload",
+                "adopt-machine-id",
+                "adopt-machine-id-button",
                 "activation-code",
                 "save-activation",
                 "storage-confirmed",

@@ -46,6 +46,17 @@ MIGRATION_STATUS_FILE = Path(
 SOFTWARE_DEPOT_ID_FILE = Path(
     os.environ.get("SOFTWARE_DEPOT_ID_FILE", "/config/software-depot-id")
 )
+SOFTWARE_DEPOT_ADOPTION_FILE = Path(
+    os.environ.get(
+        "SOFTWARE_DEPOT_ADOPTION_FILE", "/config/.software-depot-id-adoption.json"
+    )
+)
+VCFDT_STATE_DIR = Path(
+    os.environ.get(
+        "VCFDT_STATE_DIR", str(Path.home() / ".local" / "share" / "vmware" / "vdt")
+    )
+)
+VCFDT_MACHINE_ID_FILE = VCFDT_STATE_DIR / "machine_id"
 SETTINGS_PENDING_FILE = Path(
     os.environ.get("SETTINGS_PENDING_FILE", "/config/.settings-pending.json")
 )
@@ -799,10 +810,7 @@ def _replace_tool(install):
             if _state().get("running", False):
                 return jsonify({"error": "wait for the running sync to finish"}), 409
             metadata, old_target, machine_id = install()
-            if machine_id:
-                _remember_machine_id(machine_id)
-            else:
-                _machine_id_cache["value"] = None
+            _reconcile_machine_id_adoption(machine_id)
             old_previous = _release_target("previous")
             previous = VCFDT_STORE / "previous"
             if old_target:
@@ -823,7 +831,13 @@ def _replace_tool(install):
         return jsonify(
             {"error": "the tool could not be staged on its mounted volume"}
         ), 500
-    return jsonify({"installed": True, **metadata}), 201
+    return jsonify(
+        {
+            "installed": True,
+            **metadata,
+            "registration": _registration_details(_current_tool_info()),
+        }
+    ), 201
 
 
 def _rollback_tool():
@@ -854,7 +868,11 @@ def _rollback_tool():
             finally:
                 next_current.unlink(missing_ok=True)
                 next_previous.unlink(missing_ok=True)
-            _machine_id_cache["value"] = None
+            try:
+                machine_id = _probe_machine_id(previous_target)
+            except ToolArchiveError:
+                machine_id = None
+            _reconcile_machine_id_adoption(machine_id)
             return jsonify(_current_tool_info())
     except BlockingIOError:
         return jsonify(
@@ -1193,6 +1211,79 @@ def _remember_machine_id(value):
     _machine_id_cache["value"] = value
 
 
+def _machine_id_adoption():
+    try:
+        document = json.loads(SOFTWARE_DEPOT_ADOPTION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    adopted_id = document.get("adoptedId")
+    status = document.get("status")
+    if (
+        not isinstance(adopted_id, str)
+        or SOFTWARE_DEPOT_ID_RE.fullmatch(adopted_id) is None
+        or status not in {"adopted", "confirmed", "mismatch"}
+    ):
+        return None
+    reported_id = document.get("reportedId")
+    if reported_id is not None and (
+        not isinstance(reported_id, str)
+        or SOFTWARE_DEPOT_ID_RE.fullmatch(reported_id) is None
+    ):
+        reported_id = None
+    return {
+        "status": status,
+        "adoptedId": adopted_id,
+        "reportedId": reported_id,
+    }
+
+
+def _record_machine_id_adoption(adopted_id, status, reported_id=None):
+    document = {
+        "status": status,
+        "adoptedId": adopted_id,
+        "reportedId": reported_id,
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_secret(SOFTWARE_DEPOT_ADOPTION_FILE, json.dumps(document) + "\n")
+    return document
+
+
+def _reconcile_machine_id_adoption(machine_id):
+    adoption = _machine_id_adoption()
+    if machine_id:
+        _remember_machine_id(machine_id)
+    else:
+        _machine_id_cache["value"] = None
+    if adoption is None:
+        return None
+    matches = bool(
+        machine_id and machine_id.lower() == adoption["adoptedId"].lower()
+    )
+    return _record_machine_id_adoption(
+        adoption["adoptedId"],
+        "confirmed" if matches else "mismatch",
+        machine_id,
+    )
+
+
+def _adoption_message(adoption, tool_installed):
+    if adoption is None:
+        return None
+    adopted_id = adoption["adoptedId"]
+    if not tool_installed or adoption["status"] == "adopted":
+        message = (
+            f"Adopted {adopted_id}. It will be confirmed at the first tool install."
+        )
+    elif adoption["status"] == "confirmed":
+        message = f"Confirmed {adopted_id} with the installed tool."
+    else:
+        reported = adoption.get("reportedId") or "no recognizable ID"
+        message = f"Identity mismatch: adopted {adopted_id}, but the tool reported {reported}."
+    return message
+
+
 def _machine_id():
     if _machine_id_cache["value"]:
         return _machine_id_cache["value"], None
@@ -1210,6 +1301,62 @@ def _machine_id():
             "The tool probe failed and did not return a recognizable Software Depot ID. "
             "The last verified ID is unchanged."
         )
+
+
+def _registration_details(tool=None):
+    tool = _current_tool_info() if tool is None else tool
+    adoption = _machine_id_adoption()
+    if (
+        adoption is not None
+        and tool["installed"]
+        and adoption["status"] in {"confirmed", "mismatch"}
+    ):
+        machine_id = (
+            adoption["adoptedId"]
+            if adoption["status"] == "confirmed"
+            else adoption.get("reportedId")
+        )
+        error = None
+    elif (
+        adoption is not None
+        and tool["installed"]
+        and adoption["status"] == "adopted"
+    ):
+        try:
+            machine_id = _probe_machine_id(VCFDT_STORE / "current")
+            _remember_machine_id(machine_id)
+            error = None
+        except (ToolArchiveError, OSError):
+            machine_id = _persisted_machine_id()
+            error = (
+                "The tool probe failed and did not return a recognizable Software "
+                "Depot ID. The adopted ID is not confirmed."
+            )
+        if not error and machine_id:
+            matches = machine_id.lower() == adoption["adoptedId"].lower()
+            adoption = _record_machine_id_adoption(
+                adoption["adoptedId"],
+                "confirmed" if matches else "mismatch",
+                machine_id,
+            )
+    elif adoption is not None and not tool["installed"]:
+        machine_id = adoption["adoptedId"]
+        error = None
+    else:
+        machine_id, error = _machine_id()
+    status = None
+    if adoption is not None:
+        status = adoption["status"] if tool["installed"] else "adopted"
+    elif tool["installed"] and machine_id and not error:
+        status = "confirmed"
+    return {
+        "machineId": machine_id,
+        "machineIdError": error,
+        "machineIdStatus": status,
+        "adoptedMachineId": adoption["adoptedId"] if adoption else None,
+        "reportedMachineId": adoption.get("reportedId") if adoption else None,
+        "machineIdMessage": _adoption_message(adoption, tool["installed"]),
+    }
 
 
 def _storage_entry(path):
@@ -1413,9 +1560,7 @@ def bootstrap_status():
             }
         )
     tool = _current_tool_info()
-    machine_id, machine_error = (None, None)
-    if tool["installed"]:
-        machine_id, machine_error = _machine_id()
+    registration = _registration_details(tool)
     return jsonify(
         {
             "claimed": auth is not None,
@@ -1424,8 +1569,7 @@ def bootstrap_status():
             "versionProblem": version_problem,
             "migration": _migration_status(),
             "tool": tool,
-            "machineId": machine_id,
-            "machineIdError": machine_error,
+            **registration,
             "activationConfigured": _activation_configured(),
             "storage": {
                 "confirmed": settings["storageConfirmed"],
@@ -1572,13 +1716,19 @@ def rollback_vcfdt():
 
 @app.get("/api/registration")
 def registration_status():
-    machine_id, error = _machine_id()
-    status_code = 200 if machine_id and not error else 409
+    details = _registration_details()
+    status_code = (
+        200
+        if details["machineId"]
+        and not details["machineIdError"]
+        and details["machineIdStatus"] not in {"adopted", "mismatch"}
+        else 409
+    )
     return (
         jsonify(
             {
-                "machineId": machine_id,
-                "error": error,
+                **details,
+                "error": details["machineIdError"],
                 "activationConfigured": _activation_configured(),
                 "instructions": ARMING_INSTRUCTIONS,
             }
@@ -1587,15 +1737,58 @@ def registration_status():
     )
 
 
+@app.post("/api/registration/adopt")
+def adopt_registration():
+    body = request.get_json(silent=True)
+    value = body.get("machineId") if isinstance(body, dict) else None
+    if not isinstance(value, str):
+        return jsonify({"error": "enter a 36-character Software Depot ID UUID"}), 400
+    value = value.strip()
+    if len(value) != 36 or SOFTWARE_DEPOT_ID_RE.fullmatch(value) is None:
+        return jsonify({"error": "enter a 36-character Software Depot ID UUID"}), 400
+    value = value.lower()
+    try:
+        with _tool_update_lock():
+            if _state().get("running", False):
+                return jsonify({"error": "wait for the running sync to finish"}), 409
+            if _current_tool_info()["installed"]:
+                return jsonify(
+                    {"error": "adopt an existing Software Depot ID before installing the tool"}
+                ), 409
+            _write_secret(VCFDT_MACHINE_ID_FILE, value)
+            _remember_machine_id(value)
+            adoption = _record_machine_id_adoption(value, "adopted")
+            return jsonify(
+                {
+                    "adopted": True,
+                    "confirmed": False,
+                    "machineId": value,
+                    "status": "adopted",
+                    "message": _adoption_message(adoption, False),
+                }
+            )
+    except BlockingIOError:
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
+    except OSError:
+        return jsonify(
+            {"error": "the Software Depot ID could not be written to durable tool state"}
+        ), 500
+
+
 @app.post("/api/registration")
 def save_registration():
     body = request.get_json(silent=True) or {}
     activation_code = body.get("activationCode")
     if _state().get("running", False):
         return jsonify({"error": "wait for the running sync to finish"}), 409
-    machine_id, machine_error = _machine_id()
-    if machine_error:
-        return jsonify({"error": machine_error}), 409
+    registration = _registration_details()
+    machine_id = registration["machineId"]
+    if registration["machineIdStatus"] in {"adopted", "mismatch"}:
+        return jsonify({"error": registration["machineIdMessage"]}), 409
+    if registration["machineIdError"]:
+        return jsonify({"error": registration["machineIdError"]}), 409
     if not isinstance(activation_code, str) or not activation_code.strip():
         return jsonify({"error": "enter the activation code from Broadcom"}), 400
     activation_code = activation_code.strip()
@@ -1813,8 +2006,12 @@ def complete_setup():
     missing = []
     if not _current_tool_info()["installed"]:
         missing.append("licensed tool")
-    machine_id, machine_error = _machine_id()
-    if not machine_id or machine_error:
+    registration = _registration_details()
+    if (
+        not registration["machineId"]
+        or registration["machineIdError"]
+        or registration["machineIdStatus"] != "confirmed"
+    ):
         missing.append("Software Depot ID")
     if not _activation_configured():
         missing.append("activation code")

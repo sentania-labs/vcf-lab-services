@@ -73,6 +73,13 @@ for name in ("depot-sync", "admin-ui"):
     mount = mounts[0]
     assert mount["type"] == "volume" and mount["source"] == "vcfdt_tool", name
     assert mount.get("read_only", False) is False, f"{name}: tool mount must be writable"
+ui = config["services"]["admin-ui"]
+state_mounts = [mount for mount in ui["volumes"]
+                if mount["target"] == "/root/.local/share/vmware/vdt"]
+assert len(state_mounts) == 1 and state_mounts[0]["source"] == "vcfdt_state", \
+    "admin-ui: durable VCFDT state mount is incorrect"
+assert ui["environment"]["VCFDT_STATE_DIR"] == "/root/.local/share/vmware/vdt", \
+    "admin-ui: adoption path does not match the durable state mount"
 '
 grep -q 'name: vcf-services-vcfdt-state' docker-compose.yml || fail "machine ID volume renamed"
 grep -q 'name: vcf-services-sftp-host-keys' docker-compose.yml || fail "SFTP host-key volume renamed"

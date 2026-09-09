@@ -162,7 +162,11 @@
       <div class="setup-card">
         <h3>Register the Software Depot ID</h3>
         <div class="stat"><div class="key">Software Depot ID</div><div id="machine-id" class="value">Install the tool first</div></div>
-        <p class="help">Register this ID in Broadcom's VCF Download Tool registration flow, then paste the activation code below.</p>
+        <p class="help" id="machine-id-status">Register this ID in Broadcom's VCF Download Tool registration flow, then paste the activation code below.</p>
+        <div class="formgrid"><div class="field full"><label for="adopt-machine-id">Adopt an existing Software Depot ID</label>
+          <input id="adopt-machine-id" autocomplete="off" maxlength="36" placeholder="00000000-0000-0000-0000-000000000000"></div></div>
+        <p class="help">Adopt the ID before the first tool install to retain its activation code. Adoption is unavailable once the tool is installed.</p>
+        <div class="row" style="margin-top:10px"><button id="adopt-machine-id-button" class="secondary">Adopt existing ID</button><span id="adoption-flash" class="muted"></span></div>
         <div class="formgrid"><div class="field full"><label for="activation-code">Activation code</label>
           <input id="activation-code" type="password" autocomplete="off" placeholder="Stored only in the protected secrets volume"></div></div>
         <div class="row" style="margin-top:10px"><button id="save-activation">Save activation code</button><span id="activation-flash" class="muted"></span></div>
@@ -436,6 +440,10 @@ function populateSetup(data) {
   $('signed-in').textContent=`Signed in as ${settings.username}`; $('logout').hidden=false;
   $('setup').hidden=false; $('ready').hidden=!data.setupComplete; $('finish-setup').hidden=data.setupComplete;
   $('machine-id').textContent=data.machineId || data.machineIdError || 'Install the tool first';
+  $('machine-id-status').textContent=data.machineIdMessage || (data.machineIdStatus === 'confirmed' ? 'Confirmed by the installed tool. Register this ID in Broadcom, then save its activation code below.' : 'Register this ID in Broadcom\'s VCF Download Tool registration flow, then paste the activation code below.');
+  $('adoption-flash').textContent=data.machineIdMessage || '';
+  $('adopt-machine-id').disabled=data.tool.installed;
+  $('adopt-machine-id-button').disabled=data.tool.installed;
   $('vcfdt-flash').textContent=data.tool.installed ? (data.tool.versionVerified ? `${data.tool.version} is ready` : 'Installed; the reported version could not be verified') : 'Not installed';
   $('vcfdt-installed').textContent=toolLabel(data.tool);
   previousToolAvailable=Boolean(data.tool.previous?.installed);
@@ -520,6 +528,18 @@ $('save-activation').onclick=async()=>{
   $('activation-flash').textContent='Saving';
   try { await api('api/registration',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({activationCode:$('activation-code').value})}); $('activation-code').value=''; populateSetup(await api('api/bootstrap')); }
   catch(error){$('activation-flash').textContent=error.message;}
+};
+
+$('adopt-machine-id-button').onclick=async()=>{
+  const button=$('adopt-machine-id-button'); button.disabled=true; $('adoption-flash').textContent='Adopting identity';
+  try {
+    const result=await api('api/registration/adopt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({machineId:$('adopt-machine-id').value})});
+    $('adopt-machine-id').value=''; populateSetup(await api('api/bootstrap')); $('adoption-flash').textContent=result.message;
+  } catch(error) {
+    $('adoption-flash').textContent=error.message;
+    try { populateSetup(await api('api/bootstrap')); } catch (_refreshError) {}
+    $('adoption-flash').textContent=error.message;
+  } finally { button.disabled=Boolean(bootstrap?.tool.installed); }
 };
 
 // Schedule picker. The stored setting stays the five-field CRON_SCHEDULE

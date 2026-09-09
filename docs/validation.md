@@ -26,8 +26,11 @@ The UI test covers first-person ownership, login, live depot authentication,
 licensed archive staging by upload, listing and installing tool archives
 from a stub `PROD/COMP/VCFDT` depot tree through the same locked release swap
 (with the depot left untouched, paths outside that tree refused, and a
-running sync refused), previous-release retention and rollback, persistent
-Software Depot ID retrieval, activation
+running sync refused), previous-release retention and rollback, Software Depot
+ID adoption before installation, confirmation by the first tool probe,
+refusal with a tool already present, invalid ID, active-sync and tool-update
+refusals, installation-probe mismatch reporting and activation blocking,
+persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 the schedule preview endpoint computing an unsaved schedule's next run in
 the configured or supplied timezone and rejecting bad input,
@@ -38,8 +41,8 @@ blocked, a save that lands under the run's settings snapshot lock before the
 run publishes its state still being flagged for the next run, the live backup
 service settings being reported as applied now instead of deferred, the tabbed
 console rendering every control including the daily, weekly, and custom cron
-schedule picker with its next-run readout, advisory tool version and Software Depot ID
-probes that preserve the last verified ID, forward config migration with an
+schedule picker with its next-run readout, advisory tool probes as described in
+[release validation](releasing.md), forward config migration with an
 in-volume backup, and newer-version downgrade refusal. The Compose test
 enforces the latest-tracking published-image defaults,
 their always-pull behavior, and their override variables,
@@ -114,8 +117,9 @@ purge requests volume removal. The same test remains the regression guard for
 the depot-adoption scripts (`scripts/install-checks.sh`,
 `scripts/import-vcfdt-state.sh`, and `scripts/validate-adopted-depot.sh`) that
 let an existing VCFDT depot and Software Depot ID be adopted without
-re-downloading. Adoption still needs its separate console path before that flow
-can be claimed working.
+re-downloading. Those retained scripts remain the file-level migration and
+regression path. For the console identity-adoption workflow and required
+ordering, see [First run](../README.md#first-run).
 
 Release validation also requires a live HTTP walk through claim, upload,
 registration, and settings, plus an authenticated HTTPS Range request. The
@@ -129,6 +133,8 @@ The stub cannot verify these claims:
   output is already confirmed against captured licensed tool output (see
   `docs/releasing.md`).
 - Registration and download with a real activation code.
+- Adopting the `infra.int` depot's ID on a fresh appliance, then completing a
+  sync with its existing activation code.
 - A real content sync and consumption by VCF Installer, SDDC Manager, UMDS, or
   Fleet.
 - Consumer trust import for the Caddy internal CA.

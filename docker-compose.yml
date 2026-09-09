@@ -140,6 +140,7 @@ services:
       REDIS_PORT: "6379"
       REDIS_PASSWORD_FILE: /run/vcf-services-secrets/ui/redis-password
       VCFDT_STORE: /opt/vcfdt
+      VCFDT_STATE_DIR: /root/.local/share/vmware/vdt
       AUTH_FILE: /run/vcf-services-secrets/ui/auth.json
       ACTIVATION_CODE_FILE: /run/vcf-services-secrets/sync/activation-code.txt
       SFTP_PASSWORD_FILE: /run/vcf-services-secrets/sftp/sftp-password
