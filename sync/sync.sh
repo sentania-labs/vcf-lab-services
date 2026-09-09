@@ -52,12 +52,12 @@ log() { echo "[sync $(now)] $*"; }
 
 protected_trees_for_target() {
 	local label="$1"
-	[ -s "$DEPOT_OWNERSHIP_FILE" ] || return 0
-	jq -r --arg label "$label" '.trees | to_entries[] |
+	[ -e "$DEPOT_OWNERSHIP_FILE" ] || [ -L "$DEPOT_OWNERSHIP_FILE" ] || return 0
+	jq -er --arg label "$label" 'if (.trees | type) != "object" then error("invalid ownership manifest") else . end | [.trees | to_entries[] |
 		select(.value.protected == true) |
 		select(if $label == "esx-image-library" then .key == "ESX_HOST"
 		       elif $label == "vkr-content-library" then .key == "VKR"
-		       else true end) | .key' "$DEPOT_OWNERSHIP_FILE"
+		       else true end) | .key] | join("\n")' "$DEPOT_OWNERSHIP_FILE"
 }
 
 record_tree_if_absent() {
@@ -66,20 +66,26 @@ record_tree_if_absent() {
 	local protected="$3"
 	local tmp
 	(
-		flock -x 5
+		flock -x 5 || exit 1
 		tmp="$(mktemp "$STATE_DIR/depot-ownership.json.XXXXXX")" || exit 1
-		if ! jq --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
-			'.version = 1 | .trees = (.trees // {}) |
-			 if .trees[$name] then .
-			 else .trees[$name] = {ownership:$ownership, protected:$protected}
-			 end' \
-			"${DEPOT_OWNERSHIP_FILE:-/dev/null}" > "$tmp" 2>/dev/null; then
-			jq -n --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
+		trap 'rm -f "$tmp"' EXIT
+		if [ -e "$DEPOT_OWNERSHIP_FILE" ] || [ -L "$DEPOT_OWNERSHIP_FILE" ]; then
+			jq -e --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
+				'if (.trees | type) != "object" then error("invalid ownership manifest") else . end |
+				 .version = 1 |
+				 if .trees[$name] then .
+				 else .trees[$name] = {ownership:$ownership, protected:$protected}
+				 end' "$DEPOT_OWNERSHIP_FILE" > "$tmp" || exit 1
+		else
+			jq -en --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
 				'{version:1, trees:{($name):{ownership:$ownership, protected:$protected}}}' \
-				> "$tmp"
+				> "$tmp" || exit 1
 		fi
-		mv "$tmp" "$DEPOT_OWNERSHIP_FILE"
-	) 5>"$DEPOT_OWNERSHIP_LOCK" || log "WARNING: could not record ownership for PROD/COMP/$name"
+		mv -- "$tmp" "$DEPOT_OWNERSHIP_FILE" || exit 1
+	) 5>"$DEPOT_OWNERSHIP_LOCK" || {
+		log "ERROR: could not record ownership for PROD/COMP/$name; refusing sync"
+		return 1
+	}
 }
 
 record_product_tree() {
@@ -95,7 +101,7 @@ record_new_product_trees() {
 	while IFS= read -r -d '' tree; do
 		name="$(basename "$tree")"
 		if [ -z "${known_depot_trees[$name]+present}" ]; then
-			record_product_tree "$name"
+			record_product_tree "$name" || return 1
 			known_depot_trees["$name"]=1
 		fi
 	done < <(find "$comp_root" -mindepth 1 -maxdepth 1 -type d -print0)
@@ -158,9 +164,9 @@ if [ -d "$comp_root" ]; then
 	while IFS= read -r -d '' tree; do
 		name="$(basename "$tree")"
 		if [ -f "$tree/items.json" ] && [ -f "$tree/lib.json" ]; then
-			record_tree_if_absent "$name" operator-provided true
+			record_tree_if_absent "$name" operator-provided true || exit 1
 		else
-			record_tree_if_absent "$name" unknown false
+			record_tree_if_absent "$name" unknown false || exit 1
 		fi
 		known_depot_trees["$name"]=1
 	done < <(find "$comp_root" -mindepth 1 -maxdepth 1 -type d -print0)
@@ -288,7 +294,10 @@ run_target() {
 	shift
 	log ">>> $label"
 	local protected name
-	protected="$(protected_trees_for_target "$label")"
+	if ! protected="$(protected_trees_for_target "$label")"; then
+		log "ERROR: could not read depot ownership; refusing sync"
+		exit 1
+	fi
 	if [ -n "$protected" ]; then
 		while IFS= read -r name; do
 			log "PROD/COMP/$name is protected, skipping the target without changing it"
@@ -346,7 +355,7 @@ for target in $SYNC_TARGETS; do
 			log "unknown sync target '$target', continuing"
 			;;
 	esac
-	record_new_product_trees
+	record_new_product_trees || exit 1
 	if [ "$tool_backed_target" = true ] && [ "$last_status" = OK ]; then
 		successful_tool_sync=true
 	fi
