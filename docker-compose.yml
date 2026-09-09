@@ -146,7 +146,7 @@ services:
       SFTP_PASSWORD_FILE: /run/vcf-services-secrets/sftp/sftp-password
       FLASK_SECRET_FILE: /run/vcf-services-secrets/ui/flask-secret
     volumes:
-      - depot_store:/depot:ro
+      - depot_store:/depot:rw
       - backup_store:/mnt/backup:ro
       - caddy_data:/caddy-data:ro
       - vcfdt_tool:/opt/vcfdt:rw

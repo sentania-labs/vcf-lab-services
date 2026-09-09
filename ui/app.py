@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """VCF Services admin console.
 
-The sync container remains the only depot writer. This app reads config and
-state files and exchanges jobs with the sync service over the password
-protected Redis bus documented in docs/redis-contract.md. It never talks to
-the Docker daemon.
+The sync container remains the only writer of product-managed depot content.
+This app performs operator-confirmed explorer mutations under the same locks,
+reads config and state files, and exchanges jobs with the sync service over the
+password-protected Redis bus documented in docs/redis-contract.md. It never
+talks to the Docker daemon.
 """
 
 import fcntl
@@ -180,6 +181,10 @@ class ToolArchiveError(ValueError):
     """An operator-supplied archive failed validation."""
 
 
+class DepotError(ValueError):
+    """A depot explorer request failed a safety check."""
+
+
 OWNERSHIP_VALUES = {"product-managed", "operator-provided", "unknown"}
 
 
@@ -277,48 +282,205 @@ def _tree_usage(path):
     return size_bytes, file_count
 
 
-def _depot_ownership_inventory():
+def _depot_comp_directories():
     root = DEPOT / "PROD" / "COMP"
     try:
-        directories = sorted(
+        return sorted(
             path for path in root.iterdir() if path.is_dir() and not path.is_symlink()
         )
     except OSError:
-        directories = []
+        return []
+
+
+def _ensure_ownership_manifest(directories=None):
+    directories = _depot_comp_directories() if directories is None else directories
     changed = False
     with _ownership_lock():
         manifest = _read_ownership_manifest()
         entries = manifest["trees"]
-        rows = []
         for path in directories:
             content_library = (path / "items.json").is_file() and (
                 path / "lib.json"
             ).is_file()
-            item_count = _content_library_item_count(path) if content_library else None
             entry = entries.get(path.name)
             if entry is None:
                 ownership = "operator-provided" if content_library else "unknown"
-                entry = {
+                entries[path.name] = {
                     "ownership": ownership,
                     "protected": ownership == "operator-provided",
                 }
-                entries[path.name] = entry
                 changed = True
-            size_bytes, file_count = _tree_usage(path)
-            rows.append(
-                {
-                    "name": path.name,
-                    "path": f"PROD/COMP/{path.name}",
-                    "sizeBytes": size_bytes,
-                    "fileCount": file_count,
-                    "itemCount": item_count,
-                    "contentLibrary": content_library,
-                    **entry,
-                }
-            )
         if changed:
             _write_ownership_manifest(manifest)
+    return manifest
+
+
+def _depot_ownership_inventory():
+    directories = _depot_comp_directories()
+    manifest = _ensure_ownership_manifest(directories)
+    rows = []
+    for path in directories:
+        content_library = (path / "items.json").is_file() and (
+            path / "lib.json"
+        ).is_file()
+        item_count = _content_library_item_count(path) if content_library else None
+        entry = manifest["trees"][path.name]
+        size_bytes, file_count = _tree_usage(path)
+        rows.append(
+            {
+                "name": path.name,
+                "path": f"PROD/COMP/{path.name}",
+                "sizeBytes": size_bytes,
+                "fileCount": file_count,
+                "itemCount": item_count,
+                "contentLibrary": content_library,
+                **entry,
+            }
+        )
     return rows
+
+
+def _depot_relative_path(value, *, allow_root=True, must_exist=False):
+    if not isinstance(value, str) or "\x00" in value or "\\" in value:
+        raise DepotError("the depot path is invalid")
+    normalized = value.strip().strip("/")
+    if value.strip().startswith("/"):
+        raise DepotError("absolute paths are not allowed")
+    if not normalized:
+        if not allow_root:
+            raise DepotError("choose an entry below the depot root")
+        parts = ()
+    else:
+        relative = PurePosixPath(normalized)
+        if relative.is_absolute() or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
+            raise DepotError("the depot path must stay below the depot root")
+        parts = relative.parts
+    try:
+        resolved_root = DEPOT.resolve(strict=True)
+    except OSError as exc:
+        raise DepotError("the depot root is not available") from exc
+    candidate = DEPOT.joinpath(*parts)
+    cursor = DEPOT
+    for part in parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise DepotError("symbolic links cannot be used through the depot explorer")
+    try:
+        resolved = candidate.resolve(strict=must_exist)
+    except OSError as exc:
+        raise DepotError("the depot path does not exist") from exc
+    if resolved != resolved_root and not resolved.is_relative_to(resolved_root):
+        raise DepotError("the depot path escapes the depot root")
+    return candidate, "/".join(parts)
+
+
+def _entry_usage(path):
+    if path.is_symlink():
+        try:
+            return path.lstat().st_size, 1
+        except OSError:
+            return 0, 0
+    if path.is_file():
+        try:
+            return path.stat().st_size, 1
+        except OSError:
+            return 0, 0
+    return _tree_usage(path)
+
+
+def _protected_trees_for_path(relative, *, include_descendants=False):
+    requested = tuple(PurePosixPath(relative).parts) if relative else ()
+    manifest = _ensure_ownership_manifest()
+    matches = []
+    for name, entry in manifest["trees"].items():
+        if not entry.get("protected"):
+            continue
+        protected = ("PROD", "COMP", name)
+        inside = len(requested) >= len(protected) and requested[: len(protected)] == protected
+        contains = len(requested) < len(protected) and protected[: len(requested)] == requested
+        if inside or (include_descendants and contains):
+            matches.append(name)
+    return sorted(matches)
+
+
+def _top_level_comp_trees():
+    root = DEPOT / "PROD" / "COMP"
+    try:
+        return {
+            path.name
+            for path in root.iterdir()
+            if path.is_dir() and not path.is_symlink()
+        }
+    except OSError:
+        return set()
+
+
+def _record_operator_trees(names):
+    if not names:
+        return
+    with _ownership_lock():
+        manifest = _read_ownership_manifest()
+        changed = False
+        for name in names:
+            if name not in manifest["trees"]:
+                manifest["trees"][name] = {
+                    "ownership": "operator-provided",
+                    "protected": True,
+                }
+                changed = True
+        if changed:
+            _write_ownership_manifest(manifest)
+
+
+def _forget_deleted_trees(relative):
+    requested = tuple(PurePosixPath(relative).parts)
+    with _ownership_lock():
+        manifest = _read_ownership_manifest()
+        removed = []
+        for name in list(manifest["trees"]):
+            tree = ("PROD", "COMP", name)
+            common = min(len(requested), len(tree))
+            if requested[:common] == tree[:common] and len(requested) <= len(tree):
+                removed.append(name)
+                del manifest["trees"][name]
+        if removed:
+            _write_ownership_manifest(manifest)
+
+
+@contextmanager
+def _depot_mutation_guard():
+    STATE.mkdir(parents=True, exist_ok=True)
+    sync_lock = open(STATE / "sync.lock", "a+", encoding="utf-8")
+    try:
+        fcntl.flock(sync_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with _tool_update_lock():
+            yield
+    finally:
+        sync_lock.close()
+
+
+def _is_licensed_tool_name(name):
+    return "vcf-download-tool" in name.lower()
+
+
+def _validate_depot_staging(staging):
+    for root, dirs, files in os.walk(staging, followlinks=False):
+        root_path = Path(root)
+        for name in dirs + files:
+            path = root_path / name
+            if path.is_symlink():
+                raise DepotError("archives containing symbolic links are not accepted")
+            if _is_licensed_tool_name(name):
+                raise DepotError(
+                    "licensed VCF Download Tool archives must use the Setup tab"
+                )
+
+
+def _is_patch_store_path(relative):
+    parts = tuple(PurePosixPath(relative).parts) if relative else ()
+    return bool(parts and parts[0] == "umds-patch-store")
 
 
 def _auth_doc():
@@ -781,8 +943,8 @@ def _install_tool_archive(archive_path, filename, source):
     """Stage one validated archive as the new current release.
 
     The archive is read in place. An upload has already been saved under the
-    tool store, and a depot archive is opened read-only where it sits under
-    the read-only depot mount. Nothing is ever written into the depot.
+    tool store, and a depot archive is opened in place. Installation does not
+    change that archive or write other depot content.
     """
     archive_kind = _archive_kind(filename)
     release_id = uuid.uuid4().hex
@@ -1839,6 +2001,212 @@ def depot_ownership():
     )
 
 
+@app.get("/api/depot/tree")
+def depot_tree():
+    try:
+        directory, relative = _depot_relative_path(
+            request.args.get("path", ""), must_exist=True
+        )
+        if not directory.is_dir():
+            raise DepotError("choose a depot directory to browse")
+        entries = []
+        for path in sorted(
+            directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
+        ):
+            if path.name.startswith(".vcf-services-upload-"):
+                continue
+            child_relative = "/".join(filter(None, (relative, path.name)))
+            size_bytes, file_count = _entry_usage(path)
+            protected = _protected_trees_for_path(
+                child_relative, include_descendants=True
+            )
+            entries.append(
+                {
+                    "name": path.name,
+                    "path": child_relative,
+                    "type": "symlink"
+                    if path.is_symlink()
+                    else "directory"
+                    if path.is_dir()
+                    else "file",
+                    "sizeBytes": size_bytes,
+                    "fileCount": file_count,
+                    "protected": bool(protected),
+                    "protectedTrees": protected,
+                }
+            )
+    except (DepotError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    parent = "" if not relative or "/" not in relative else relative.rsplit("/", 1)[0]
+    return jsonify(
+        {
+            "path": relative,
+            "parent": parent,
+            "publicDownload": _is_patch_store_path(relative),
+            "entries": entries,
+        }
+    )
+
+
+@app.post("/api/depot/upload")
+def upload_depot_entry():
+    upload = request.files.get("upload")
+    if upload is None or not upload.filename:
+        return jsonify({"error": "choose a file or archive to upload"}), 400
+    destination_value = request.form.get("path", "")
+    extract = str(request.form.get("extract", "false")).lower() == "true"
+    filename = PurePosixPath(str(upload.filename).replace("\\", "/")).name
+    if not filename or filename in {".", ".."}:
+        return jsonify({"error": "the upload filename is invalid"}), 400
+    if _is_licensed_tool_name(filename):
+        return jsonify(
+            {"error": "licensed VCF Download Tool archives must use the Setup tab"}
+        ), 400
+    staging = None
+    try:
+        with _depot_mutation_guard():
+            destination, destination_relative = _depot_relative_path(
+                destination_value, must_exist=True
+            )
+            if not destination.is_dir():
+                raise DepotError("choose a depot directory as the upload destination")
+            before = _top_level_comp_trees()
+            staging = Path(
+                tempfile.mkdtemp(prefix=".vcf-services-upload-", dir=DEPOT)
+            )
+            public_paths = []
+            if extract:
+                archive_path = staging / "archive"
+                content = staging / "content"
+                content.mkdir()
+                upload.save(archive_path)
+                try:
+                    kind = _archive_kind(filename)
+                except ToolArchiveError as exc:
+                    raise DepotError(
+                        "choose a .tar.gz, .tgz, or .zip archive to extract"
+                    ) from exc
+                if kind == "tar":
+                    _extract_tar(archive_path, content)
+                else:
+                    _extract_zip(archive_path, content)
+                _validate_depot_staging(content)
+                children = list(content.iterdir())
+                if not children:
+                    raise DepotError("the archive contains no files")
+                for child in children:
+                    target_relative = "/".join(
+                        filter(None, (destination_relative, child.name))
+                    )
+                    protected = _protected_trees_for_path(target_relative)
+                    if protected:
+                        raise DepotError(
+                            f"unprotect PROD/COMP/{protected[0]} before uploading there"
+                        )
+                    if (destination / child.name).exists() or (
+                        destination / child.name
+                    ).is_symlink():
+                        raise DepotError(
+                            f"{target_relative} already exists; delete it explicitly first"
+                        )
+                    if _is_patch_store_path(target_relative):
+                        public_paths.append(target_relative)
+                moved = []
+                try:
+                    for child in children:
+                        target = destination / child.name
+                        os.replace(child, target)
+                        moved.append((child, target))
+                except OSError:
+                    for child, target in reversed(moved):
+                        if target.exists() and not child.exists():
+                            os.replace(target, child)
+                    raise
+            else:
+                target_relative = "/".join(
+                    filter(None, (destination_relative, filename))
+                )
+                protected = _protected_trees_for_path(target_relative)
+                if protected:
+                    raise DepotError(
+                        f"unprotect PROD/COMP/{protected[0]} before uploading there"
+                    )
+                target = destination / filename
+                if target.exists() or target.is_symlink():
+                    raise DepotError(
+                        f"{target_relative} already exists; delete it explicitly first"
+                    )
+                staged_file = staging / filename
+                upload.save(staged_file)
+                os.replace(staged_file, target)
+                if _is_patch_store_path(target_relative):
+                    public_paths.append(target_relative)
+            _record_operator_trees(_top_level_comp_trees() - before)
+    except BlockingIOError:
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
+    except (DepotError, ToolArchiveError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": f"the depot upload could not be completed: {exc}"}), 500
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+    public = bool(public_paths)
+    return jsonify(
+        {
+            "uploaded": True,
+            "path": destination_relative,
+            "publicDownload": public,
+            "notice": "Content under /umds-patch-store is downloadable without credentials."
+            if public
+            else None,
+        }
+    ), 201
+
+
+@app.delete("/api/depot/entry")
+def delete_depot_entry():
+    body = request.get_json(silent=True) or {}
+    value = body.get("path")
+    confirmation = body.get("confirm")
+    try:
+        with _depot_mutation_guard():
+            path, relative = _depot_relative_path(
+                value, allow_root=False, must_exist=True
+            )
+            if confirmation != relative:
+                raise DepotError(f"type {relative} exactly to confirm deletion")
+            protected = _protected_trees_for_path(relative, include_descendants=True)
+            if protected:
+                raise DepotError(
+                    f"unprotect PROD/COMP/{protected[0]} before deleting this path"
+                )
+            size_bytes, file_count = _entry_usage(path)
+            if path.is_symlink():
+                raise DepotError("symbolic links cannot be deleted through the explorer")
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            _forget_deleted_trees(relative)
+    except BlockingIOError:
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
+    except (DepotError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(
+        {
+            "deleted": True,
+            "path": relative,
+            "sizeBytes": size_bytes,
+            "fileCount": file_count,
+        }
+    )
+
+
 @app.post("/api/depot/ownership")
 def update_depot_ownership():
     body = request.get_json(silent=True) or {}
@@ -1854,23 +2222,32 @@ def update_depot_ownership():
         return jsonify({"error": "choose one top-level PROD/COMP tree"}), 400
     if not isinstance(protected, bool):
         return jsonify({"error": "protected must be true or false"}), 400
-    tree = DEPOT / "PROD" / "COMP" / name
     try:
-        root = (DEPOT / "PROD" / "COMP").resolve(strict=True)
-        resolved = tree.resolve(strict=True)
-    except OSError:
-        return jsonify({"error": "that PROD/COMP tree does not exist"}), 404
-    if tree.is_symlink() or resolved.parent != root or not resolved.is_dir():
-        return jsonify({"error": "choose one real top-level PROD/COMP tree"}), 400
-    try:
-        _depot_ownership_inventory()
-        with _ownership_lock():
-            manifest = _read_ownership_manifest()
-            entry = manifest["trees"].get(name)
-            if entry is None:
-                return jsonify({"error": "that PROD/COMP tree is not inventoried"}), 404
-            entry["protected"] = protected
-            _write_ownership_manifest(manifest)
+        with _depot_mutation_guard():
+            tree = DEPOT / "PROD" / "COMP" / name
+            try:
+                root = (DEPOT / "PROD" / "COMP").resolve(strict=True)
+                resolved = tree.resolve(strict=True)
+            except OSError:
+                return jsonify({"error": "that PROD/COMP tree does not exist"}), 404
+            if tree.is_symlink() or resolved.parent != root or not resolved.is_dir():
+                return jsonify(
+                    {"error": "choose one real top-level PROD/COMP tree"}
+                ), 400
+            _depot_ownership_inventory()
+            with _ownership_lock():
+                manifest = _read_ownership_manifest()
+                entry = manifest["trees"].get(name)
+                if entry is None:
+                    return jsonify(
+                        {"error": "that PROD/COMP tree is not inventoried"}
+                    ), 404
+                entry["protected"] = protected
+                _write_ownership_manifest(manifest)
+    except BlockingIOError:
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
     except OSError as exc:
         return jsonify({"error": f"depot ownership could not be saved: {exc}"}), 500
     return jsonify({"name": name, **entry})

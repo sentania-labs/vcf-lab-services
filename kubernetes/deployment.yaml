@@ -303,7 +303,6 @@ spec:
           volumeMounts:
             - name: depot-store
               mountPath: /depot
-              readOnly: true
             - name: backup-store
               mountPath: /mnt/backup
               readOnly: true

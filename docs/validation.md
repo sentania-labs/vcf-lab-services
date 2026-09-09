@@ -33,6 +33,10 @@ refusals, installation-probe mismatch reporting and activation blocking,
 persistent Software Depot ID retrieval, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 content-library ownership detection and default protection,
+depot browsing, guarded file and folder-archive upload, explicit delete
+confirmation with size and file count, protected-tree enforcement, path
+traversal and symlink refusal, public patch-store notice, and mutation refusal
+during a running sync or tool update,
 the schedule preview endpoint computing an unsaved schedule's next run in
 the configured or supplied timezone and rejecting bad input,
 setup completion, shared password replacement, sync dispatch, partial settings

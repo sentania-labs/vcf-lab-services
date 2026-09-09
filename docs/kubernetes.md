@@ -115,7 +115,7 @@ consumer relationships:
 
 | Claim | Writer | Other consumers | Sharing reason |
 |---|---|---|---|
-| `depot-store` | `depot-sync` | `depot-web`, `admin-ui` | Web serves sync output, console reports storage state |
+| `depot-store` | `depot-sync`, `admin-ui` | `depot-web` | Sync writes product content, console provides locked uploads and deletes, web serves content |
 | `backup-store` | `sftp-backup` | `admin-ui` | Console reports backup storage state |
 | `vcfdt-state` | `admin-ui`, licensed tool in `admin-ui` and `depot-sync` | both | Software Depot ID must remain consistent across tool installation, registration, and sync |
 | `vcfdt-tool` | `admin-ui`, `depot-sync` | both | Console installs the licensed tool, and the licensed tool updates its telemetry flag during sync |
@@ -153,8 +153,7 @@ the web and console containers are individually healthy.
 The licensed VCF Download Tool upload is roughly 490 MB. Installing the tool
 from the depot's `PROD/COMP/VCFDT` tree avoids the browser upload entirely once
 a sync has mirrored the archive, because the console reads the archive in
-place from its read-only depot mount. The limits below only matter for the
-upload path. ingress-nginx defaults
+place. The same request limits apply to Depot explorer uploads. ingress-nginx defaults
 to a 1 MB request body, so an unprepared ingress returns HTTP 413 and prevents
 initial appliance configuration. Allow at least 30 minutes for request and
 response transfer. The supplied ingress carries the working settings:

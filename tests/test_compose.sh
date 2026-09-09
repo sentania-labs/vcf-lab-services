@@ -74,6 +74,16 @@ for name in ("depot-sync", "admin-ui"):
     assert mount["type"] == "volume" and mount["source"] == "vcfdt_tool", name
     assert mount.get("read_only", False) is False, f"{name}: tool mount must be writable"
 ui = config["services"]["admin-ui"]
+depot_mounts = [mount for mount in ui["volumes"] if mount["target"] == "/depot"]
+assert len(depot_mounts) == 1 and depot_mounts[0]["source"] == "depot_store", \
+    "admin-ui: depot mount is incorrect"
+assert depot_mounts[0].get("read_only", False) is False, \
+    "admin-ui: depot mount must be writable for guarded explorer actions"
+sync_state_mounts = [mount for mount in ui["volumes"] if mount["target"] == "/state"]
+assert len(sync_state_mounts) == 1 and sync_state_mounts[0]["source"] == "sync_state", \
+    "admin-ui: sync state mount is incorrect"
+assert sync_state_mounts[0].get("read_only", False) is False, \
+    "admin-ui: sync state must be writable for ownership and lock state"
 state_mounts = [mount for mount in ui["volumes"]
                 if mount["target"] == "/root/.local/share/vmware/vdt"]
 assert len(state_mounts) == 1 and state_mounts[0]["source"] == "vcfdt_state", \

@@ -102,8 +102,9 @@ after rollback; a failed sync keeps the retained release.
 
 The product consumes two fixed mounted paths:
 
-- `/depot`, read-write in the sync service and read-only in the web service.
-  The console inventory reads the same mounted tree.
+- `/depot`, read-write in the sync service and console, and read-only in the
+  web service. The console takes the existing sync and tool locks before an
+  upload or delete, so it does not race either writer.
 - `/mnt/backup`, read-write only in the SFTP service and read-only in the
   console.
 
@@ -148,6 +149,24 @@ Depot tab.
 Adopting an existing VKR content tree as the VKR sync target is a follow-up.
 This release inventories and protects that tree but does not adopt it.
 
+The Depot tab also browses `/depot` and provides authenticated file uploads,
+folder uploads from `.tar.gz`, `.tgz`, or `.zip` archives, and explicit
+deletion. Archive uploads use the same member-count, expanded-size, path, and
+file-type validation as the licensed-tool installer, then reject symbolic links
+for depot content. Uploads refuse to overwrite an existing entry. A delete
+shows recursive size and file count and proceeds only when the operator types
+the displayed relative path exactly. Deleting a protected tree, anything below
+it, or an ancestor containing it is refused until the tree is unprotected in the
+Depot tab.
+
+Every explorer path is resolved below `/depot`; absolute paths, parent
+traversal, and symbolic-link paths are refused. Upload and delete take both the
+sync lock and licensed-tool update lock, so they fail clearly while either job
+is active. Uploading below `/umds-patch-store` is allowed, but the console shows
+that those files are downloadable without credentials. Licensed VCF Download
+Tool archives remain restricted to the Setup workflow and are not accepted by
+the explorer.
+
 For console-based identity migration, follow [First run](#first-run).
 The retained depot-adoption helpers in `scripts/` are covered in
 [validation boundaries](docs/validation.md).
@@ -182,8 +201,9 @@ and retained in their dedicated volume.
 
 ## Sync behavior
 
-The sync service is the only depot writer. Scheduled and console-triggered runs
-use the same lock, so only one can write at a time. Targets run sequentially,
+The sync service is the only writer of product-managed depot content. Admin
+console uploads and explicit deletes share its lock. Scheduled and
+console-triggered runs use the same lock, so only one can write at a time. Targets run sequentially,
 later targets still run after a failure, state is written atomically, and only
 the newest configured run logs are retained. Until an activation code is
 saved, the stack stays healthy but sync reports `not armed`.
