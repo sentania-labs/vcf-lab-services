@@ -83,14 +83,20 @@ directory holding at least the session secret, which the image refuses to start
 without) to see the Setup tab list and install the stub versions.
 
 `tests/test_compose_boot.sh` uses an isolated project, container names, network,
-and fresh volumes without publishing host ports. It can run beside an installed
-appliance without reconciling or removing the appliance containers. The test
-starts the complete Compose appliance with locally built images, requires each
-long-running service to become healthy or running, installs and activates the
-stub tool, and runs a sync that rewrites its telemetry flag through the shared
-tool mount. The one-shot bootstrap service must exit successfully. The normal
-GitHub-hosted CI job runs this proof with a real Docker daemon after building
-the three product images.
+and fresh volumes. Before applying its override, it checks that the shipped
+Compose configuration publishes the expected HTTPS and SFTP TCP port mappings,
+so the override cannot hide missing or misrouted publications. It publishes
+HTTPS and SFTP only on Docker-assigned loopback
+ports, so it can run beside an installed appliance without reconciling or
+removing the appliance containers. The test requires the console login page to
+be reachable over the published HTTPS port and requires the published SFTP port
+to return an SSH banner after enabling backups through the console API. It also
+starts the complete Compose appliance with
+locally built images, requires each long-running service to become healthy or
+running, installs and activates the stub tool, and runs a sync that rewrites its
+telemetry flag through the shared tool mount. The one-shot bootstrap service
+must exit successfully. The normal GitHub-hosted CI job runs this proof with a
+real Docker daemon after building the three product images.
 
 CI renders the Kubernetes manifests, validates them against strict Kubernetes
 schemas, and asserts the storage, secret-path, ingress, and single-Pod network

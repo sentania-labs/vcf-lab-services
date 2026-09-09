@@ -25,12 +25,20 @@ services:
     container_name: vcf-services-compose-test-${test_id}-bootstrap
   depot-web:
     container_name: vcf-services-compose-test-${test_id}-depot-web
-    ports: !override []
+    ports: !override
+      - target: 443
+        published: "0"
+        host_ip: 127.0.0.1
+        protocol: tcp
   depot-sync:
     container_name: vcf-services-compose-test-${test_id}-sync
   sftp-backup:
     container_name: vcf-services-compose-test-${test_id}-sftp
-    ports: !override []
+    ports: !override
+      - target: 22
+        published: "0"
+        host_ip: 127.0.0.1
+        protocol: tcp
   admin-ui:
     container_name: vcf-services-compose-test-${test_id}-ui
   redis:
@@ -81,6 +89,19 @@ trap diagnose EXIT
 base_config="$work_dir/base-config.json"
 test_config="$work_dir/test-config.json"
 docker compose -f "$project_dir/docker-compose.yml" config --format json > "$base_config"
+python3 - "$base_config" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    base = json.load(stream)
+
+for service, published, target in (("depot-web", "443", 443), ("sftp-backup", "2222", 22)):
+    ports = base.get("services", {}).get(service, {}).get("ports", [])
+    if not any(port.get("published") == published and port.get("target") == target
+               and port.get("protocol") == "tcp" for port in ports):
+        raise SystemExit(f"FAIL: shipped Compose must publish {service} TCP {published}:{target}")
+PY
 "${compose[@]}" config --format json > "$test_config"
 python3 - "$base_config" "$test_config" <<'PY'
 import json
@@ -100,6 +121,19 @@ for service in services:
     test_name = test.get("services", {}).get(service, {}).get("container_name")
     if not base_name or not test_name or base_name == test_name:
         raise SystemExit(f"FAIL: Compose boot test container is not isolated: {service}")
+
+published_ports = {
+    "depot-web": 443,
+    "sftp-backup": 22,
+}
+for service, target in published_ports.items():
+    ports = test.get("services", {}).get(service, {}).get("ports", [])
+    if len(ports) != 1:
+        raise SystemExit(f"FAIL: Compose boot test has unexpected published ports: {service}")
+    port = ports[0]
+    if (port.get("target") != target or port.get("published") != "0"
+            or port.get("host_ip") != "127.0.0.1" or port.get("protocol") != "tcp"):
+        raise SystemExit(f"FAIL: Compose boot test port is not a dynamic loopback binding: {service}")
 PY
 
 started=true
@@ -143,6 +177,22 @@ while true; do
 	sleep 2
 done
 
+https_endpoint="$("${compose[@]}" port depot-web 443)"
+sftp_endpoint="$("${compose[@]}" port sftp-backup 22)"
+https_port="${https_endpoint##*:}"
+sftp_port="${sftp_endpoint##*:}"
+[[ "$https_endpoint" = 127.0.0.1:* && "$https_port" =~ ^[0-9]+$ && "$https_port" -gt 0 ]] \
+	|| { echo "FAIL: Compose did not publish HTTPS on a dynamic loopback port: $https_endpoint" >&2; exit 1; }
+[[ "$sftp_endpoint" = 127.0.0.1:* && "$sftp_port" =~ ^[0-9]+$ && "$sftp_port" -gt 0 ]] \
+	|| { echo "FAIL: Compose did not publish SFTP on a dynamic loopback port: $sftp_endpoint" >&2; exit 1; }
+
+admin_page="$work_dir/admin.html"
+curl --fail --silent --show-error --insecure \
+	--output "$admin_page" "https://127.0.0.1:$https_port/admin/"
+grep -q 'VCF Services' "$admin_page" \
+	|| { echo "FAIL: published HTTPS port did not return the console login page" >&2; exit 1; }
+echo "HTTPS published-port proof passed: https://127.0.0.1:$https_port/admin/ returned the VCF Services login page"
+
 stub_archive="$work_dir/vcf-download-tool-0.0.0-stub.tar.gz"
 "$project_dir/tests/make-stub-vcfdt.sh" "$stub_archive" >/dev/null
 ui_container="$("${compose[@]}" ps -q admin-ui)"
@@ -153,6 +203,29 @@ docker exec "$ui_container" curl --fail --silent --show-error --insecure \
 	-H 'Content-Type: application/json' \
 	-d '{"username":"vcf","password":"compose boot proof"}' \
 	https://depot-web/admin/api/claim >/dev/null
+docker exec "$ui_container" curl --fail --silent --show-error --insecure \
+	--cookie /tmp/vcf-services-test-cookies \
+	-H 'Content-Type: application/json' \
+	-d '{"backupEnabled":true}' \
+	https://depot-web/admin/api/settings >/dev/null
+
+deadline=$((SECONDS + 30))
+while true; do
+	sftp_banner=""
+	if { IFS= read -r -t 2 sftp_banner < "/dev/tcp/127.0.0.1/$sftp_port"; } 2>/dev/null; then
+		sftp_banner="${sftp_banner%$'\r'}"
+		break
+	fi
+	if [ "$SECONDS" -ge "$deadline" ]; then
+		echo "FAIL: published SFTP port did not return an SSH banner" >&2
+		exit 1
+	fi
+	sleep 1
+done
+[[ "$sftp_banner" = SSH-2.0-* || "$sftp_banner" = SSH-1.99-* ]] \
+	|| { echo "FAIL: published SFTP port returned an invalid SSH banner: $sftp_banner" >&2; exit 1; }
+echo "SFTP published-port proof passed: 127.0.0.1:$sftp_port returned $sftp_banner"
+
 docker exec "$ui_container" curl --fail --silent --show-error --insecure \
 	--cookie /tmp/vcf-services-test-cookies \
 	-F 'archive=@/tmp/vcf-download-tool-stub.tar.gz;filename=vcf-download-tool-0.0.0-stub.tar.gz' \
