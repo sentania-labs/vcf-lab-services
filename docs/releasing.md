@@ -79,9 +79,10 @@ and asserts it installs as unverified without disturbing the saved Software
 Depot ID. A failed or implausible
 Software Depot ID probe never blocks the install and never replaces the last
 saved ID; the registration screen reports the probe failure. The probe runs
-only inside the install, replacement, rollback, and explicit verify actions,
-and its outcome is recorded in the release's `.vcf-services.json`, so sign-in
-and dashboard reads never launch the tool. For adopted-ID
+only inside the install, replacement, rollback, and verify actions and in the
+bounded start-time check that gunicorn's worker hook (`ui/gunicorn.conf.py`)
+starts, and its outcome is recorded in the release's `.vcf-services.json`, so
+sign-in and dashboard reads never launch the tool. For adopted-ID
 confirmation and registration restrictions, see [First run](../README.md#first-run).
 
 The release bundle contains only the Compose and Kubernetes definitions, Caddy

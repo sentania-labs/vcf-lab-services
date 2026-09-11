@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -973,6 +974,19 @@ def _recorded_identity(metadata):
     }
 
 
+def _identity_changed_since(probed_at):
+    """True when the tool's identity file was written after the recorded probe."""
+    try:
+        changed_at = VCFDT_MACHINE_ID_FILE.stat().st_mtime
+    except OSError:
+        return False
+    try:
+        recorded_at = datetime.fromisoformat(probed_at).timestamp()
+    except (TypeError, ValueError):
+        return True
+    return changed_at > recorded_at
+
+
 def _identity_record(machine_id):
     return {
         "machineId": machine_id,
@@ -1674,6 +1688,10 @@ MACHINE_ID_PROBE_FAILED = (
     "The tool probe failed and did not return a recognizable Software Depot ID. "
     "The last verified ID is unchanged."
 )
+IDENTITY_VERIFICATION_RUNS = (
+    "Verification runs on its own at appliance start and after tool changes; "
+    "use Verify with the tool to run it now."
+)
 
 
 def _adoption_message(adoption, tool_installed):
@@ -1728,16 +1746,24 @@ def _registration_details(tool=None):
         status = "unverified"
         machine_id = saved
         message = (
-            f"{saved} was saved earlier but the installed tool has not verified it. "
-            "Verify with the tool to confirm it."
+            f"{saved} was saved earlier and has not been verified with the installed "
+            f"tool yet. {IDENTITY_VERIFICATION_RUNS}"
             if saved
-            else "The installed tool has not been verified. Verify with the tool to "
-            "read its Software Depot ID."
+            else "The installed tool's Software Depot ID has not been read yet. "
+            f"{IDENTITY_VERIFICATION_RUNS}"
         )
     elif tool["machineId"] is None:
         status = "failed"
         machine_id = saved
         error = MACHINE_ID_PROBE_FAILED
+    elif _identity_changed_since(tool["machineIdProbedAt"]):
+        status = "unverified"
+        machine_id = tool["machineId"]
+        verified_at = tool["machineIdProbedAt"]
+        message = (
+            f"{machine_id} was verified with the installed tool, but the tool's "
+            f"identity changed afterwards. {IDENTITY_VERIFICATION_RUNS}"
+        )
     else:
         status = "confirmed"
         machine_id = tool["machineId"]
@@ -2450,6 +2476,86 @@ def adopt_registration():
         ), 500
 
 
+def _identity_verification_needed(tool, adoption):
+    """Whether the installed tool's identity record is missing, failed, stale,
+    or still waiting to confirm an adopted ID."""
+    if not tool["installed"]:
+        return False
+    if adoption is not None and adoption["status"] == "adopted":
+        return True
+    if not tool["machineIdProbed"] or tool["machineId"] is None:
+        return True
+    return _identity_changed_since(tool["machineIdProbedAt"])
+
+
+def _verify_identity_now():
+    """Probe the installed tool and record the outcome durably.
+
+    The caller holds the tool update lock, so the release cannot be swapped
+    under the probe. A failed probe is recorded as failed and never replaces
+    the last verified ID.
+    """
+    current = VCFDT_STORE / "current"
+    try:
+        machine_id = _probe_machine_id(current)
+    except ToolArchiveError:
+        machine_id = None
+    _record_release_identity(current, machine_id)
+    _reconcile_machine_id_adoption(machine_id)
+    return machine_id
+
+
+STARTUP_VERIFICATION_DELAYS = (10, 60, 300, 900)
+
+
+def _startup_identity_verification(delays=STARTUP_VERIFICATION_DELAYS, sleep=time.sleep):
+    """Verify a missing, failed, stale or pending identity once after start.
+
+    This is the background verification behind an appliance upgrade (a
+    release recorded by an older console), an identity file changed outside
+    the console, or an install-time probe that failed. It is bounded: at most
+    one probe, attempted at the listed delays and given up after the last
+    one. It never runs on a request. A running sync or a tool update in
+    flight defers it to the next attempt instead of launching the tool
+    beside them; the exclusive lock also makes a second worker skip while
+    the first is probing.
+    """
+    outcome = "deferred"
+    for delay in delays:
+        sleep(delay)
+        if not _identity_verification_needed(_current_tool_info(), _machine_id_adoption()):
+            return "not needed"
+        if _state().get("running", False):
+            continue
+        try:
+            with _tool_update_lock():
+                if not _identity_verification_needed(
+                    _current_tool_info(), _machine_id_adoption()
+                ):
+                    return "not needed"
+                machine_id = _verify_identity_now()
+                outcome = "verified" if machine_id else "failed"
+        except BlockingIOError:
+            continue
+        except (OSError, ValueError) as exc:
+            print(f"[identity] startup verification could not be recorded: {exc}", flush=True)
+            return "error"
+        print(f"[identity] startup verification {outcome}", flush=True)
+        return outcome
+    return outcome
+
+
+def verify_identity_on_start():
+    """Start the bounded background verification; called by gunicorn.conf.py."""
+    thread = threading.Thread(
+        target=_startup_identity_verification,
+        name="identity-verification",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def _registration_problem(registration):
     return (
         registration["machineIdError"]
@@ -2462,25 +2568,19 @@ def _registration_problem(registration):
 def verify_registration():
     """Read the Software Depot ID from the installed tool on operator request.
 
-    Install, replacement and rollback already record a probe; this is the
-    recovery path for a release whose record is missing or failed, so it can
-    be confirmed without reinstalling the tool.
+    Install, replacement and rollback record a probe, and the startup hook
+    verifies a missing, failed, stale or pending record on its own; this is
+    the optional recovery path for running that verification right away.
     """
     try:
         with _tool_update_lock():
             if _state().get("running", False):
                 return jsonify({"error": "wait for the running sync to finish"}), 409
-            current = VCFDT_STORE / "current"
             if not _current_tool_info()["installed"]:
                 return jsonify(
                     {"error": "install the VCF Download Tool before verifying its ID"}
                 ), 409
-            try:
-                machine_id = _probe_machine_id(current)
-            except ToolArchiveError:
-                machine_id = None
-            _record_release_identity(current, machine_id)
-            _reconcile_machine_id_adoption(machine_id)
+            _verify_identity_now()
     except BlockingIOError:
         return jsonify(
             {"error": "wait for the running sync or tool update to finish"}

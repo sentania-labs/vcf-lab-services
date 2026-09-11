@@ -165,7 +165,7 @@
         <h3>Register the Software Depot ID</h3>
         <div class="stat"><div class="key">Software Depot ID</div><div id="machine-id" class="value">Install the tool first</div></div>
         <p class="help" id="machine-id-status">Register this ID in Broadcom's VCF Download Tool registration flow, then paste the activation code below.</p>
-        <p class="help">The ID is read from the tool when it is installed, replaced or rolled back and shown from that saved result. Verify again only when the status above asks for it.</p>
+        <p class="help">The ID is read from the tool when it is installed, replaced or rolled back, and again on its own at appliance start when the saved result is missing or out of date. Sign-in shows the saved result and never waits for the tool. Use the button below only if the status above stays unverified or failed.</p>
         <div class="row" style="margin-top:10px"><button id="verify-machine-id" class="secondary">Verify with the tool</button><span id="verify-flash" class="muted"></span></div>
         <div class="formgrid"><div class="field full"><label for="adopt-machine-id">Adopt an existing Software Depot ID</label>
           <input id="adopt-machine-id" autocomplete="off" maxlength="36" placeholder="00000000-0000-0000-0000-000000000000"></div></div>
@@ -587,17 +587,23 @@ async function loadDepotArchives(report=false) {
   updateDepotInstallState();
 }
 
+let identityPending=false;
+function populateIdentity(data) {
+  $('machine-id').textContent=data.machineId || (data.tool.installed ? 'Not verified yet' : 'Install the tool first');
+  $('machine-id-status').textContent=identityStatusText(data);
+  $('adoption-flash').textContent=data.adoptedMachineId ? (data.machineIdMessage || '') : '';
+  $('verify-machine-id').disabled=!data.tool.installed;
+  if (data.machineIdStatus === 'confirmed') $('verify-flash').textContent='';
+  identityPending=data.tool.installed && (data.machineIdStatus === 'unverified' || data.machineIdStatus === 'adopted');
+}
+
 function populateSetup(data) {
   bootstrap=data;
   showVersionProblem(data.versionProblem);
   const settings=data.settings;
   $('signed-in').textContent=`Signed in as ${settings.username}`; $('logout').hidden=false;
   $('setup').hidden=false; $('ready').hidden=!data.setupComplete; $('finish-setup').hidden=data.setupComplete;
-  $('machine-id').textContent=data.machineId || (data.tool.installed ? 'Not verified yet' : 'Install the tool first');
-  $('machine-id-status').textContent=identityStatusText(data);
-  $('adoption-flash').textContent=data.adoptedMachineId ? (data.machineIdMessage || '') : '';
-  $('verify-machine-id').disabled=!data.tool.installed;
-  if (data.machineIdStatus === 'confirmed') $('verify-flash').textContent='';
+  populateIdentity(data);
   $('adopt-machine-id').disabled=data.tool.installed;
   $('adopt-machine-id-button').disabled=data.tool.installed;
   $('vcfdt-flash').textContent=data.tool.installed ? (data.tool.versionVerified ? `${data.tool.version} is ready` : 'Installed; the reported version could not be verified') : 'Not installed';
@@ -847,6 +853,7 @@ $('finish-setup').onclick=async()=>{
 
 async function poll(){
   try {
+    if (identityPending) populateIdentity(await api('api/bootstrap'));
     const status=await api('api/status'); const running=status.running, armed=status.armed;
     $('st-state').innerHTML=running?'<span class="pill run">running</span>':armed?'<span class="pill ok">armed, idle</span>':'<span class="pill bad">not armed</span>';
     $('st-current').textContent=status.currentTarget||'none'; $('st-next').textContent=fmt(status.nextRun); $('st-tool').textContent=status.vcfdtVersion;
