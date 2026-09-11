@@ -1144,6 +1144,24 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn("no VCF Download Tool endpoint keys", response.get_json()["error"])
         self.assertIn('DEPOT_ENDPOINT="dl.broadcom.com"', self.settings.read_text())
 
+    def test_sync_diagnostics_default_off_and_saved_to_settings_env(self):
+        self.claim()
+        self.write_state()
+        self.assertFalse(self.get("/api/settings").get_json()["syncDiagnostics"])
+        self.assertNotIn("SYNC_DIAGNOSTICS", self.settings.read_text())
+        saved = self.post("/api/settings", json={"syncDiagnostics": True})
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(saved.get_json()["syncDiagnostics"])
+        self.assertIn('SYNC_DIAGNOSTICS="true"\n', self.settings.read_text())
+        self.assertTrue(self.get("/api/settings").get_json()["syncDiagnostics"])
+        cleared = self.post("/api/settings", json={"syncDiagnostics": False})
+        self.assertEqual(cleared.status_code, 200)
+        self.assertFalse(cleared.get_json()["syncDiagnostics"])
+        self.assertIn('SYNC_DIAGNOSTICS="false"\n', self.settings.read_text())
+        rejected = self.post("/api/settings", json={"syncDiagnostics": "yes"})
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("true or false", rejected.get_json()["error"])
+
     def test_partial_settings_update_merges_over_stored_document(self):
         self.claim()
         self.write_state()
@@ -1437,6 +1455,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "ceip",
                 "esx-mode",
                 "log-retention",
+                "sync-diagnostics",
                 "depot-endpoint",
                 "token-url",
                 "vkr-match",

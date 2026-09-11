@@ -13,6 +13,14 @@ touch "$work_dir/tool/.update.lock"
 printf '%s\n' '{"releaseId":"base-stub","version":"0.0.0-stub","uploadedAt":"2026-09-08T00:00:00Z"}' \
 	> "$work_dir/tool/.vcf-services.json"
 
+# A negated command is exempt from errexit, so absence is asserted explicitly.
+absent() {
+	if grep -q -- "$1" "$2"; then
+		echo "FAIL: found '$1' in $2" >&2
+		exit 1
+	fi
+}
+
 run_sync() {
 	SETTINGS_FILE="$work_dir/missing-settings.env" \
 	DEPOT_DIR="$work_dir/depot" \
@@ -33,7 +41,8 @@ primary_pid=$!
 sleep 0.1
 run_sync patches > "$work_dir/locked-secondary.log"
 wait "$primary_pid"
-grep -q 'another sync is already running' "$work_dir/locked-secondary.log"
+grep -q 'another sync or versions refresh already holds the depot lock, skipping this trigger' \
+	"$work_dir/locked-secondary.log"
 grep -qx 'written' "$work_dir/tool/conf/telemetry/telemetry.flag"
 
 set +e
@@ -80,6 +89,9 @@ if flock -n -s "$snapshot_lock" true 2>/dev/null; then
 fi
 wait "$snapshot_pid"
 flock -n -s "$snapshot_lock" true
+# The depot lock is free the moment the run has exited: the run log writer
+# does not keep it alive.
+flock -n "$work_dir/state/sync.lock" true
 
 stub_bin="$work_dir/bin"
 mkdir -p "$stub_bin"
@@ -111,8 +123,47 @@ sleep 1
 kill -9 "$victim_pid"
 sleep 3.5
 run_sync patches > "$work_dir/after-kill9.log"
-! grep -q 'another sync is already running' "$work_dir/after-kill9.log"
+absent 'already holds the depot lock' "$work_dir/after-kill9.log"
 grep -q 'sync finished overall rc=0' "$work_dir/after-kill9.log"
+
+# A lock that cannot be opened is reported as a locking failure, not as a run
+# in progress. A directory standing where a fresh state directory's lock file
+# would be provokes it; no existing lock file is removed.
+broken_state="$work_dir/broken-state"
+mkdir -p "$broken_state/sync.lock"
+set +e
+SETTINGS_FILE="$work_dir/missing-settings.env" \
+DEPOT_DIR="$work_dir/depot" \
+STATE_DIR="$broken_state" \
+AUTH_FILE="$work_dir/secrets/activation-code.txt" \
+TOOL_ROOT="$work_dir/tool" \
+"$project_dir/sync/sync.sh" esx > "$work_dir/broken-lock.log" 2>&1
+broken_lock_rc=$?
+set -e
+[ "$broken_lock_rc" -eq 1 ]
+grep -q "ERROR: could not open the depot lock $broken_state/sync.lock (Is a directory); refusing sync" \
+	"$work_dir/broken-lock.log"
+absent 'already holds the depot lock' "$work_dir/broken-lock.log"
+[ ! -e "$broken_state/state.json" ]
+
+# Verbose lock diagnostics are off unless the console turns them on, and when
+# on they name the descriptor, the lock file's device and inode, and the run's
+# process identity for the acquisition and the release.
+run_sync patches > "$work_dir/diag-off.log"
+absent 'diag:' "$work_dir/diag-off.log"
+printf 'SYNC_DIAGNOSTICS="true"\n' > "$work_dir/diag-settings.env"
+SETTINGS_FILE="$work_dir/diag-settings.env" \
+DEPOT_DIR="$work_dir/depot" \
+STATE_DIR="$work_dir/state" \
+AUTH_FILE="$work_dir/secrets/activation-code.txt" \
+TOOL_ROOT="$work_dir/tool" \
+"$project_dir/sync/sync.sh" patches > "$work_dir/diag-on.log"
+lock_inode="$(stat -c %i "$work_dir/state/sync.lock")"
+grep -Eq "diag: lock acquired op=sync fd=9 dev=[0-9a-f]+:[0-9a-f]+ ino=$lock_inode pid=[0-9]+ ppid=[0-9]+ source=opened\$" \
+	"$work_dir/diag-on.log"
+grep -Eq "diag: lock released op=sync fd=9 dev=[0-9a-f]+:[0-9a-f]+ ino=$lock_inode pid=[0-9]+ exit=0\$" \
+	"$work_dir/diag-on.log"
+grep -q 'sync finished overall rc=0' "$work_dir/diag-on.log"
 
 mv "$work_dir/tool/.update.lock" "$work_dir/tool/update.lock.saved"
 set +e

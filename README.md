@@ -226,6 +226,28 @@ later targets still run after a failure, state is written atomically, and only
 the newest configured run logs are retained. Until an activation code is
 saved, the stack stays healthy but sync reports `not armed`.
 
+The scheduler takes the depot lock before it launches a run or a versions
+refresh and hands the locked descriptor to it, so the scheduler's own
+housekeeping (the armed-state refresh on every loop) can never take the lock
+ahead of work it just launched. A run that finds the lock genuinely held by another
+sync or by a versions refresh logs `another sync or versions refresh already
+holds the depot lock, skipping this trigger` and exits without changing
+anything; that is contention, not a fault. A lock that cannot be opened or
+taken at all is logged as `ERROR: could not open the depot lock` or
+`ERROR: could not take the depot lock` with the reason, the run refuses to
+continue, and the scheduler reports the same condition once per reason; that
+is a fault to investigate.
+
+**Verbose lock diagnostics** on the Settings tab is off by default. When on,
+the sync service log (the `depot-sync` container output) gains `diag:` lines
+for every lock acquisition, contention, release, and hand-off: the operation,
+the descriptor, the lock file's device and inode as `/proc/locks` names them,
+and the process identity involved. A run's acquisition happens before its run
+log exists, so the console's log panel shows only the release line; read the
+service log for the full sequence. No arguments, environment, or secrets are
+logged. The scheduler picks the change up on its next loop and each run reads
+it when it starts, so no restart is needed.
+
 The Sync tab shows the tool version and outcome for each target's last run.
 Setup's **Depot content produced by** summary is derived from those same rows,
 so mixed versions and failed attempts remain visible. Older records without a
