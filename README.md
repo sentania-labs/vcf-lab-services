@@ -61,6 +61,16 @@ running. A mismatch shows the adopted ID and the ID returned by the tool (or
 reports that no recognizable ID was returned). Activation-code saving and setup
 completion remain blocked until the adopted ID is confirmed.
 
+The console reads the Software Depot ID from the tool only when the tool is
+installed, replaced, rolled back, or when the operator clicks **Verify with the
+tool**. Each of those records the outcome with the installed release, and
+sign-in, the dashboard, and every worker show that saved result without
+launching the tool. A release with no recorded outcome (for example one
+installed by an earlier console) is shown as unverified, and a failed probe is
+shown as failed with the last verified ID; both stay that way, and keep
+activation-code saving and setup completion blocked, until **Verify with the
+tool** or a reinstall confirms the ID.
+
 The console is organised into Setup, Sync, Depot, Settings, Backup, and Logs tabs.
 Every operator setting in this prototype remains editable in the console. The
 settings file is the storage contract inside the `vcf-services-config` volume,

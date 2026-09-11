@@ -32,7 +32,9 @@ running sync refused), previous-release retention and rollback, Software Depot
 ID adoption before installation, confirmation by the first tool probe,
 refusal with a tool already present, invalid ID, active-sync and tool-update
 refusals, installation-probe mismatch reporting and activation blocking,
-persistent Software Depot ID retrieval, activation
+persistent Software Depot ID retrieval without launching the tool on sign-in,
+bootstrap, or a second worker, unverified and failed identity states with the
+operator verify action that confirms them, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 content-library ownership detection and default protection,
 refusal of inventory and mutations on unreadable or invalid ownership state

@@ -950,7 +950,60 @@ def _release_tool_info(link_name):
         "uploadedAt": metadata.get("uploadedAt"),
         "source": metadata.get("source", "upload"),
         "sourceFile": metadata.get("sourceFile"),
+        **_recorded_identity(metadata),
     }
+
+
+def _recorded_identity(metadata):
+    """Read the identity probe outcome a release's metadata recorded.
+
+    A release written before the console recorded probes, or by hand, has
+    no outcome and reads as unverified; a recorded outcome without a valid
+    ID means the probe ran and failed.
+    """
+    probed = bool(metadata.get("machineIdProbed", False))
+    machine_id = metadata.get("machineId")
+    if not isinstance(machine_id, str) or SOFTWARE_DEPOT_ID_RE.fullmatch(machine_id) is None:
+        machine_id = None
+    probed_at = metadata.get("machineIdProbedAt")
+    return {
+        "machineId": machine_id if probed else None,
+        "machineIdProbed": probed,
+        "machineIdProbedAt": probed_at if probed and isinstance(probed_at, str) else None,
+    }
+
+
+def _identity_record(machine_id):
+    return {
+        "machineId": machine_id,
+        "machineIdProbed": True,
+        "machineIdProbedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _record_release_identity(release_root, machine_id):
+    """Store a probe outcome in the release metadata that bootstrap reads."""
+    metadata_path = release_root / ".vcf-services.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata.update(_identity_record(machine_id))
+    handle, temp_name = tempfile.mkstemp(prefix=".vcf-services.json.", dir=release_root)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(metadata) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, metadata_path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _current_tool_info():
@@ -1025,6 +1078,7 @@ def _install_tool_archive(archive_path, filename, source):
             machine_id = _probe_machine_id(tool_root)
         except ToolArchiveError:
             machine_id = None
+        metadata.update(_identity_record(machine_id))
         (tool_root / ".vcf-services.json").write_text(json.dumps(metadata) + "\n")
         os.replace(tool_root, release_path)
 
@@ -1224,6 +1278,7 @@ def _rollback_tool():
                 machine_id = _probe_machine_id(previous_target)
             except ToolArchiveError:
                 machine_id = None
+            _record_release_identity(previous_target, machine_id)
             _reconcile_machine_id_adoption(machine_id)
             return jsonify(_current_tool_info())
     except BlockingIOError:
@@ -1546,9 +1601,6 @@ def _activation_configured():
         return False
 
 
-_machine_id_cache = {"value": None}
-
-
 def _persisted_machine_id():
     try:
         value = SOFTWARE_DEPOT_ID_FILE.read_text(encoding="utf-8").strip()
@@ -1561,7 +1613,6 @@ def _remember_machine_id(value):
     if SOFTWARE_DEPOT_ID_RE.fullmatch(value) is None:
         raise ValueError("refusing to persist an invalid Software Depot ID")
     _write_secret(SOFTWARE_DEPOT_ID_FILE, value + "\n")
-    _machine_id_cache["value"] = value
 
 
 def _machine_id_adoption():
@@ -1607,8 +1658,6 @@ def _reconcile_machine_id_adoption(machine_id):
     adoption = _machine_id_adoption()
     if machine_id:
         _remember_machine_id(machine_id)
-    else:
-        _machine_id_cache["value"] = None
     if adoption is None:
         return None
     matches = bool(
@@ -1621,13 +1670,23 @@ def _reconcile_machine_id_adoption(machine_id):
     )
 
 
+MACHINE_ID_PROBE_FAILED = (
+    "The tool probe failed and did not return a recognizable Software Depot ID. "
+    "The last verified ID is unchanged."
+)
+
+
 def _adoption_message(adoption, tool_installed):
     if adoption is None:
         return None
     adopted_id = adoption["adoptedId"]
-    if not tool_installed or adoption["status"] == "adopted":
+    if not tool_installed:
         message = (
             f"Adopted {adopted_id}. It will be confirmed at the first tool install."
+        )
+    elif adoption["status"] == "adopted":
+        message = (
+            f"Adopted {adopted_id}. Verify with the installed tool to confirm it."
         )
     elif adoption["status"] == "confirmed":
         message = f"Confirmed {adopted_id} with the installed tool."
@@ -1637,78 +1696,60 @@ def _adoption_message(adoption, tool_installed):
     return message
 
 
-def _machine_id():
-    if _machine_id_cache["value"]:
-        return _machine_id_cache["value"], None
-    tool = VCFDT_STORE / "current" / "bin" / "vcf-download-tool"
-    if not tool.is_file():
-        saved = _persisted_machine_id()
-        return saved, "Install the VCF Download Tool before verifying its saved ID."
-    try:
-        value = _probe_machine_id(tool.parent.parent)
-        _remember_machine_id(value)
-        return value, None
-    except (ToolArchiveError, OSError):
-        saved = _persisted_machine_id()
-        return saved, (
-            "The tool probe failed and did not return a recognizable Software Depot ID. "
-            "The last verified ID is unchanged."
-        )
-
-
 def _registration_details(tool=None):
+    """Describe the Software Depot ID from durable state alone.
+
+    Bootstrap and every dashboard read call this, so it never launches the
+    tool. The install, replacement, rollback and verify actions run the probe
+    and record its outcome with the release (and in the adoption record), and
+    this reads those records back. A release with no recorded outcome is
+    reported as unverified rather than assumed confirmed.
+    """
     tool = _current_tool_info() if tool is None else tool
     adoption = _machine_id_adoption()
-    if (
-        adoption is not None
-        and tool["installed"]
-        and adoption["status"] in {"confirmed", "mismatch"}
-    ):
+    installed = tool["installed"]
+    saved = _persisted_machine_id()
+    error = None
+    message = _adoption_message(adoption, installed)
+    verified_at = None
+    if adoption is not None and installed and adoption["status"] != "adopted":
+        status = adoption["status"]
         machine_id = (
-            adoption["adoptedId"]
-            if adoption["status"] == "confirmed"
-            else adoption.get("reportedId")
+            adoption["adoptedId"] if status == "confirmed" else adoption.get("reportedId")
         )
-        error = None
-    elif (
-        adoption is not None
-        and tool["installed"]
-        and adoption["status"] == "adopted"
-    ):
-        try:
-            machine_id = _probe_machine_id(VCFDT_STORE / "current")
-            _remember_machine_id(machine_id)
-            error = None
-        except (ToolArchiveError, OSError):
-            machine_id = _persisted_machine_id()
-            error = (
-                "The tool probe failed and did not return a recognizable Software "
-                "Depot ID. The adopted ID is not confirmed."
-            )
-        if not error and machine_id:
-            matches = machine_id.lower() == adoption["adoptedId"].lower()
-            adoption = _record_machine_id_adoption(
-                adoption["adoptedId"],
-                "confirmed" if matches else "mismatch",
-                machine_id,
-            )
-    elif adoption is not None and not tool["installed"]:
+    elif adoption is not None:
+        status = "adopted"
         machine_id = adoption["adoptedId"]
-        error = None
+    elif not installed:
+        status = None
+        machine_id = saved
+        error = "Install the VCF Download Tool before verifying its saved ID."
+    elif not tool["machineIdProbed"]:
+        status = "unverified"
+        machine_id = saved
+        message = (
+            f"{saved} was saved earlier but the installed tool has not verified it. "
+            "Verify with the tool to confirm it."
+            if saved
+            else "The installed tool has not been verified. Verify with the tool to "
+            "read its Software Depot ID."
+        )
+    elif tool["machineId"] is None:
+        status = "failed"
+        machine_id = saved
+        error = MACHINE_ID_PROBE_FAILED
     else:
-        machine_id, error = _machine_id()
-    status = None
-    if adoption is not None:
-        status = adoption["status"] if tool["installed"] else "adopted"
-    elif tool["installed"] and machine_id and not error:
         status = "confirmed"
+        machine_id = tool["machineId"]
+        verified_at = tool["machineIdProbedAt"]
     return {
         "machineId": machine_id,
         "machineIdError": error,
         "machineIdStatus": status,
+        "machineIdVerifiedAt": verified_at,
         "adoptedMachineId": adoption["adoptedId"] if adoption else None,
         "reportedMachineId": adoption.get("reportedId") if adoption else None,
-        "machineIdMessage": _adoption_message(adoption, tool["installed"]),
+        "machineIdMessage": message,
     }
 
 
@@ -2355,13 +2396,7 @@ def rollback_vcfdt():
 @app.get("/api/registration")
 def registration_status():
     details = _registration_details()
-    status_code = (
-        200
-        if details["machineId"]
-        and not details["machineIdError"]
-        and details["machineIdStatus"] not in {"adopted", "mismatch"}
-        else 409
-    )
+    status_code = 200 if details["machineIdStatus"] == "confirmed" else 409
     return (
         jsonify(
             {
@@ -2415,6 +2450,49 @@ def adopt_registration():
         ), 500
 
 
+def _registration_problem(registration):
+    return (
+        registration["machineIdError"]
+        or registration["machineIdMessage"]
+        or "verify the Software Depot ID with the installed tool first"
+    )
+
+
+@app.post("/api/registration/verify")
+def verify_registration():
+    """Read the Software Depot ID from the installed tool on operator request.
+
+    Install, replacement and rollback already record a probe; this is the
+    recovery path for a release whose record is missing or failed, so it can
+    be confirmed without reinstalling the tool.
+    """
+    try:
+        with _tool_update_lock():
+            if _state().get("running", False):
+                return jsonify({"error": "wait for the running sync to finish"}), 409
+            current = VCFDT_STORE / "current"
+            if not _current_tool_info()["installed"]:
+                return jsonify(
+                    {"error": "install the VCF Download Tool before verifying its ID"}
+                ), 409
+            try:
+                machine_id = _probe_machine_id(current)
+            except ToolArchiveError:
+                machine_id = None
+            _record_release_identity(current, machine_id)
+            _reconcile_machine_id_adoption(machine_id)
+    except BlockingIOError:
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
+    except OSError:
+        return jsonify({"error": "the verification result could not be recorded"}), 500
+    registration = _registration_details()
+    if registration["machineIdStatus"] != "confirmed":
+        return jsonify({**registration, "error": _registration_problem(registration)}), 409
+    return jsonify({**registration, "verified": True})
+
+
 @app.post("/api/registration")
 def save_registration():
     body = request.get_json(silent=True) or {}
@@ -2423,10 +2501,8 @@ def save_registration():
         return jsonify({"error": "wait for the running sync to finish"}), 409
     registration = _registration_details()
     machine_id = registration["machineId"]
-    if registration["machineIdStatus"] in {"adopted", "mismatch"}:
-        return jsonify({"error": registration["machineIdMessage"]}), 409
-    if registration["machineIdError"]:
-        return jsonify({"error": registration["machineIdError"]}), 409
+    if registration["machineIdStatus"] != "confirmed":
+        return jsonify({"error": _registration_problem(registration)}), 409
     if not isinstance(activation_code, str) or not activation_code.strip():
         return jsonify({"error": "enter the activation code from Broadcom"}), 400
     activation_code = activation_code.strip()
