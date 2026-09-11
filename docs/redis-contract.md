@@ -75,9 +75,13 @@ For non-tool targets such as `vkr`, both fields are `not applicable` because
 the target uses a separate helper.
 Targets skipped for depot protection receive `status: "SKIPPED:PROTECTED"`
 and the current provenance fields even though the target was not invoked.
-See [depot protection](../README.md#operator-provided-depot-content) for which
-targets are skipped. Targets not selected for the run retain their earlier
-records. Older records may omit
+A target whose download ran but whose run changed a protected tree receives
+`FAILED:PROTECTED-CHANGED`; a tool-backed target whose listing could not be
+obtained while trees are protected is not run and receives `FAILED:<exit
+code>` or `FAILED:UNVERIFIED`. See
+[depot protection](../README.md#operator-provided-depot-content) for how a
+target's trees are decided. Targets not selected for the run retain their
+earlier records. Older records may omit
 these fields. A failed attempt identifies the tool used, not a guarantee that
 all content for that target was replaced. Consumers derive summaries from
 these rows rather than a single depot-wide version.
