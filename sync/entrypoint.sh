@@ -35,6 +35,100 @@ redis_cmd() {
 	REDISCLI_AUTH="$auth" redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" 2>/dev/null
 }
 
+# Verbose lock diagnostics, switched on from the console (SYNC_DIAGNOSTICS in
+# settings.env, reloaded every loop) and off by default. Lines carry the
+# operation, descriptor, device:inode as /proc/locks names it, and process
+# identity: never arguments, environment, or secrets.
+diag() {
+	local flag="${SYNC_DIAGNOSTICS:-false}"
+	case "${flag,,}" in
+		true|yes|1) echo "[scheduler] diag: $*" ;;
+	esac
+}
+
+lock_identity() {
+	local fd="$1" dev="" ino=""
+	read -r dev ino < <(stat -Lc '%d %i' "/proc/self/fd/$fd" 2>/dev/null) || true
+	if [ -n "$ino" ]; then
+		printf 'fd=%s dev=%02x:%02x ino=%s' "$fd" \
+			"$(( ((dev >> 8) & 0xfff) | ((dev >> 32) & ~0xfff) ))" \
+			"$(( (dev & 0xff) | ((dev >> 12) & ~0xff) ))" "$ino"
+	else
+		printf 'fd=%s dev=? ino=?' "$fd"
+	fi
+}
+
+# Take the shared depot lock on fd 8 without blocking. Returns 0 when it is
+# held, 1 when a sync or versions refresh legitimately holds it, and 2 when
+# the lock could not be opened or taken at all; depot_lock_error then names
+# the reason. util-linux flock exits 1 only for a conflicting lock, so any
+# other status is a locking failure rather than a run in progress.
+depot_lock_error=""
+take_depot_lock() {
+	local op="$1" rc=0 output
+	mkdir -p "$STATE_DIR"
+	if ! { exec 8>"$STATE_DIR/sync.lock"; } 2>/dev/null; then
+		output="$( { : >>"$STATE_DIR/sync.lock"; } 2>&1 | sed 's/^[^:]*: line [0-9]*: //' || true)"
+		output="${output#"$STATE_DIR/sync.lock: "}"
+		depot_lock_error="could not open $STATE_DIR/sync.lock${output:+ ($output)}"
+		diag "lock failed op=$op fd=8 pid=$BASHPID reason=open"
+		return 2
+	fi
+	output="$(flock -n 8 2>&1)" || rc=$?
+	case "$rc" in
+		0)
+			diag "lock acquired op=$op $(lock_identity 8) pid=$BASHPID"
+			return 0
+			;;
+		1)
+			diag "lock contended op=$op $(lock_identity 8) pid=$BASHPID"
+			exec 8>&-
+			return 1
+			;;
+		*)
+			depot_lock_error="flock exit $rc${output:+: $output}"
+			diag "lock failed op=$op $(lock_identity 8) pid=$BASHPID reason=flock"
+			exec 8>&-
+			return 2
+			;;
+	esac
+}
+
+release_depot_lock() {
+	diag "lock released op=$1 $(lock_identity 8) pid=$BASHPID"
+	exec 8>&-
+}
+
+# Launch a sync run already holding the depot lock it will keep. The lock is
+# taken here on fd 9 and the locked descriptor is inherited by the run, so the
+# next housekeeping pass of this loop (which takes the same lock on fd 8) can
+# no longer slip in ahead of a run it just launched and make that run skip
+# itself. sync.sh keeps an inherited fd 9 that refers to its lock file and
+# opens the file only when invoked any other way. The scheduler closes its own
+# copy right after the fork, so the lock lives exactly as long as the run and
+# a run that exits or crashes releases it. When another sync or a versions
+# refresh genuinely holds the lock, the run is still launched and reports the
+# contention itself, exactly as before.
+dispatch_sync() {
+	local rc=0 output child
+	mkdir -p "$STATE_DIR"
+	if { exec 9>"$STATE_DIR/sync.lock"; } 2>/dev/null; then
+		output="$(flock -n 9 2>&1)" || rc=$?
+		case "$rc" in
+			0) diag "lock acquired op=sync-dispatch $(lock_identity 9) pid=$BASHPID handoff=fd9" ;;
+			1) diag "lock contended op=sync-dispatch $(lock_identity 9) pid=$BASHPID; the run reports it" ;;
+			*) diag "lock failed op=sync-dispatch $(lock_identity 9) pid=$BASHPID reason=flock exit=$rc; the run reports it" ;;
+		esac
+	else
+		diag "lock failed op=sync-dispatch fd=9 pid=$BASHPID reason=open; the run reports it"
+	fi
+	"$SYNC_COMMAND" "$@" &
+	child=$!
+	diag "sync launched pid=$child ppid=$BASHPID targets=${*:-configured}"
+	exec 9>&-
+	diag "lock handed off op=sync-dispatch fd=9 pid=$BASHPID to=$child"
+}
+
 cron_field_matches() {
 	local spec="$1" value="$2" field_min="$3"
 	local part start end step
@@ -87,25 +181,37 @@ cron_matches() {
 	fi
 }
 
+# Refresh the versions listing. The scheduler loop forks this with the depot
+# lock outcome it already obtained (see dispatch_versions_refresh); a direct
+# call takes the lock itself.
 refresh_versions() {
+	local lock_state="${1:-}"
 	load_settings
 	local tool="$TOOL_ROOT/bin/vcf-download-tool"
 	if [ ! -s "$AUTH_FILE" ]; then
 		jq -n --arg t "$(date -u +%FT%TZ)" \
 			'{error:"not armed: activation code missing", fetchedAt:$t}' \
 			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
+		[ "$lock_state" != 0 ] || release_depot_lock versions-refresh
 		return 0
 	fi
-	mkdir -p "$STATE_DIR"
-	exec 8>"$STATE_DIR/sync.lock"
-	if ! flock -n 8; then
+	if [ -z "$lock_state" ]; then
+		lock_state=0
+		take_depot_lock versions-refresh || lock_state=$?
+	fi
+	if [ "$lock_state" -eq 1 ]; then
 		echo "[scheduler] versions refresh skipped: a sync or refresh already holds the depot lock"
 		if [ "$(redis_cmd EXISTS "$VERSIONS_KEY")" != "1" ]; then
 			jq -n --arg t "$(date -u +%FT%TZ)" \
 				'{error:"refresh skipped: a sync or refresh is already running, retry when it finishes", fetchedAt:$t}' \
 				| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
 		fi
-		exec 8>&-
+		return 0
+	elif [ "$lock_state" -ne 0 ]; then
+		echo "[scheduler] ERROR: versions refresh could not take the depot lock: $depot_lock_error"
+		jq -n --arg t "$(date -u +%FT%TZ)" --arg reason "$depot_lock_error" \
+			'{error:("refresh failed: the depot lock could not be taken (" + $reason + "); check the sync service log"), fetchedAt:$t}' \
+			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
 		return 0
 	fi
 	local output rc=0
@@ -114,7 +220,7 @@ refresh_versions() {
 			'{error:"VCF Download Tool is not installed; upload it in the admin console", fetchedAt:$t}' \
 			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
 		exec 7>&-
-		exec 8>&-
+		release_depot_lock versions-refresh
 		return 0
 	fi
 	local tool_lock="${VCFDT_TOOL_STORE:-$TOOL_ROOT}/.update.lock"
@@ -122,7 +228,7 @@ refresh_versions() {
 		jq -n --arg t "$(date -u +%FT%TZ)" \
 			'{error:"the tool volume has no update lock; re-upload the VCF Download Tool in the admin console to repair it", fetchedAt:$t}' \
 			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
-		exec 8>&-
+		release_depot_lock versions-refresh
 		return 0
 	fi
 	exec 7<"$tool_lock"
@@ -133,7 +239,23 @@ refresh_versions() {
 		'{output:$out, fetchedAt:$t, exitCode:$rc}' \
 		| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
 	exec 7>&-
-	exec 8>&-
+	release_depot_lock versions-refresh
+}
+
+# The same hand-off as dispatch_sync, for a versions refresh: the lock is
+# taken here before the refresh is forked, so the next housekeeping pass of
+# this loop cannot take it ahead of a refresh it just launched. The forked
+# refresh inherits fd 8 and the lock with it, and this copy is closed right
+# after the fork. A contended or failed lock is passed down for the refresh
+# to report.
+dispatch_versions_refresh() {
+	local lock_state=0
+	take_depot_lock versions-refresh || lock_state=$?
+	refresh_versions "$lock_state" &
+	if [ "$lock_state" -eq 0 ]; then
+		exec 8>&-
+		diag "lock handed off op=versions-refresh fd=8 pid=$BASHPID to=$!"
+	fi
 }
 
 handle_request() {
@@ -146,13 +268,13 @@ handle_request() {
 				| grep -Ex 'esx|install|upgrade|patches|vkr' || true)
 			if [ "${#targets[@]}" -gt 0 ]; then
 				echo "[scheduler] bus dispatch: ${targets[*]}"
-				"$SYNC_COMMAND" "${targets[@]}" &
+				dispatch_sync "${targets[@]}"
 			else
 				echo "[scheduler] ignored sync request with no valid targets"
 			fi
 			;;
 		versions)
-			refresh_versions &
+			dispatch_versions_refresh
 			;;
 		*)
 			echo "[scheduler] ignored unknown request kind '$kind'"
@@ -183,17 +305,26 @@ init_state() {
 	fi
 }
 
+armed_refresh_lock_error=""
 refresh_armed_state() {
-	local armed=false current tmp_state
+	local armed=false current tmp_state lock_state=0
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
-	exec 8>"$STATE_DIR/sync.lock"
-	if ! flock -n 8; then
-		exec 8>&-
+	take_depot_lock armed-refresh || lock_state=$?
+	if [ "$lock_state" -eq 1 ]; then
+		# A sync or versions refresh holds the lock and publishes state itself.
+		return 0
+	elif [ "$lock_state" -ne 0 ]; then
+		# Reported once per distinct reason rather than on every loop pass.
+		if [ "$armed_refresh_lock_error" != "$depot_lock_error" ]; then
+			armed_refresh_lock_error="$depot_lock_error"
+			echo "[scheduler] ERROR: armed-state refresh could not take the depot lock: $depot_lock_error"
+		fi
 		return 0
 	fi
+	armed_refresh_lock_error=""
 	current="$(jq -r '.armed' "$STATE_DIR/state.json" 2>/dev/null || true)"
 	if [ "$current" = "$armed" ]; then
-		exec 8>&-
+		release_depot_lock armed-refresh
 		return 0
 	fi
 	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
@@ -203,7 +334,7 @@ refresh_armed_state() {
 	else
 		rm -f "$tmp_state"
 	fi
-	exec 8>&-
+	release_depot_lock armed-refresh
 }
 
 main() {
@@ -247,7 +378,7 @@ main() {
 				"$(date +%-d)" "$(date +%-m)" "$(date +%w)"; then
 			last_dispatched_minute="$now_minute"
 			echo "[scheduler] schedule '$CRON_SCHEDULE' matched, dispatching sync"
-			"$SYNC_COMMAND" &
+			dispatch_sync
 		fi
 		if payload="$(redis_cmd BRPOP "$REQUEST_QUEUE" "$POLL_SECONDS" | tail -n 1)" \
 			&& [ -n "$payload" ]; then

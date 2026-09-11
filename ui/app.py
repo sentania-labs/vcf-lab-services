@@ -118,6 +118,7 @@ SETTING_ENV_FIELDS = {
     "SFTP_UID_GID": "uidGid",
     "SKU": "sku",
     "STORAGE_CONFIRMED": "storageConfirmed",
+    "SYNC_DIAGNOSTICS": "syncDiagnostics",
     "SYNC_TARGETS": "syncTargets",
     "TOKEN_URL": "tokenUrl",
     "TZ": "timezone",
@@ -1365,6 +1366,7 @@ def _settings_doc(settings=None):
         "setupComplete": _bool_setting(settings.get("SETUP_COMPLETE")),
         "sku": settings.get("SKU", "VCF"),
         "storageConfirmed": _bool_setting(settings.get("STORAGE_CONFIRMED")),
+        "syncDiagnostics": _bool_setting(settings.get("SYNC_DIAGNOSTICS")),
         "syncTargets": settings.get(
             "SYNC_TARGETS", "esx install upgrade patches"
         ).split(),
@@ -2508,6 +2510,11 @@ def update_settings():
         return jsonify(
             {"error": "storage and backup selections must be true or false"}
         ), 400
+    sync_diagnostics = body["syncDiagnostics"]
+    if not isinstance(sync_diagnostics, bool):
+        return jsonify(
+            {"error": "verbose sync diagnostics must be true or false"}
+        ), 400
     uid_gid = str(body["uidGid"])
     match = re.fullmatch(r"([0-9]+):([0-9]+)", uid_gid)
     if not match or any(not 1 <= int(value) <= 2147483647 for value in match.groups()):
@@ -2541,6 +2548,7 @@ def update_settings():
         "SKU": sku,
         "SFTP_UID_GID": uid_gid,
         "STORAGE_CONFIRMED": str(storage_confirmed).lower(),
+        "SYNC_DIAGNOSTICS": str(sync_diagnostics).lower(),
         "SYNC_TARGETS": " ".join(targets),
         "TOKEN_URL": token_url,
         "TZ": timezone_name,

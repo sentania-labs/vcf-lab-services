@@ -38,9 +38,14 @@ Each queue entry is one JSON object:
 - `requestedAt`: ISO 8601 UTC timestamp, informational.
 
 The scheduler invokes `sync.sh` locally for each accepted request. The
-persistent `flock` inside `sync.sh` remains the single-writer control: a
-request that arrives while a run holds the lock exits with
-"another sync is already running".
+scheduler takes the depot lock before it launches the run and hands the locked
+descriptor to it, so the scheduler's own housekeeping can never take the lock
+ahead of a run it just launched. The persistent `flock` inside `sync.sh`
+remains the single-writer control: a request that arrives while another run or
+a versions refresh holds the lock exits with "another sync or versions refresh
+already holds the depot lock, skipping this trigger". A lock that cannot be
+opened or taken at all is reported as an `ERROR` and the run refuses to
+continue.
 
 ## Status shape (`vcf-services:sync:status`)
 

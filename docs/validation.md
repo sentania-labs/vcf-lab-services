@@ -5,6 +5,7 @@ Run the repository gates before release:
 ```bash
 ./tests/test_sync.sh
 ./tests/test_scheduler.sh
+./tests/test_scheduler_lock.sh
 ./tests/test_install_checks.sh
 ./tests/test_compose.sh
 ./tests/test_release.sh
@@ -12,6 +13,7 @@ Run the repository gates before release:
 ./tests/test_kubernetes.sh
 docker build -t vcf-services-sync-base:local -f Dockerfile.sync-base .
 ./scripts/verify-license-boundary.sh vcf-services-sync-base:local
+./tests/test_sync_image.sh vcf-services-sync-base:local
 docker build -t vcf-services-ui:local -f Dockerfile.ui .
 docker build -t vcf-services-sftp:local -f Dockerfile.sftp .
 docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:local \
@@ -70,7 +72,28 @@ latest tags with an always-pull policy.
 `tests/test_sync.sh` also runs `tests/test_sync_protection.py`, which checks
 protected-target dispatch refusal and dispatch after unprotecting for all five
 sync targets, plus dispatch refusal and manifest preservation when ownership
-reads or persistence fail.
+reads or persistence fail. It also proves that a depot lock which cannot be
+opened is reported as a locking failure rather than as a run in progress, and
+that the verbose lock diagnostics stay silent until the console turns them on.
+
+`tests/test_scheduler_lock.sh` is the executable form of the scheduler lock
+reproduction. It runs the real scheduler and the real `sync.sh` with a stub
+tool and a queue-file bus, slows the scheduler's housekeeping read the way
+the reproduction did, and requires every requested run and every requested
+versions refresh to be admitted. It
+then proves that a second sync during a run, a versions refresh during a run,
+and a run during a versions refresh are each refused with the contention
+message, that a run killed outright releases the lock once its download
+stops, that a scheduled dispatch takes the same hand-off, that the console's
+diagnostics switch is picked up without a restart, and that scheduler
+housekeeping and versions refresh report an unopenable lock once instead of
+claiming a run is in progress.
+
+`tests/test_sync_image.sh IMAGE` runs the `sync.sh` shipped inside a built
+sync image, with that image's own jq, against a stub tool and a protected
+operator tree. Debian bookworm ships jq 1.6, which rejects a query the host's
+jq 1.7 accepts, so this proof has to run in the image; CI runs it against the
+freshly built `vcf-services-sync-base:ci`.
 
 `tests/make-stub-depot.sh <dir> [version ...]` builds a stub depot tree that
 models the reference depot layout for the tool itself, a flat

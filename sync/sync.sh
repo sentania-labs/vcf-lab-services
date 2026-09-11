@@ -39,6 +39,7 @@ apply_settings_defaults() {
 	: "${LOG_RETENTION:=20}"
 	: "${VKR_MATCH:=}"
 	: "${VKR_OS:=}"
+	: "${SYNC_DIAGNOSTICS:=false}"
 }
 
 status_key="vcf-services:sync:status"
@@ -50,13 +51,42 @@ mkdir -p "$STATE_DIR"
 now() { date -u +%FT%TZ; }
 log() { echo "[sync $(now)] $*"; }
 
+# Verbose lock diagnostics are a logging switch rather than a run value, so
+# the console's SYNC_DIAGNOSTICS flag is read before the depot lock is taken.
+# Every value that shapes the run is still read under the settings snapshot
+# lock further down. Off by default; a scheduler that dispatched this run
+# exports the flag as well, and a direct invocation reads settings.env here.
+sync_diagnostics=false
+# shellcheck disable=SC1090
+diagnostics_flag="$( (. "$settings_file" 2>/dev/null; printf '%s' "${SYNC_DIAGNOSTICS:-}") 2>/dev/null || true)"
+case "${diagnostics_flag,,}" in
+	true|yes|1) sync_diagnostics=true ;;
+esac
+diag() {
+	[ "$sync_diagnostics" = true ] || return 0
+	log "diag: $*"
+}
+# Name what a descriptor refers to the way /proc/locks does: major:minor and inode.
+lock_identity() {
+	local fd="$1" dev="" ino=""
+	read -r dev ino < <(stat -Lc '%d %i' "/proc/self/fd/$fd" 2>/dev/null) || true
+	if [ -n "$ino" ]; then
+		printf 'fd=%s dev=%02x:%02x ino=%s' "$fd" \
+			"$(( ((dev >> 8) & 0xfff) | ((dev >> 32) & ~0xfff) ))" \
+			"$(( (dev & 0xff) | ((dev >> 12) & ~0xff) ))" "$ino"
+	else
+		printf 'fd=%s dev=? ino=?' "$fd"
+	fi
+}
+
 protected_trees_for_target() {
 	local label="$1"
 	[ -e "$DEPOT_OWNERSHIP_FILE" ] || [ -L "$DEPOT_OWNERSHIP_FILE" ] || return 0
-	jq -er --arg label "$label" 'if (.trees | type) != "object" then error("invalid ownership manifest") else . end | [.trees | to_entries[] |
+	# jq 1.6 reserves "label" as a keyword, so the argument is named target.
+	jq -er --arg target "$label" 'if (.trees | type) != "object" then error("invalid ownership manifest") else . end | [.trees | to_entries[] |
 		select(.value.protected == true) |
-		select(if $label == "esx-image-library" then .key == "ESX_HOST"
-		       elif $label == "vkr-content-library" then .key == "VKR"
+		select(if $target == "esx-image-library" then .key == "ESX_HOST"
+		       elif $target == "vkr-content-library" then .key == "VKR"
 		       else true end) | .key] | join("\n")' "$DEPOT_OWNERSHIP_FILE"
 }
 
@@ -154,11 +184,46 @@ if [ "${1:-}" = "--status" ]; then
 	exit 0
 fi
 
-exec 9>"$STATE_DIR/sync.lock"
-if ! flock -n 9; then
-	log "another sync is already running, skipping this trigger"
-	exit 0
+lock_file="$STATE_DIR/sync.lock"
+# A scheduler that dispatched this run already holds the depot lock on fd 9
+# and handed the locked descriptor down, so its own housekeeping cannot slip
+# in ahead of the run it just launched (see dispatch_sync in entrypoint.sh).
+# Any other invocation opens the lock file itself.
+if [ -e /proc/self/fd/9 ] && [ /proc/self/fd/9 -ef "$lock_file" ]; then
+	lock_source=inherited
+elif { exec 9>"$lock_file"; } 2>/dev/null; then
+	lock_source=opened
+else
+	open_error="$( { : >>"$lock_file"; } 2>&1 | sed 's/^[^:]*: line [0-9]*: //' || true)"
+	open_error="${open_error#"$lock_file: "}"
+	log "ERROR: could not open the depot lock $lock_file${open_error:+ ($open_error)}; refusing sync"
+	diag "lock failed op=sync fd=9 pid=$$ ppid=$PPID reason=open"
+	exit 1
 fi
+# util-linux flock exits 1 only when another descriptor holds the lock; any
+# other status is a locking failure rather than a run in progress.
+lock_rc=0
+lock_error="$(flock -n 9 2>&1)" || lock_rc=$?
+case "$lock_rc" in
+	0)
+		diag "lock acquired op=sync $(lock_identity 9) pid=$$ ppid=$PPID source=$lock_source"
+		;;
+	1)
+		log "another sync or versions refresh already holds the depot lock, skipping this trigger"
+		diag "lock contended op=sync $(lock_identity 9) pid=$$ ppid=$PPID source=$lock_source"
+		exit 0
+		;;
+	*)
+		log "ERROR: could not take the depot lock $lock_file (flock exit $lock_rc${lock_error:+: $lock_error}); refusing sync"
+		diag "lock failed op=sync $(lock_identity 9) pid=$$ ppid=$PPID source=$lock_source reason=flock"
+		exit 1
+		;;
+esac
+sync_rc=0
+diag_lock_release() {
+	diag "lock released op=sync $(lock_identity 9) pid=$$ exit=$sync_rc"
+}
+trap 'sync_rc=$?; diag_lock_release' EXIT
 
 if [ -d "$comp_root" ]; then
 	while IFS= read -r -d '' tree; do
@@ -223,7 +288,9 @@ if [ -s "$tool_metadata" ]; then
 fi
 
 run_log="$STATE_DIR/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
-exec > >(tee -a "$run_log") 2>&1
+# The log writer must not inherit the run's lock descriptors, or it would keep
+# the depot lock alive for the moment it outlives the run.
+exec > >(exec 6<&- 7<&- 9>&-; exec tee -a "$run_log") 2>&1
 ln -sfn "$(basename "$run_log")" "$STATE_DIR/latest.log"
 
 log_publisher_pid=""
@@ -245,7 +312,7 @@ stop_log_publisher() {
 	fi
 	publish_log_tail
 }
-trap stop_log_publisher EXIT
+trap 'sync_rc=$?; diag_lock_release; stop_log_publisher' EXIT
 
 prune_logs() {
 	if [[ "$LOG_RETENTION" =~ ^[1-9][0-9]*$ ]]; then
@@ -277,9 +344,10 @@ write_state '. + {running:true, armed:true, currentTarget:null, startedAt:$t, ta
 
 finish_state() {
 	write_state '. + {running:false, currentTarget:null, finishedAt:$t}' --arg t "$(now)"
+	diag_lock_release
 	stop_log_publisher
 }
-trap finish_state EXIT
+trap 'sync_rc=$?; finish_state' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

@@ -30,6 +30,7 @@ jobs:
         run: |
           ./tests/test_sync.sh
           ./tests/test_scheduler.sh
+          ./tests/test_scheduler_lock.sh
           ./tests/test_install_checks.sh
           ./tests/test_compose.sh
           ./tests/test_release.sh
@@ -78,6 +79,7 @@ jobs:
             --entrypoint /opt/vcfdt/current/bin/vcf-download-tool \
             vcf-services-sync-base:ci --version | grep -q 'Welcome to VCF Download Tool'
           grep -qx 'written' "$RUNNER_TEMP/vcfdt/current/conf/telemetry/telemetry.flag"
+          ./tests/test_sync_image.sh vcf-services-sync-base:ci
 
       - name: Run UI unit tests in the built image
         run: docker run --rm -v "$PWD:/work:ro" -w /work vcf-services-ui:ci python tests/test_ui.py

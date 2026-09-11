@@ -315,6 +315,7 @@
         <div class="field"><label for="ceip">CEIP</label><select id="ceip"><option>DISABLE</option><option>ENABLE</option></select></div>
         <div class="field"><label for="esx-mode">ESX target mode</label><select id="esx-mode"><option value="download">download</option><option value="metadata">metadata</option></select></div>
         <div class="field"><label for="log-retention">Run logs to retain</label><input id="log-retention" type="number" min="1" max="1000"></div>
+        <div class="field"><label>Diagnostics</label><label class="choice"><input id="sync-diagnostics" type="checkbox"> Verbose lock diagnostics in the sync service log</label></div>
         <div class="field full"><label>Scheduled targets</label><div id="settings-targets" class="targets">
           {% for target in targets %}<label class="choice"><input type="checkbox" class="settings-target" value="{{target}}"> {{target}}</label>{% endfor %}
         </div></div>
@@ -602,6 +603,7 @@ function populateSetup(data) {
   $('uidgid').value=settings.uidGid; $('depot-endpoint').value=settings.depotEndpoint;
   $('token-url').value=settings.tokenUrl; $('esx-mode').value=settings.esxMode;
   $('log-retention').value=settings.logRetention; $('vkr-match').value=settings.vkrMatch;
+  $('sync-diagnostics').checked=settings.syncDiagnostics;
   $('vkr-os').value=settings.vkrOs; setTargets('.settings-target',settings.syncTargets);
   setTargets('.run-target',settings.syncTargets);
   $('progress-tool').className=`step ${data.tool.installed ? 'done' : 'active'}`;
@@ -782,6 +784,7 @@ function settingsPayload(){ return {
   timezone:$('timezone').value, ceip:$('ceip').value, backupEnabled:$('backup-enabled').checked,
   uidGid:$('uidgid').value, depotEndpoint:$('depot-endpoint').value, tokenUrl:$('token-url').value,
   esxMode:$('esx-mode').value, logRetention:$('log-retention').value,
+  syncDiagnostics:$('sync-diagnostics').checked,
   vkrMatch:$('vkr-match').value, vkrOs:$('vkr-os').value,
   storageConfirmed:$('storage-confirmed').checked,
   syncTargets:[...document.querySelectorAll('.settings-target:checked')].map(box=>box.value)
