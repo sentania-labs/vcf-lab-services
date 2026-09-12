@@ -162,7 +162,9 @@ when a listed component is protected. Otherwise the run log names the trees
 the target writes, the download runs, and the protected trees are checked
 afterwards: any entry added, removed, resized, re-timed, re-linked or
 re-permissioned below a protected tree during the run is reported and the
-target is recorded as `FAILED:PROTECTED-CHANGED`. When the listing cannot be
+target is recorded as `FAILED:PROTECTED-CHANGED`. That after-run check
+compares the metadata of each entry, reads no file content, and reports an
+unexpected write rather than preventing it. When the listing cannot be
 obtained the target is not run and is recorded as failed. Protection remains
 until an operator turns it off in the Depot tab.
 

@@ -70,8 +70,10 @@ Kubernetes manifest test also asserts that product images default to the
 latest tags with an always-pull policy.
 
 `tests/test_sync.sh` also runs `tests/test_sync_protection.py`, which checks
-that protected content libraries stay byte, link and metadata identical while
-unrelated install, upgrade and patches downloads run, that a target whose
+that protected content libraries are untouched while unrelated install,
+upgrade and patches downloads run, with the runtime fingerprint covering their
+links and metadata and the tests comparing the fixture files' bytes
+separately, that a target whose
 tool listing names a protected tree skips and names only that tree, that an
 unobtainable listing leaves the target unrun, that a write or link change
 inside a protected tree during a run is reported, plus dispatch refusal and

@@ -48,8 +48,8 @@ class Harness:
 
     def content_library(self, name):
         """An operator-provided tree with nested bytes, a symlink, and a
-        distinctive mode and mtime, so any change to bytes, links or metadata
-        shows in its fingerprint."""
+        distinctive mode and mtime, so any change to links or metadata shows in
+        its fingerprint; the tests compare the fixture bytes separately."""
         tree = self.comp / name
         (tree / "releases" / "v1").mkdir(parents=True)
         (tree / "items.json").write_text("[]")
@@ -107,13 +107,17 @@ class SyncProtectionScopeTests(unittest.TestCase):
     def test_unrelated_downloads_run_while_content_libraries_stay_protected(self):
         # Issue #47: VKR and SUPERVISOR are protected operator libraries. The
         # tool's own listing for each binaries target names other trees, so
-        # the downloads run and the protected trees are byte, link and
-        # metadata identical afterwards.
+        # the downloads run and the protected trees are metadata and link
+        # identical afterwards by fingerprint, with their bytes compared
+        # directly.
         harness = self.harness
         vkr = harness.content_library("VKR")
         supervisor = harness.content_library("SUPERVISOR")
         harness.protect("VKR", "SUPERVISOR")
         before = {"VKR": fingerprint(vkr), "SUPERVISOR": fingerprint(supervisor)}
+        files = ["items.json", "lib.json", "releases/v1/image.ova"]
+        bytes_before = {tree / name: (tree / name).read_bytes()
+                        for tree in (vkr, supervisor) for name in files}
 
         result = harness.run("install", "upgrade", "patches")
 
@@ -123,6 +127,7 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(harness.called(), ["binaries list", "binaries download"] * 3)
         self.assertEqual(fingerprint(vkr), before["VKR"])
         self.assertEqual(fingerprint(supervisor), before["SUPERVISOR"])
+        self.assertEqual({path: path.read_bytes() for path in bytes_before}, bytes_before)
         self.assertIn("vcf-install writes 3 trees under PROD/COMP (NSX_T_MANAGER, "
                       "SDDC_MANAGER_VCF, VCENTER); none of them is protected", result.stdout)
         self.assertIn("vcf-patches writes 4 trees under PROD/COMP (ESX_HOST, NSX_T_MANAGER, "

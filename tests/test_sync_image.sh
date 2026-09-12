@@ -59,7 +59,8 @@ run_shipped_sync() {
 
 # With ESX_HOST protected, the ESX image library skips, install runs because
 # the tool's listing for it names no ESX_HOST, and patches skips because that
-# listing does. The protected tree is byte and metadata identical afterwards.
+# listing does. The protected tree is metadata identical afterwards by its
+# fingerprint, and the operator file's bytes are compared directly.
 before="$(find "$work_dir/depot/PROD/COMP/ESX_HOST" -printf '%y %m %s %T@ %i %p -> %l\n' | sort)"
 run_shipped_sync "$work_dir/protected.log" esx install patches
 grep -q 'PROD/COMP/ESX_HOST is protected and esx-image-library writes it, skipping the target without changing it' "$work_dir/protected.log"

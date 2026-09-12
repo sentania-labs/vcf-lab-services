@@ -88,7 +88,12 @@ protected_trees() {
 
 # Each Component value in the tool's binaries table is the PROD/COMP tree that
 # binary lands in. The header names the column, so its position is read rather
-# than assumed; a listing with no such table exits 3.
+# than assumed; a listing with no such table exits 3. `binaries list` and the
+# "Binaries to be downloaded" table the download itself prints come from the
+# same table printer in the tool, which labels that column 'Component' and
+# delimits columns with ' | ', as the live download logs show. A listing
+# without that header is therefore not a table this code can read, and the
+# target fails closed as FAILED:UNVERIFIED rather than running unchecked.
 components_from_listing() {
 	awk -F'|' '
 		function trim(text) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", text); return text }
