@@ -5,13 +5,16 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
+import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from unittest import mock
@@ -20,6 +23,7 @@ from jinja2 import FileSystemLoader
 
 
 APP_PATH = Path(__file__).parents[1] / "ui" / "app.py"
+GUNICORN_CONF_PATH = Path(__file__).parents[1] / "ui" / "gunicorn.conf.py"
 BOOTSTRAP_PATH = Path(__file__).parents[1] / "ui" / "bootstrap.py"
 
 
@@ -121,16 +125,60 @@ class UiApiTests(unittest.TestCase):
         }
         (root / ".vcf-services-version").write_text("v0.2.1\n")
         (self.secrets / "flask-secret").write_text("test-secret\n")
-        with mock.patch.dict(os.environ, environment):
-            spec = importlib.util.spec_from_file_location("vcf_services_ui", APP_PATH)
-            self.module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(self.module)
+        self.environment = environment
+        self.module = self.load_app("vcf_services_ui")
+        self.client = self.module.app.test_client()
+
+    def load_app(self, name):
+        with mock.patch.dict(os.environ, self.environment):
+            spec = importlib.util.spec_from_file_location(name, APP_PATH)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
         # The module is loaded by path, so Flask resolves its root to the
         # working directory. Point the loader at the real template folder.
-        self.module.app.jinja_loader = FileSystemLoader(
-            str(APP_PATH.parent / "templates")
+        module.app.jinja_loader = FileSystemLoader(str(APP_PATH.parent / "templates"))
+        return module
+
+    def new_worker(self, password="a strong test password"):
+        """Load the app again over the same files, as a second gunicorn worker
+        or a restarted pod would, and sign that worker in."""
+        module = self.load_app(f"vcf_services_ui_{uuid.uuid4().hex}")
+        client = module.app.test_client()
+        signed_in = client.post(
+            "/api/login",
+            base_url="https://localhost",
+            json={"username": "vcf", "password": password},
         )
-        self.client = self.module.app.test_client()
+        self.assertEqual(signed_in.status_code, 200)
+        return module, client
+
+    def forbid_tool_launch(self, module=None):
+        """Fail the test if anything under this module starts a subprocess."""
+        self.launch_guard = mock.patch.object(
+            (module or self.module).subprocess,
+            "run",
+            side_effect=AssertionError("the tool was launched on a read path"),
+        )
+        self.launch_guard.start()
+        self.addCleanup(self.allow_tool_launch)
+
+    def allow_tool_launch(self):
+        guard = getattr(self, "launch_guard", None)
+        if guard is not None:
+            guard.stop()
+            self.launch_guard = None
+
+    def current_release_metadata(self):
+        return (self.tool_store / "current" / ".vcf-services.json")
+
+    def forget_recorded_probe(self):
+        """Strip the recorded probe, as a release written by an older console
+        or placed by hand would look."""
+        metadata_path = self.current_release_metadata()
+        metadata = json.loads(metadata_path.read_text())
+        for key in ("machineId", "machineIdProbed", "machineIdProbedAt"):
+            metadata.pop(key, None)
+        metadata_path.write_text(json.dumps(metadata) + "\n")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -475,19 +523,666 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(
             self.get("/api/registration").get_json()["machineId"], verified_id
         )
-        tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
-        tool.write_text("#!/bin/sh\necho fake\n")
-        tool.chmod(0o755)
-        self.module._machine_id_cache["value"] = None
+        bogus = self.tar_tool(machine_id="fake")
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (bogus, "vcf-download-tool-9.1.3.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.get_json()["registration"]["machineIdStatus"], "failed"
+        )
 
+        # The failure is served from the recorded install outcome, so the
+        # read paths report it without launching the tool again.
+        self.forbid_tool_launch()
         registration = self.get("/api/registration")
         self.assertEqual(registration.status_code, 409)
         body = registration.get_json()
         self.assertEqual(body["machineId"], verified_id)
+        self.assertEqual(body["machineIdStatus"], "failed")
         self.assertIn("probe failed", body["error"])
         self.assertEqual(
             Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), verified_id
         )
+        bootstrap = self.get("/api/bootstrap").get_json()
+        self.assertEqual(bootstrap["machineIdStatus"], "failed")
+        self.assertEqual(bootstrap["machineId"], verified_id)
+        self.assertIn("probe failed", bootstrap["machineIdError"])
+        refused = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("probe failed", refused.get_json()["error"])
+
+        # Verify is the explicit recovery: a corrected tool confirms the ID
+        # and the record outlives the request.
+        new_id = "22222222-2222-4222-8222-222222222222"
+        tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
+        tool.write_text(f"#!/bin/sh\necho 'Software Depot ID: {new_id}'\n")
+        tool.chmod(0o755)
+        self.allow_tool_launch()
+        verified = self.post("/api/registration/verify")
+        self.assertEqual(verified.status_code, 200)
+        self.assertEqual(verified.get_json()["machineId"], new_id)
+        self.assertEqual(verified.get_json()["machineIdStatus"], "confirmed")
+        self.assertTrue(verified.get_json()["verified"])
+        metadata = json.loads(self.current_release_metadata().read_text())
+        self.assertEqual(metadata["machineId"], new_id)
+        self.assertTrue(metadata["machineIdProbed"])
+        self.assertEqual(
+            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), new_id
+        )
+        confirmed = self.get("/api/registration")
+        self.assertEqual(confirmed.status_code, 200)
+        self.assertEqual(confirmed.get_json()["machineId"], new_id)
+
+    def test_sign_in_and_bootstrap_never_launch_the_tool(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        verified_id = "11111111-1111-4111-8111-111111111111"
+        # A tool that is slow to start and then fails, as a cold JVM whose
+        # probe cannot answer would be. The read paths must not notice.
+        tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
+        tool.write_text("#!/bin/sh\nsleep 5\nexit 1\n")
+        tool.chmod(0o755)
+        self.assertEqual(self.post("/api/logout").status_code, 200)
+
+        started = time.monotonic()
+        signed_in = self.post(
+            "/api/login", json={"username": "vcf", "password": "a strong test password"}
+        )
+        self.assertEqual(signed_in.status_code, 200)
+        bootstrap = self.get("/api/bootstrap")
+        elapsed = time.monotonic() - started
+        self.assertEqual(bootstrap.status_code, 200)
+        body = bootstrap.get_json()
+        self.assertTrue(body["authenticated"])
+        self.assertEqual(body["machineId"], verified_id)
+        self.assertEqual(body["machineIdStatus"], "confirmed")
+        self.assertIsNone(body["machineIdError"])
+        self.assertIsNotNone(body["machineIdVerifiedAt"])
+        self.assertLess(elapsed, 2.0, f"sign-in plus bootstrap took {elapsed:.2f}s")
+
+        self.forbid_tool_launch()
+        for _ in range(3):
+            self.assertEqual(
+                self.get("/api/bootstrap").get_json()["machineId"], verified_id
+            )
+            self.assertEqual(self.get("/api/registration").status_code, 200)
+        self.assertEqual(
+            self.post("/api/registration", json={"activationCode": "code"}).status_code,
+            200,
+        )
+
+    def test_second_worker_and_restart_read_the_recorded_identity(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        verified_id = "11111111-1111-4111-8111-111111111111"
+        tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
+        tool.write_text("#!/bin/sh\nsleep 5\nexit 1\n")
+        tool.chmod(0o755)
+
+        worker, client = self.new_worker()
+        self.forbid_tool_launch(worker)
+        bootstrap = client.get("/api/bootstrap", base_url="https://localhost")
+        self.assertEqual(bootstrap.status_code, 200)
+        self.assertEqual(bootstrap.get_json()["machineId"], verified_id)
+        self.assertEqual(bootstrap.get_json()["machineIdStatus"], "confirmed")
+        registration = client.get("/api/registration", base_url="https://localhost")
+        self.assertEqual(registration.status_code, 200)
+
+    def test_release_without_a_recorded_probe_is_unverified_until_verified(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        verified_id = "11111111-1111-4111-8111-111111111111"
+        self.forget_recorded_probe()
+
+        self.forbid_tool_launch()
+        bootstrap = self.get("/api/bootstrap").get_json()
+        self.assertEqual(bootstrap["machineIdStatus"], "unverified")
+        self.assertEqual(bootstrap["machineId"], verified_id)
+        self.assertIsNone(bootstrap["machineIdError"])
+        self.assertIn("has not been verified", bootstrap["machineIdMessage"])
+        self.assertIn("runs on its own", bootstrap["machineIdMessage"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        refused = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("Verify with the tool", refused.get_json()["error"])
+        self.assertFalse((self.secrets / "activation-code.txt").exists())
+        self.post("/api/settings", json=self.valid_settings())
+        incomplete = self.post("/api/setup/complete")
+        self.assertEqual(incomplete.status_code, 409)
+        self.assertIn("Software Depot ID", incomplete.get_json()["error"])
+
+        Path(self.module.SOFTWARE_DEPOT_ID_FILE).unlink()
+        unknown = self.get("/api/bootstrap").get_json()
+        self.assertEqual(unknown["machineIdStatus"], "unverified")
+        self.assertIsNone(unknown["machineId"])
+        self.assertIn("has not been read yet", unknown["machineIdMessage"])
+
+        self.allow_tool_launch()
+        verified = self.post("/api/registration/verify")
+        self.assertEqual(verified.status_code, 200)
+        self.assertEqual(verified.get_json()["machineId"], verified_id)
+        self.assertEqual(verified.get_json()["machineIdStatus"], "confirmed")
+        confirmed = self.get("/api/bootstrap").get_json()
+        self.assertEqual(confirmed["machineIdStatus"], "confirmed")
+        self.assertEqual(confirmed["machineId"], verified_id)
+        self.assertEqual(
+            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), verified_id
+        )
+        saved = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(saved.status_code, 200)
+
+    def test_verify_confirms_a_pending_adoption_and_reports_a_mismatch(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        self.assertEqual(
+            self.post("/api/registration/adopt", json={"machineId": adopted_id}).status_code,
+            200,
+        )
+        installed = self.post(
+            "/api/vcfdt",
+            data={
+                "archive": (
+                    self.tar_tool(machine_id_file=self.vcfdt_state / "machine_id"),
+                    "vcf-download-tool-9.1.2.tar.gz",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(installed.status_code, 201)
+        # An adoption record left pending with a tool present, as an
+        # out-of-band install would leave it, is reported as pending and is
+        # not confirmed by a read.
+        self.module._record_machine_id_adoption(adopted_id, "adopted")
+        self.forbid_tool_launch()
+        pending = self.get("/api/bootstrap").get_json()
+        self.assertEqual(pending["machineIdStatus"], "adopted")
+        self.assertEqual(pending["machineId"], adopted_id)
+        self.assertIn("Verify with the installed tool", pending["machineIdMessage"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+
+        self.allow_tool_launch()
+        verified = self.post("/api/registration/verify")
+        self.assertEqual(verified.status_code, 200)
+        self.assertEqual(verified.get_json()["machineIdStatus"], "confirmed")
+        self.assertEqual(self.module._machine_id_adoption()["status"], "confirmed")
+
+        other_id = "33333333-3333-4333-8333-333333333333"
+        (self.vcfdt_state / "machine_id").write_text(other_id)
+        mismatch = self.post("/api/registration/verify")
+        self.assertEqual(mismatch.status_code, 409)
+        self.assertEqual(mismatch.get_json()["machineIdStatus"], "mismatch")
+        self.assertIn(other_id, mismatch.get_json()["error"])
+        self.assertEqual(self.get("/api/bootstrap").get_json()["machineIdStatus"], "mismatch")
+
+    def run_startup_verification(self, module=None, sleep=lambda _seconds: None, started_at=None):
+        module = module or self.module
+        return module._startup_identity_verification(
+            started_at or datetime.now(timezone.utc).isoformat(),
+            delays=(0,), retry_every=0, sleep=sleep,
+        )
+
+    def test_startup_verification_confirms_a_legacy_release_without_operator_action(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        verified_id = "11111111-1111-4111-8111-111111111111"
+        # An appliance upgraded from a console that recorded no probe, whose
+        # own saved copy of the ID never existed either.
+        self.forget_recorded_probe()
+        Path(self.module.SOFTWARE_DEPOT_ID_FILE).unlink()
+        self.forbid_tool_launch()
+        pending = self.get("/api/bootstrap").get_json()
+        self.assertEqual(pending["machineIdStatus"], "unverified")
+        self.assertIsNone(pending["machineId"])
+
+        # A second worker, as gunicorn boots it, runs the startup hook.
+        worker, client = self.new_worker()
+        self.allow_tool_launch()
+        self.assertEqual(self.run_startup_verification(worker), "verified")
+        metadata = json.loads(self.current_release_metadata().read_text())
+        self.assertEqual(metadata["machineId"], verified_id)
+        self.assertTrue(metadata["machineIdProbed"])
+        self.assertEqual(
+            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), verified_id
+        )
+        # Both workers now serve the confirmed identity from the record, and
+        # a repeat of the hook has nothing to do.
+        confirmed = self.get("/api/bootstrap").get_json()
+        self.assertEqual(confirmed["machineIdStatus"], "confirmed")
+        self.assertEqual(confirmed["machineId"], verified_id)
+        self.assertEqual(self.get("/api/registration").status_code, 200)
+        self.forbid_tool_launch(worker)
+        self.assertEqual(self.run_startup_verification(worker), "not needed")
+        other = client.get("/api/bootstrap", base_url="https://localhost").get_json()
+        self.assertEqual(other["machineIdStatus"], "confirmed")
+
+    def test_startup_verification_defers_for_a_running_sync_or_tool_update(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.forget_recorded_probe()
+        self.write_state(running=True)
+        self.forbid_tool_launch()
+        # A sync that outlasts the initial delays: the job keeps waiting at
+        # the retry interval, never launches the tool beside it, and verifies
+        # once the sync ends.
+        slept = []
+
+        def sync_ends_after_six_waits(seconds):
+            slept.append(seconds)
+            if len(slept) == 6:
+                self.assertEqual(
+                    self.get("/api/bootstrap").get_json()["machineIdStatus"], "unverified"
+                )
+                self.write_state()
+                self.allow_tool_launch()
+
+        verification = self.module._startup_identity_verification(
+            datetime.now(timezone.utc).isoformat(),
+            delays=(10, 60, 300, 900), retry_every=900, sleep=sync_ends_after_six_waits,
+        )
+        self.assertEqual(verification, "verified")
+        self.assertEqual(slept, [10, 60, 300, 900, 900, 900])
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
+        )
+
+        # A tool update holding the lock defers it the same way.
+        self.forget_recorded_probe()
+        self.forbid_tool_launch()
+        lock = (self.tool_store / ".update.lock").open("a+")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        waits = []
+
+        def update_ends_after_three_waits(seconds):
+            waits.append(seconds)
+            if len(waits) == 3:
+                lock.close()
+                self.allow_tool_launch()
+
+        self.assertEqual(
+            self.run_startup_verification(sleep=update_ends_after_three_waits), "verified"
+        )
+        self.assertEqual(len(waits), 3)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
+        )
+
+    def test_identity_changed_after_verification_is_reverified_at_start(self):
+        self.claim()
+        self.write_state()
+        first_id = "11111111-1111-4111-8111-111111111111"
+        changed_id = "44444444-4444-4444-8444-444444444444"
+        self.vcfdt_state.mkdir()
+        (self.vcfdt_state / "machine_id").write_text(first_id + "\n")
+        installed = self.post(
+            "/api/vcfdt",
+            data={
+                "archive": (
+                    self.tar_tool(machine_id_file=self.vcfdt_state / "machine_id"),
+                    "vcf-download-tool-9.1.2.tar.gz",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(installed.status_code, 201)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
+        )
+
+        # The identity file is replaced outside the console after the probe.
+        # The record is backdated so the comparison does not depend on how
+        # quickly this test runs.
+        metadata_path = self.current_release_metadata()
+        metadata = json.loads(metadata_path.read_text())
+        metadata["machineIdProbedAt"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=10)
+        ).isoformat()
+        metadata_path.write_text(json.dumps(metadata) + "\n")
+        identity = self.vcfdt_state / "machine_id"
+        identity.write_text(changed_id + "\n")
+        self.forbid_tool_launch()
+        stale = self.get("/api/bootstrap").get_json()
+        self.assertEqual(stale["machineIdStatus"], "unverified")
+        self.assertEqual(stale["machineId"], first_id)
+        self.assertIn("changed afterwards", stale["machineIdMessage"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        refused = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(refused.status_code, 409)
+
+        self.allow_tool_launch()
+        self.assertEqual(self.run_startup_verification(), "verified")
+        self.forbid_tool_launch()
+        reverified = self.get("/api/bootstrap").get_json()
+        self.assertEqual(reverified["machineIdStatus"], "confirmed")
+        self.assertEqual(reverified["machineId"], changed_id)
+        self.assertEqual(
+            Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), changed_id
+        )
+
+    def backdate_recorded_probe(self):
+        metadata_path = self.current_release_metadata()
+        metadata = json.loads(metadata_path.read_text())
+        metadata["machineIdProbedAt"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=10)
+        ).isoformat()
+        metadata_path.write_text(json.dumps(metadata) + "\n")
+        return metadata["machineIdProbedAt"]
+
+    def test_identity_changed_after_a_confirmed_adoption_is_not_reported_confirmed(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        changed_id = "44444444-4444-4444-8444-444444444444"
+        self.assertEqual(
+            self.post("/api/registration/adopt", json={"machineId": adopted_id}).status_code,
+            200,
+        )
+        identity = self.vcfdt_state / "machine_id"
+        installed = self.post(
+            "/api/vcfdt",
+            data={
+                "archive": (
+                    self.tar_tool(machine_id_file=identity),
+                    "vcf-download-tool-9.1.2.tar.gz",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(installed.status_code, 201)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
+        )
+
+        probed_at = self.backdate_recorded_probe()
+        identity.write_text(changed_id + "\n")
+        self.forbid_tool_launch()
+        stale = self.get("/api/bootstrap").get_json()
+        self.assertEqual(stale["machineIdStatus"], "unverified")
+        self.assertEqual(stale["machineId"], adopted_id)
+        self.assertEqual(stale["machineIdVerifiedAt"], probed_at)
+        self.assertIn("changed afterwards", stale["machineIdMessage"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        refused = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(refused.status_code, 409)
+        self.assertFalse((self.secrets / "activation-code.txt").exists())
+
+        self.allow_tool_launch()
+        self.assertEqual(self.run_startup_verification(), "verified")
+        mismatch = self.get("/api/bootstrap").get_json()
+        self.assertEqual(mismatch["machineIdStatus"], "mismatch")
+        self.assertEqual(mismatch["reportedMachineId"], changed_id)
+
+        self.backdate_recorded_probe()
+        identity.write_text(adopted_id + "\n")
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "unverified"
+        )
+        self.assertEqual(self.run_startup_verification(), "verified")
+        confirmed = self.get("/api/bootstrap").get_json()
+        self.assertEqual(confirmed["machineIdStatus"], "confirmed")
+        self.assertEqual(confirmed["machineId"], adopted_id)
+        self.assertEqual(self.get("/api/registration").status_code, 200)
+
+    def test_identity_changed_after_a_mismatch_never_claims_the_adopted_id_verified(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        reported_id = "11111111-1111-4111-8111-111111111111"
+        self.assertEqual(
+            self.post("/api/registration/adopt", json={"machineId": adopted_id}).status_code,
+            200,
+        )
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "mismatch"
+        )
+
+        self.backdate_recorded_probe()
+        (self.vcfdt_state / "machine_id").write_text(reported_id + "\n")
+        self.forbid_tool_launch()
+        stale = self.get("/api/bootstrap").get_json()
+        self.assertEqual(stale["machineIdStatus"], "unverified")
+        self.assertIn(adopted_id, stale["machineIdMessage"])
+        self.assertIn(reported_id, stale["machineIdMessage"])
+        self.assertIn("changed afterwards", stale["machineIdMessage"])
+        self.assertNotIn("was verified", stale["machineIdMessage"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        refused = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(refused.status_code, 409)
+        self.assertFalse((self.secrets / "activation-code.txt").exists())
+
+    def test_workers_share_one_start_time_verification_of_a_failed_probe(self):
+        self.claim()
+        self.write_state()
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (self.tar_tool(machine_id="fake"), "vcf-download-tool-9.1.3.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "failed"
+        )
+        # The failed record predates this start, so it is retried once.
+        started_at = datetime.now(timezone.utc).isoformat()
+        first, _ = self.new_worker()
+        second, _ = self.new_worker()
+        launches = []
+        real_run = first.subprocess.run
+
+        def counted_run(*args, **kwargs):
+            launches.append(args)
+            return real_run(*args, **kwargs)
+
+        with mock.patch.object(first.subprocess, "run", side_effect=counted_run):
+            self.assertEqual(
+                self.run_startup_verification(first, started_at=started_at), "failed"
+            )
+        self.assertTrue(launches)
+        launched = len(launches)
+
+        self.forbid_tool_launch(second)
+        self.assertEqual(
+            self.run_startup_verification(second, started_at=started_at), "not needed"
+        )
+        self.assertEqual(
+            self.run_startup_verification(first, started_at=started_at), "not needed"
+        )
+        self.assertEqual(len(launches), launched)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "failed"
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads files regardless of their mode")
+    def test_unreadable_release_metadata_is_not_replaced_by_verification(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        metadata_path = self.current_release_metadata()
+        original = metadata_path.read_bytes()
+        metadata_path.chmod(0o000)
+        try:
+            verified = self.post("/api/registration/verify")
+        finally:
+            metadata_path.chmod(0o644)
+        self.assertEqual(verified.status_code, 500)
+        self.assertEqual(metadata_path.read_bytes(), original)
+
+    def run_console(self, payload):
+        result = subprocess.run(
+            ["node", str(APP_PATH.parents[1] / "tests" / "console-status.cjs")],
+            input=json.dumps({"html": self.get("/").get_data(as_text=True), **payload}),
+            text=True, capture_output=True, check=True,
+        )
+        return json.loads(result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_identity_refresh_backs_off_and_stops_when_signed_out(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        confirmed = self.get("/api/bootstrap").get_json()
+        status = self.get("/api/status").get_json()
+        self.forget_recorded_probe()
+        pending = self.get("/api/bootstrap").get_json()
+        self.assertEqual(pending["machineIdStatus"], "unverified")
+        still_pending = {"api/bootstrap": {"status": 200, "body": pending}}
+
+        signed_out = self.run_console({
+            "status": status,
+            "identity": pending,
+            "polls": [
+                {"at": 5000, "responses": {
+                    "api/bootstrap": {"status": 200, "body": {"claimed": True, "authenticated": False}},
+                    "api/status": {"status": 401, "body": {"error": "sign in to continue"}},
+                }},
+                {"at": 10000, "responses": {
+                    "api/status": {"status": 401, "body": {"error": "sign in to continue"}},
+                }},
+            ],
+        })
+        self.assertEqual([step["bootstrapCalls"] for step in signed_out], [1, 1])
+        self.assertEqual([step["statusCalls"] for step in signed_out], [1, 2])
+        self.assertEqual(signed_out[-1]["error"], "sign in to continue")
+
+        seconds = [5, 30, 55, 65, 90, 120, 125, 180, 185]
+        backoff = self.run_console({
+            "status": status,
+            "identity": pending,
+            "polls": [{"at": at * 1000, "responses": still_pending} for at in seconds]
+            + [{"at": 245000, "responses": {"api/bootstrap": {"status": 200, "body": confirmed}}},
+               {"at": 250000, "responses": still_pending},
+               {"at": 400000, "responses": still_pending}],
+        })
+        self.assertEqual(
+            [step["bootstrapCalls"] for step in backoff],
+            [1, 2, 3, 3, 3, 4, 4, 5, 5, 6, 6, 6],
+        )
+        self.assertEqual([step["statusCalls"] for step in backoff], list(range(1, 13)))
+        self.assertIn("Confirmed by the installed tool", backoff[-1]["machineIdStatus"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_sign_in_shows_progress_while_the_credential_is_checked(self):
+        rendered = self.run_console({
+            "login": {"status": 401, "body": {"error": "the username or password is incorrect"}},
+        })
+        self.assertEqual(
+            rendered["pending"],
+            {"disabled": True, "label": "Signing in", "flash": "Checking the credential"},
+        )
+        self.assertEqual(
+            rendered["finished"],
+            {"disabled": False, "label": "Sign in", "flash": "the username or password is incorrect"},
+        )
+
+    def test_startup_verification_retries_a_failed_probe_and_pending_adoption(self):
+        self.claim()
+        self.write_state()
+        bogus = self.tar_tool(machine_id="fake")
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (bogus, "vcf-download-tool-9.1.3.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "failed"
+        )
+        # The probe fails again at start: recorded as failed, no ID invented.
+        self.assertEqual(self.run_startup_verification(), "failed")
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "failed"
+        )
+        new_id = "22222222-2222-4222-8222-222222222222"
+        tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
+        tool.write_text(f"#!/bin/sh\necho 'Software Depot ID: {new_id}'\n")
+        tool.chmod(0o755)
+        self.assertEqual(self.run_startup_verification(), "verified")
+        self.assertEqual(self.get("/api/bootstrap").get_json()["machineId"], new_id)
+
+        # An adoption left pending with a tool present is confirmed at start.
+        self.module._record_machine_id_adoption(new_id, "adopted")
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "adopted"
+        )
+        self.assertEqual(self.run_startup_verification(), "verified")
+        self.assertEqual(self.module._machine_id_adoption()["status"], "confirmed")
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
+        )
+
+    def test_startup_verification_is_skipped_without_a_tool_and_when_recorded(self):
+        self.claim()
+        self.write_state()
+        self.forbid_tool_launch()
+        self.assertEqual(self.run_startup_verification(), "not needed")
+        self.allow_tool_launch()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.forbid_tool_launch()
+        self.assertEqual(self.run_startup_verification(), "not needed")
+
+    def test_gunicorn_worker_hook_starts_the_background_verification(self):
+        spec = importlib.util.spec_from_file_location("gunicorn_conf", GUNICORN_CONF_PATH)
+        hooks = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hooks)
+        outcomes = []
+        with mock.patch.dict(os.environ), mock.patch.dict(
+            sys.modules, {"app": self.module}
+        ), mock.patch.object(
+            self.module,
+            "_startup_identity_verification",
+            side_effect=lambda started_at: outcomes.append(started_at),
+        ):
+            os.environ.pop("VCF_UI_STARTED_AT", None)
+            before = datetime.now(timezone.utc)
+            hooks.on_starting(mock.Mock())
+            started_at = os.environ["VCF_UI_STARTED_AT"]
+            self.assertGreaterEqual(datetime.fromisoformat(started_at), before)
+            start_verification = self.module.verify_identity_on_start
+            threads = []
+            with mock.patch.object(
+                self.module,
+                "verify_identity_on_start",
+                side_effect=lambda: threads.append(start_verification()),
+            ) as start:
+                hooks.post_worker_init(mock.Mock())
+            start.assert_called_once_with()
+            threads[0].join(timeout=5)
+            self.assertTrue(threads[0].daemon)
+            os.environ.pop("VCF_UI_STARTED_AT")
+            self.module.verify_identity_on_start().join(timeout=5)
+        self.assertEqual(outcomes[0], started_at)
+        self.assertGreater(datetime.fromisoformat(outcomes[1]), datetime.fromisoformat(started_at))
+
+    def test_verify_is_refused_without_a_tool_during_sync_or_tool_update(self):
+        self.claim()
+        self.write_state()
+        missing = self.post("/api/registration/verify")
+        self.assertEqual(missing.status_code, 409)
+        self.assertIn("install the VCF Download Tool", missing.get_json()["error"])
+
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.write_state(running=True)
+        self.forbid_tool_launch()
+        busy = self.post("/api/registration/verify")
+        self.assertEqual(busy.status_code, 409)
+        self.assertIn("running sync", busy.get_json()["error"])
+
+        self.write_state()
+        lock = (self.tool_store / ".update.lock").open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        locked = self.post("/api/registration/verify")
+        self.assertEqual(locked.status_code, 409)
+        self.assertIn("tool update", locked.get_json()["error"])
 
     def test_depot_listing_finds_tool_archives_under_vcfdt(self):
         self.claim()
@@ -722,10 +1417,14 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
 
         rolled_back = self.post("/api/vcfdt/rollback")
         self.assertEqual(rolled_back.status_code, 200)
+        self.forbid_tool_launch()
         registration = self.get("/api/registration")
         self.assertEqual(registration.status_code, 200)
         self.assertEqual(registration.get_json()["machineId"], adopted_id)
         self.assertEqual(registration.get_json()["machineIdStatus"], "confirmed")
+        metadata = json.loads(self.current_release_metadata().read_text())
+        self.assertEqual(metadata["machineId"], adopted_id)
+        self.assertTrue(metadata["machineIdProbed"])
 
     def test_status_poll_preserves_previous_release_after_successful_sync(self):
         self.claim()
@@ -912,14 +1611,20 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         )
         self.assertEqual(adopted.status_code, 200)
 
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineId"], first_id
+        )
         self.module._write_secret(self.module.VCFDT_MACHINE_ID_FILE, corrected_id)
         self.module._record_machine_id_adoption(corrected_id, "adopted")
-        self.assertEqual(self.module._machine_id_cache["value"], first_id)
 
         pending = self.get("/api/bootstrap").get_json()
         self.assertEqual(pending["machineId"], corrected_id)
         self.assertEqual(pending["adoptedMachineId"], corrected_id)
         self.assertEqual(pending["machineIdStatus"], "adopted")
+        _worker, client = self.new_worker()
+        other = client.get("/api/bootstrap", base_url="https://localhost").get_json()
+        self.assertEqual(other["machineId"], corrected_id)
+        self.assertEqual(other["machineIdStatus"], "adopted")
 
     def test_adopt_with_tool_installed_preserves_identity_and_activation(self):
         self.claim()
@@ -1421,6 +2126,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "vcfdt-upload",
                 "adopt-machine-id",
                 "adopt-machine-id-button",
+                "verify-machine-id",
                 "activation-code",
                 "save-activation",
                 "storage-confirmed",
@@ -1487,6 +2193,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn('id="vcfdt-previous"', body)
         self.assertIn('id="vcfdt-produced"', body)
         self.assertIn('id="migration-result"', body)
+        self.assertIn('id="verify-flash"', body)
+        self.assertIn('id="auth-flash" class="error" role="status"', body)
+        self.assertIn("again on its own at appliance start", body)
 
     def test_depot_ownership_errors_refuse_reads_and_mutations(self):
         self.claim()

@@ -32,7 +32,12 @@ running sync refused), previous-release retention and rollback, Software Depot
 ID adoption before installation, confirmation by the first tool probe,
 refusal with a tool already present, invalid ID, active-sync and tool-update
 refusals, installation-probe mismatch reporting and activation blocking,
-persistent Software Depot ID retrieval, activation
+persistent Software Depot ID retrieval without launching the tool on sign-in,
+bootstrap, or a second worker, unverified, stale and failed identity states,
+the start-time verification that confirms a legacy, changed, failed
+or adopted identity without operator action, deferring and retrying for as
+long as a sync or tool update is running, the gunicorn worker hook that starts it, the optional
+verify action, activation
 secret storage, storage confirmation, recurring schedule and endpoint editing,
 content-library ownership detection and default protection,
 refusal of inventory and mutations on unreadable or invalid ownership state

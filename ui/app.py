@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -950,7 +951,73 @@ def _release_tool_info(link_name):
         "uploadedAt": metadata.get("uploadedAt"),
         "source": metadata.get("source", "upload"),
         "sourceFile": metadata.get("sourceFile"),
+        **_recorded_identity(metadata),
     }
+
+
+def _recorded_identity(metadata):
+    """Read the identity probe outcome a release's metadata recorded.
+
+    A release written before the console recorded probes, or by hand, has
+    no outcome and reads as unverified; a recorded outcome without a valid
+    ID means the probe ran and failed.
+    """
+    probed = bool(metadata.get("machineIdProbed", False))
+    machine_id = metadata.get("machineId")
+    if not isinstance(machine_id, str) or SOFTWARE_DEPOT_ID_RE.fullmatch(machine_id) is None:
+        machine_id = None
+    probed_at = metadata.get("machineIdProbedAt")
+    return {
+        "machineId": machine_id if probed else None,
+        "machineIdProbed": probed,
+        "machineIdProbedAt": probed_at if probed and isinstance(probed_at, str) else None,
+    }
+
+
+def _identity_changed_since(probed_at):
+    """True when the tool's identity file was written after the recorded probe."""
+    try:
+        changed_at = VCFDT_MACHINE_ID_FILE.stat().st_mtime
+    except OSError:
+        return False
+    try:
+        recorded_at = datetime.fromisoformat(probed_at).timestamp()
+    except (TypeError, ValueError):
+        return True
+    return changed_at > recorded_at
+
+
+def _identity_record(machine_id):
+    return {
+        "machineId": machine_id,
+        "machineIdProbed": True,
+        "machineIdProbedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _record_release_identity(release_root, machine_id):
+    """Store a probe outcome in the release metadata that bootstrap reads."""
+    metadata_path = release_root / ".vcf-services.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata.update(_identity_record(machine_id))
+    handle, temp_name = tempfile.mkstemp(prefix=".vcf-services.json.", dir=release_root)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(metadata) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, metadata_path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _current_tool_info():
@@ -1025,6 +1092,7 @@ def _install_tool_archive(archive_path, filename, source):
             machine_id = _probe_machine_id(tool_root)
         except ToolArchiveError:
             machine_id = None
+        metadata.update(_identity_record(machine_id))
         (tool_root / ".vcf-services.json").write_text(json.dumps(metadata) + "\n")
         os.replace(tool_root, release_path)
 
@@ -1224,6 +1292,7 @@ def _rollback_tool():
                 machine_id = _probe_machine_id(previous_target)
             except ToolArchiveError:
                 machine_id = None
+            _record_release_identity(previous_target, machine_id)
             _reconcile_machine_id_adoption(machine_id)
             return jsonify(_current_tool_info())
     except BlockingIOError:
@@ -1546,9 +1615,6 @@ def _activation_configured():
         return False
 
 
-_machine_id_cache = {"value": None}
-
-
 def _persisted_machine_id():
     try:
         value = SOFTWARE_DEPOT_ID_FILE.read_text(encoding="utf-8").strip()
@@ -1561,7 +1627,6 @@ def _remember_machine_id(value):
     if SOFTWARE_DEPOT_ID_RE.fullmatch(value) is None:
         raise ValueError("refusing to persist an invalid Software Depot ID")
     _write_secret(SOFTWARE_DEPOT_ID_FILE, value + "\n")
-    _machine_id_cache["value"] = value
 
 
 def _machine_id_adoption():
@@ -1607,8 +1672,6 @@ def _reconcile_machine_id_adoption(machine_id):
     adoption = _machine_id_adoption()
     if machine_id:
         _remember_machine_id(machine_id)
-    else:
-        _machine_id_cache["value"] = None
     if adoption is None:
         return None
     matches = bool(
@@ -1621,13 +1684,27 @@ def _reconcile_machine_id_adoption(machine_id):
     )
 
 
+MACHINE_ID_PROBE_FAILED = (
+    "The tool probe failed and did not return a recognizable Software Depot ID. "
+    "The last verified ID is unchanged."
+)
+IDENTITY_VERIFICATION_RUNS = (
+    "Verification runs on its own at appliance start and after tool changes; "
+    "use Verify with the tool to run it now."
+)
+
+
 def _adoption_message(adoption, tool_installed):
     if adoption is None:
         return None
     adopted_id = adoption["adoptedId"]
-    if not tool_installed or adoption["status"] == "adopted":
+    if not tool_installed:
         message = (
             f"Adopted {adopted_id}. It will be confirmed at the first tool install."
+        )
+    elif adoption["status"] == "adopted":
+        message = (
+            f"Adopted {adopted_id}. Verify with the installed tool to confirm it."
         )
     elif adoption["status"] == "confirmed":
         message = f"Confirmed {adopted_id} with the installed tool."
@@ -1637,78 +1714,84 @@ def _adoption_message(adoption, tool_installed):
     return message
 
 
-def _machine_id():
-    if _machine_id_cache["value"]:
-        return _machine_id_cache["value"], None
-    tool = VCFDT_STORE / "current" / "bin" / "vcf-download-tool"
-    if not tool.is_file():
-        saved = _persisted_machine_id()
-        return saved, "Install the VCF Download Tool before verifying its saved ID."
-    try:
-        value = _probe_machine_id(tool.parent.parent)
-        _remember_machine_id(value)
-        return value, None
-    except (ToolArchiveError, OSError):
-        saved = _persisted_machine_id()
-        return saved, (
-            "The tool probe failed and did not return a recognizable Software Depot ID. "
-            "The last verified ID is unchanged."
-        )
+def _identity_changed_message(machine_id):
+    return (
+        f"{machine_id} was verified with the installed tool, but the tool's "
+        f"identity changed afterwards. {IDENTITY_VERIFICATION_RUNS}"
+    )
 
 
 def _registration_details(tool=None):
+    """Describe the Software Depot ID from durable state alone.
+
+    Bootstrap and every dashboard read call this, so it never launches the
+    tool. The install, replacement, rollback and verify actions run the probe
+    and record its outcome with the release (and in the adoption record), and
+    this reads those records back. A release with no recorded outcome is
+    reported as unverified rather than assumed confirmed.
+    """
     tool = _current_tool_info() if tool is None else tool
     adoption = _machine_id_adoption()
-    if (
-        adoption is not None
-        and tool["installed"]
-        and adoption["status"] in {"confirmed", "mismatch"}
-    ):
+    installed = tool["installed"]
+    saved = _persisted_machine_id()
+    error = None
+    message = _adoption_message(adoption, installed)
+    verified_at = None
+    if adoption is not None and installed and adoption["status"] != "adopted":
+        status = adoption["status"]
         machine_id = (
-            adoption["adoptedId"]
-            if adoption["status"] == "confirmed"
-            else adoption.get("reportedId")
+            adoption["adoptedId"] if status == "confirmed" else adoption.get("reportedId")
         )
-        error = None
-    elif (
-        adoption is not None
-        and tool["installed"]
-        and adoption["status"] == "adopted"
-    ):
-        try:
-            machine_id = _probe_machine_id(VCFDT_STORE / "current")
-            _remember_machine_id(machine_id)
-            error = None
-        except (ToolArchiveError, OSError):
-            machine_id = _persisted_machine_id()
-            error = (
-                "The tool probe failed and did not return a recognizable Software "
-                "Depot ID. The adopted ID is not confirmed."
-            )
-        if not error and machine_id:
-            matches = machine_id.lower() == adoption["adoptedId"].lower()
-            adoption = _record_machine_id_adoption(
-                adoption["adoptedId"],
-                "confirmed" if matches else "mismatch",
-                machine_id,
-            )
-    elif adoption is not None and not tool["installed"]:
+        if tool["machineIdProbed"] and _identity_changed_since(tool["machineIdProbedAt"]):
+            status = "unverified"
+            machine_id = adoption["adoptedId"]
+            verified_at = tool["machineIdProbedAt"]
+            if adoption["status"] == "confirmed":
+                message = _identity_changed_message(machine_id)
+            else:
+                reported = adoption.get("reportedId") or "no recognizable ID"
+                message = (
+                    f"Adopted {machine_id}, but the installed tool reported {reported}, "
+                    f"and the tool's identity changed afterwards. {IDENTITY_VERIFICATION_RUNS}"
+                )
+    elif adoption is not None:
+        status = "adopted"
         machine_id = adoption["adoptedId"]
-        error = None
+    elif not installed:
+        status = None
+        machine_id = saved
+        error = "Install the VCF Download Tool before verifying its saved ID."
+    elif not tool["machineIdProbed"]:
+        status = "unverified"
+        machine_id = saved
+        message = (
+            f"{saved} was saved earlier and has not been verified with the installed "
+            f"tool yet. {IDENTITY_VERIFICATION_RUNS}"
+            if saved
+            else "The installed tool's Software Depot ID has not been read yet. "
+            f"{IDENTITY_VERIFICATION_RUNS}"
+        )
+    elif tool["machineId"] is None:
+        status = "failed"
+        machine_id = saved
+        error = MACHINE_ID_PROBE_FAILED
+    elif _identity_changed_since(tool["machineIdProbedAt"]):
+        status = "unverified"
+        machine_id = tool["machineId"]
+        verified_at = tool["machineIdProbedAt"]
+        message = _identity_changed_message(machine_id)
     else:
-        machine_id, error = _machine_id()
-    status = None
-    if adoption is not None:
-        status = adoption["status"] if tool["installed"] else "adopted"
-    elif tool["installed"] and machine_id and not error:
         status = "confirmed"
+        machine_id = tool["machineId"]
+        verified_at = tool["machineIdProbedAt"]
     return {
         "machineId": machine_id,
         "machineIdError": error,
         "machineIdStatus": status,
+        "machineIdVerifiedAt": verified_at,
         "adoptedMachineId": adoption["adoptedId"] if adoption else None,
         "reportedMachineId": adoption.get("reportedId") if adoption else None,
-        "machineIdMessage": _adoption_message(adoption, tool["installed"]),
+        "machineIdMessage": message,
     }
 
 
@@ -2355,13 +2438,7 @@ def rollback_vcfdt():
 @app.get("/api/registration")
 def registration_status():
     details = _registration_details()
-    status_code = (
-        200
-        if details["machineId"]
-        and not details["machineIdError"]
-        and details["machineIdStatus"] not in {"adopted", "mismatch"}
-        else 409
-    )
+    status_code = 200 if details["machineIdStatus"] == "confirmed" else 409
     return (
         jsonify(
             {
@@ -2415,6 +2492,152 @@ def adopt_registration():
         ), 500
 
 
+def _recorded_since(probed_at, started_at):
+    try:
+        return datetime.fromisoformat(probed_at) >= datetime.fromisoformat(started_at)
+    except (TypeError, ValueError):
+        return False
+
+
+def _identity_verification_needed(tool, adoption, started_at):
+    """Whether the installed tool's identity record is missing, failed, stale,
+    or still waiting to confirm an adopted ID.
+
+    A probe recorded at or after started_at is this start's attempt whatever
+    its outcome, so a second worker does not launch the tool again; an
+    identity file changed after that probe still needs verification.
+    """
+    if not tool["installed"]:
+        return False
+    probed_at = tool["machineIdProbedAt"]
+    if tool["machineIdProbed"] and _identity_changed_since(probed_at):
+        return True
+    if tool["machineIdProbed"] and _recorded_since(probed_at, started_at):
+        return False
+    if adoption is not None and adoption["status"] == "adopted":
+        return True
+    return not tool["machineIdProbed"] or tool["machineId"] is None
+
+
+def _verify_identity_now():
+    """Probe the installed tool and record the outcome durably.
+
+    The caller holds the tool update lock, so the release cannot be swapped
+    under the probe. A failed probe is recorded as failed and never replaces
+    the last verified ID.
+    """
+    current = VCFDT_STORE / "current"
+    try:
+        machine_id = _probe_machine_id(current)
+    except ToolArchiveError:
+        machine_id = None
+    _record_release_identity(current, machine_id)
+    _reconcile_machine_id_adoption(machine_id)
+    return machine_id
+
+
+STARTUP_VERIFICATION_DELAYS = (10, 60, 300, 900)
+STARTUP_VERIFICATION_RETRY_EVERY = 900
+
+
+def _startup_identity_verification(
+    started_at,
+    delays=STARTUP_VERIFICATION_DELAYS,
+    retry_every=STARTUP_VERIFICATION_RETRY_EVERY,
+    sleep=time.sleep,
+):
+    """Verify a missing, failed, stale or pending identity once after start.
+
+    This is the background verification behind an appliance upgrade (a
+    release recorded by an older console), an identity file changed outside
+    the console, or an install-time probe that failed. It launches the tool
+    at most once and never runs on a request. A running sync or a tool
+    update in flight defers it instead of launching the tool beside them:
+    after the listed delays it keeps retrying every retry_every seconds for
+    as long as it is deferred, so a long sync running at start only delays
+    it. started_at is the appliance start shared by every worker: the
+    exclusive lock makes a second worker wait while the first is probing,
+    and the probe the first recorded then counts for both. It returns once
+    verification is not needed or has run.
+    """
+    attempt = 0
+    while True:
+        sleep(delays[attempt] if attempt < len(delays) else retry_every)
+        attempt += 1
+        if not _identity_verification_needed(
+            _current_tool_info(), _machine_id_adoption(), started_at
+        ):
+            return "not needed"
+        if _state().get("running", False):
+            continue
+        try:
+            with _tool_update_lock():
+                if not _identity_verification_needed(
+                    _current_tool_info(), _machine_id_adoption(), started_at
+                ):
+                    return "not needed"
+                machine_id = _verify_identity_now()
+                outcome = "verified" if machine_id else "failed"
+        except BlockingIOError:
+            continue
+        except (OSError, ValueError) as exc:
+            print(f"[identity] startup verification could not be recorded: {exc}", flush=True)
+            return "error"
+        print(f"[identity] startup verification {outcome}", flush=True)
+        return outcome
+
+
+def verify_identity_on_start():
+    """Start the background verification; called by gunicorn.conf.py, whose
+    on_starting hook records the appliance start for every worker."""
+    started_at = os.environ.get("VCF_UI_STARTED_AT") or datetime.now(timezone.utc).isoformat()
+    thread = threading.Thread(
+        target=_startup_identity_verification,
+        kwargs={"started_at": started_at},
+        name="identity-verification",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _registration_problem(registration):
+    return (
+        registration["machineIdError"]
+        or registration["machineIdMessage"]
+        or "verify the Software Depot ID with the installed tool first"
+    )
+
+
+@app.post("/api/registration/verify")
+def verify_registration():
+    """Read the Software Depot ID from the installed tool on operator request.
+
+    Install, replacement and rollback record a probe, and the startup hook
+    verifies a missing, failed, stale or pending record on its own; this is
+    the optional recovery path for running that verification right away.
+    """
+    try:
+        with _tool_update_lock():
+            if _state().get("running", False):
+                return jsonify({"error": "wait for the running sync to finish"}), 409
+            if not _current_tool_info()["installed"]:
+                return jsonify(
+                    {"error": "install the VCF Download Tool before verifying its ID"}
+                ), 409
+            _verify_identity_now()
+    except BlockingIOError:
+        return jsonify(
+            {"error": "wait for the running sync or tool update to finish"}
+        ), 409
+    except OSError:
+        return jsonify({"error": "the verification result could not be recorded"}), 500
+    registration = _registration_details()
+    if registration["machineIdStatus"] != "confirmed":
+        return jsonify({**registration, "error": _registration_problem(registration)}), 409
+    return jsonify({**registration, "verified": True})
+
+
 @app.post("/api/registration")
 def save_registration():
     body = request.get_json(silent=True) or {}
@@ -2423,10 +2646,8 @@ def save_registration():
         return jsonify({"error": "wait for the running sync to finish"}), 409
     registration = _registration_details()
     machine_id = registration["machineId"]
-    if registration["machineIdStatus"] in {"adopted", "mismatch"}:
-        return jsonify({"error": registration["machineIdMessage"]}), 409
-    if registration["machineIdError"]:
-        return jsonify({"error": registration["machineIdError"]}), 409
+    if registration["machineIdStatus"] != "confirmed":
+        return jsonify({"error": _registration_problem(registration)}), 409
     if not isinstance(activation_code, str) or not activation_code.strip():
         return jsonify({"error": "enter the activation code from Broadcom"}), 400
     activation_code = activation_code.strip()
