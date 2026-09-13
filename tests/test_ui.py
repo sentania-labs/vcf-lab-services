@@ -71,6 +71,28 @@ def parse_console_tabs(markup):
     return parser.panels, parser.controls
 
 
+class ElementAttributeParser(HTMLParser):
+    """Collect the attributes of every element the console gives an id."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.elements = {}
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if attributes.get("id"):
+            self.elements.setdefault(attributes["id"], attributes)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+
+def parse_element_attributes(markup):
+    parser = ElementAttributeParser()
+    parser.feed(markup)
+    return parser.elements
+
+
 class UiApiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -228,12 +250,12 @@ class UiApiTests(unittest.TestCase):
         if machine_id_file is not None:
             machine_id_command = f"  cat '{machine_id_file}'\n"
         else:
-            # The real tool keeps its identity in the state volume and creates
-            # it on first use; a stub that reports a plausible ID does the same.
+            # The real tool keeps the identity it reports in the state volume;
+            # a stub that reports a plausible ID does the same.
             identity = self.vcfdt_state / "machine_id"
             keep_identity = (
                 f"  mkdir -p '{self.vcfdt_state}'\n"
-                f"  [ -s '{identity}' ] || printf '%s' '{machine_id}' > '{identity}'\n"
+                f"  printf '%s' '{machine_id}' > '{identity}'\n"
                 if len(machine_id) == 36
                 else ""
             )
@@ -870,6 +892,35 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(restored["machineId"], verified_id)
         self.assertEqual(self.get("/api/registration").status_code, 200)
 
+    def test_identity_file_rewritten_with_the_same_id_stays_confirmed(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        verified_id = "11111111-1111-4111-8111-111111111111"
+        identity = self.vcfdt_state / "machine_id"
+        self.assertEqual(identity.read_text(), verified_id)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
+        )
+
+        # A scheduled sync runs the same tool over the shared state volume and
+        # rewrites the identity file with the ID it already held.
+        identity.write_text(verified_id)
+        self.forbid_tool_launch()
+        rewritten = self.get("/api/bootstrap").get_json()
+        self.assertEqual(rewritten["machineIdStatus"], "confirmed")
+        self.assertEqual(rewritten["machineId"], verified_id)
+        self.assertEqual(self.get("/api/registration").status_code, 200)
+        self.assertFalse(
+            self.module._identity_verification_needed(
+                self.module._current_tool_info(),
+                self.module._machine_id_adoption(),
+                datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        saved = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(saved.status_code, 200)
+
     def test_identity_changed_after_verification_is_reverified_at_start(self):
         self.claim()
         self.write_state()
@@ -893,14 +944,6 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         )
 
         # The identity file is replaced outside the console after the probe.
-        # The record is backdated so the comparison does not depend on how
-        # quickly this test runs.
-        metadata_path = self.current_release_metadata()
-        metadata = json.loads(metadata_path.read_text())
-        metadata["machineIdProbedAt"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=10)
-        ).isoformat()
-        metadata_path.write_text(json.dumps(metadata) + "\n")
         identity = self.vcfdt_state / "machine_id"
         identity.write_text(changed_id + "\n")
         self.forbid_tool_launch()
@@ -922,14 +965,10 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             Path(self.module.SOFTWARE_DEPOT_ID_FILE).read_text().strip(), changed_id
         )
 
-    def backdate_recorded_probe(self):
-        metadata_path = self.current_release_metadata()
-        metadata = json.loads(metadata_path.read_text())
-        metadata["machineIdProbedAt"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=10)
-        ).isoformat()
-        metadata_path.write_text(json.dumps(metadata) + "\n")
-        return metadata["machineIdProbedAt"]
+    def recorded_probe_time(self):
+        return json.loads(self.current_release_metadata().read_text())[
+            "machineIdProbedAt"
+        ]
 
     def test_identity_changed_after_a_confirmed_adoption_is_not_reported_confirmed(self):
         self.claim()
@@ -956,7 +995,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
         )
 
-        probed_at = self.backdate_recorded_probe()
+        probed_at = self.recorded_probe_time()
         identity.write_text(changed_id + "\n")
         self.forbid_tool_launch()
         stale = self.get("/api/bootstrap").get_json()
@@ -975,7 +1014,6 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(mismatch["machineIdStatus"], "mismatch")
         self.assertEqual(mismatch["reportedMachineId"], changed_id)
 
-        self.backdate_recorded_probe()
         identity.write_text(adopted_id + "\n")
         self.assertEqual(
             self.get("/api/bootstrap").get_json()["machineIdStatus"], "unverified"
@@ -991,6 +1029,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.write_state()
         adopted_id = "22222222-2222-4222-8222-222222222222"
         reported_id = "11111111-1111-4111-8111-111111111111"
+        changed_id = "44444444-4444-4444-8444-444444444444"
         self.assertEqual(
             self.post("/api/registration/adopt", json={"machineId": adopted_id}).status_code,
             200,
@@ -1000,8 +1039,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             self.get("/api/bootstrap").get_json()["machineIdStatus"], "mismatch"
         )
 
-        self.backdate_recorded_probe()
-        (self.vcfdt_state / "machine_id").write_text(reported_id + "\n")
+        (self.vcfdt_state / "machine_id").write_text(changed_id + "\n")
         self.forbid_tool_launch()
         stale = self.get("/api/bootstrap").get_json()
         self.assertEqual(stale["machineIdStatus"], "unverified")
@@ -1468,6 +1506,26 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(refused.status_code, 409)
         self.assertIn("running sync", refused.get_json()["error"])
 
+    def test_rollback_reports_the_swapped_release_when_recording_identity_fails(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        original_target = (self.tool_store / "current").resolve()
+        archive = self.seed_depot_tool("9.1.0.0400.25570101")
+        self.assertEqual(self.install_from_depot(archive.name).status_code, 201)
+
+        # The swap has already happened when the tool volume refuses the write.
+        with mock.patch.object(
+            self.module,
+            "_record_release_identity",
+            side_effect=OSError("no space left on device"),
+        ):
+            response = self.post("/api/vcfdt/rollback")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["version"], "9.1.2")
+        self.assertEqual(response.get_json()["previous"]["version"], "9.1.0.0400.25570101")
+        self.assertEqual((self.tool_store / "current").resolve(), original_target)
+
     def test_tool_rollback_revalidates_adopted_identity(self):
         self.claim()
         self.write_state()
@@ -1481,7 +1539,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             "/api/vcfdt",
             data={
                 "archive": (
-                    self.tar_tool(machine_id_file=self.vcfdt_state / "machine_id"),
+                    self.tar_tool(machine_id=adopted_id),
                     "vcf-download-tool-9.1.2.tar.gz",
                 )
             },
@@ -2279,8 +2337,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn('id="vcfdt-produced"', body)
         self.assertIn('id="migration-result"', body)
         self.assertIn('id="verify-flash"', body)
-        self.assertIn('id="auth-flash" class="error" role="status"', body)
-        self.assertIn("again on its own at appliance start", body)
+        auth_flash = parse_element_attributes(body)["auth-flash"]
+        self.assertEqual(auth_flash.get("role"), "status")
+        self.assertEqual(auth_flash.get("aria-live"), "polite")
 
     def test_depot_ownership_errors_refuse_reads_and_mutations(self):
         self.claim()

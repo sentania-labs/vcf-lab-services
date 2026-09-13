@@ -974,19 +974,16 @@ def _recorded_identity(metadata):
     }
 
 
-def _identity_changed_since(probed_at):
-    """True when the tool's identity file was written after the recorded probe,
-    or is gone: a probe was recorded against an identity that no longer exists
-    (a volume restore or cleanup), so the record no longer stands."""
+def _identity_changed(machine_id):
+    """True when the tool's identity file no longer holds the ID the probe
+    recorded, or is gone: a probe was recorded against an identity that no
+    longer stands (a volume restore or cleanup). A rewrite that leaves the
+    same ID in place, as a sync run makes, is not a change."""
     try:
-        changed_at = VCFDT_MACHINE_ID_FILE.stat().st_mtime
+        current = VCFDT_MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         return True
-    try:
-        recorded_at = datetime.fromisoformat(probed_at).timestamp()
-    except (TypeError, ValueError):
-        return True
-    return changed_at > recorded_at
+    return current != machine_id
 
 
 def _identity_record(machine_id):
@@ -1294,8 +1291,14 @@ def _rollback_tool():
                 machine_id = _probe_machine_id(previous_target)
             except ToolArchiveError:
                 machine_id = None
-            _record_release_identity(previous_target, machine_id)
-            _reconcile_machine_id_adoption(machine_id)
+            try:
+                _record_release_identity(previous_target, machine_id)
+                _reconcile_machine_id_adoption(machine_id)
+            except OSError as exc:
+                print(
+                    f"[identity] rollback identity could not be recorded: {exc}",
+                    flush=True,
+                )
             return jsonify(_current_tool_info())
     except BlockingIOError:
         return jsonify(
@@ -1745,7 +1748,7 @@ def _registration_details(tool=None):
         machine_id = (
             adoption["adoptedId"] if status == "confirmed" else adoption.get("reportedId")
         )
-        if tool["machineIdProbed"] and _identity_changed_since(tool["machineIdProbedAt"]):
+        if tool["machineId"] and _identity_changed(tool["machineId"]):
             status = "unverified"
             machine_id = adoption["adoptedId"]
             verified_at = tool["machineIdProbedAt"]
@@ -1779,7 +1782,7 @@ def _registration_details(tool=None):
         status = "failed"
         machine_id = saved
         error = MACHINE_ID_PROBE_FAILED
-    elif _identity_changed_since(tool["machineIdProbedAt"]):
+    elif _identity_changed(tool["machineId"]):
         status = "unverified"
         machine_id = tool["machineId"]
         verified_at = tool["machineIdProbedAt"]
@@ -2517,7 +2520,7 @@ def _identity_verification_needed(tool, adoption, started_at):
     probed_at = tool["machineIdProbedAt"]
     if tool["machineIdProbed"] and _recorded_since(probed_at, started_at):
         return False
-    if tool["machineIdProbed"] and _identity_changed_since(probed_at):
+    if tool["machineId"] and _identity_changed(tool["machineId"]):
         return True
     if adoption is not None and adoption["status"] == "adopted":
         return True
