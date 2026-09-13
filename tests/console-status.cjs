@@ -68,6 +68,8 @@ async function pollSequence() {
       statusCalls: calls['api/status'] || 0,
       machineIdStatus: getElementById('machine-id-status').textContent,
       error: getElementById('sync-flash').textContent,
+      verifyFlash: getElementById('verify-flash').textContent,
+      log: getElementById('log').textContent,
     });
   }
   return snapshots;

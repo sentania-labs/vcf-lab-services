@@ -983,7 +983,7 @@ def _identity_changed(machine_id):
         current = VCFDT_MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         return True
-    return current != machine_id
+    return current.lower() != machine_id.lower()
 
 
 def _identity_record(machine_id):

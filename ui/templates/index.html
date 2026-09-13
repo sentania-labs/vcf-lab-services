@@ -864,7 +864,7 @@ $('finish-setup').onclick=async()=>{
 
 async function poll(){
   try {
-    if (identityPending) await refreshIdentity();
+    if (identityPending) { try { await refreshIdentity(); } catch(error){ $('verify-flash').textContent=error.message; } }
     const status=await api('api/status'); const running=status.running, armed=status.armed;
     $('st-state').innerHTML=running?'<span class="pill run">running</span>':armed?'<span class="pill ok">armed, idle</span>':'<span class="pill bad">not armed</span>';
     $('st-current').textContent=status.currentTarget||'none'; $('st-next').textContent=fmt(status.nextRun); $('st-tool').textContent=status.vcfdtVersion;

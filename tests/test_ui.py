@@ -921,6 +921,41 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         saved = self.post("/api/registration", json={"activationCode": "code"})
         self.assertEqual(saved.status_code, 200)
 
+    def test_identity_file_holding_the_recorded_id_in_another_case_stays_confirmed(self):
+        self.claim()
+        self.write_state()
+        verified_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        installed = self.post(
+            "/api/vcfdt",
+            data={
+                "archive": (
+                    self.tar_tool(machine_id=verified_id),
+                    "vcf-download-tool-9.1.2.tar.gz",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(installed.status_code, 201)
+        identity = self.vcfdt_state / "machine_id"
+        self.assertEqual(identity.read_text(), verified_id)
+
+        # The same UUID in the spelling an imported state volume can carry.
+        identity.write_text(verified_id.upper() + "\n")
+        self.forbid_tool_launch()
+        body = self.get("/api/bootstrap").get_json()
+        self.assertEqual(body["machineIdStatus"], "confirmed")
+        self.assertEqual(body["machineId"], verified_id)
+        self.assertEqual(self.get("/api/registration").status_code, 200)
+        self.assertFalse(
+            self.module._identity_verification_needed(
+                self.module._current_tool_info(),
+                self.module._machine_id_adoption(),
+                datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        saved = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(saved.status_code, 200)
+
     def test_identity_changed_after_verification_is_reverified_at_start(self):
         self.claim()
         self.write_state()
@@ -1187,6 +1222,34 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual([step["bootstrapCalls"] for step in recovered], [1, 2, 2])
         self.assertIn("probe failed", recovered[0]["machineIdStatus"])
         self.assertIn("Confirmed by the installed tool", recovered[-1]["machineIdStatus"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_identity_read_failure_does_not_stop_the_dashboard_refresh(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        status = self.get("/api/status").get_json()
+        self.forget_recorded_probe()
+        pending = self.get("/api/bootstrap").get_json()
+        self.assertEqual(pending["machineIdStatus"], "unverified")
+
+        ticks = self.run_console({
+            "status": status,
+            "identity": pending,
+            "polls": [
+                {"at": 5000, "responses": {
+                    "api/bootstrap": {
+                        "status": 500,
+                        "body": {"error": "the saved identity could not be read"},
+                    },
+                    "api/log": {"status": 200, "body": {"log": "sync log line"}},
+                }},
+            ],
+        })
+        self.assertEqual(ticks[0]["statusCalls"], 1)
+        self.assertEqual(ticks[0]["log"], "sync log line")
+        self.assertEqual(ticks[0]["error"], "")
+        self.assertEqual(ticks[0]["verifyFlash"], "the saved identity could not be read")
 
     @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
     def test_console_sign_in_shows_progress_while_the_credential_is_checked(self):
