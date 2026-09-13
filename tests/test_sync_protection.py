@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import resource
 import subprocess
 import tempfile
 import unittest
@@ -45,6 +46,8 @@ class Harness:
         self.activation.write_text("test-activation\n")
         self.calls = self.root / "calls"
         self.manifest = self.state / "depot-ownership.json"
+        self.scratch = self.root / "scratch"
+        self.scratch.mkdir()
 
     def content_library(self, name):
         """An operator-provided tree with nested bytes, a symlink, and a
@@ -72,6 +75,7 @@ class Harness:
         environment = {
             **os.environ,
             "HOME": str(self.root),
+            "TMPDIR": str(self.scratch),
             "SETTINGS_FILE": str(self.root / "missing-settings"),
             "DEPOT_DIR": str(self.depot), "STATE_DIR": str(self.state),
             "AUTH_FILE": str(self.activation), "TOOL_ROOT": str(self.tool),
@@ -289,6 +293,38 @@ class SyncProtectionScopeTests(unittest.TestCase):
                 self.assertEqual(fingerprint(vkr), before)
                 self.assertEqual((vkr / "releases" / "v1" / "image.ova").read_bytes(), vkr_bytes)
                 self.assertFalse((harness.depot / "STUB" / "patches").exists())
+
+    def test_a_large_protected_tree_is_checked_with_bounded_memory(self):
+        # A protected library with tens of thousands of entries is
+        # fingerprinted through temporary files and streaming comparisons, so
+        # the shell never holds the listing: peak memory stays far below what
+        # retaining every line would cost, a single unexpected entry among
+        # them is still reported, and no scratch file outlives the run.
+        harness = self.harness
+        vkr = harness.content_library("VKR")
+        for release in range(60):
+            directory = vkr / "releases" / f"v{release:03d}"
+            directory.mkdir(exist_ok=True)
+            for index in range(1000):
+                (directory / f"image{index:04d}.ova").touch()
+        harness.protect("VKR")
+        entries = sum(len(dirs) + len(files) for _, dirs, files in os.walk(vkr))
+        self.assertGreater(entries, 60000)
+
+        result = harness.run("patches")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(), {"patches": "OK"})
+        self.assertEqual(list(harness.scratch.iterdir()), [])
+        peak_mib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
+        self.assertLess(peak_mib, 64, f"peak child memory {peak_mib:.0f} MiB")
+
+        result = harness.run("patches", env={"STUB_WRITE_TREES": "VKR"})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(), {"patches": "FAILED:PROTECTED-CHANGED"})
+        self.assertRegex(result.stdout, r"ERROR: protected tree PROD/COMP/VKR changed while "
+                                        r"vcf-patches ran \(3 entries differ\)")
+        self.assertIn("unexpected.bin", result.stdout)
+        self.assertEqual(list(harness.scratch.iterdir()), [])
 
     def test_vkr_target_respects_its_own_tree(self):
         harness = self.harness

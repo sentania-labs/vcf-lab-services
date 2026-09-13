@@ -176,38 +176,51 @@ components_for_download() {
 # A protected tree is fingerprinted by the type, mode, owner, size, mtime,
 # link count, inode, path and link target of every entry below it. No bytes
 # are read: any entry that is added, removed, replaced, renamed, resized,
-# re-timed, re-linked or re-permissioned changes a line.
+# re-timed, re-linked or re-permissioned changes a line. The lines are
+# streamed to a temporary file rather than held in the shell, and compared
+# with streaming tools, so memory stays bounded however large the tree is.
+fingerprint_dir=""
+fingerprint_workspace() {
+	[ -z "$fingerprint_dir" ] || return 0
+	fingerprint_dir="$(mktemp -d "${TMPDIR:-/tmp}/vcf-services-fingerprint.XXXXXX")"
+}
+
 tree_fingerprint() {
-	local tree="$comp_root/$1"
+	local tree="$comp_root/$1" output="$2"
 	if [ -e "$tree" ] || [ -L "$tree" ]; then
-		find "$tree" -printf '%y %m %U %G %s %T@ %n %i %p -> %l\n' 2>&1 | LC_ALL=C sort
+		find "$tree" -printf '%y %m %U %G %s %T@ %n %i %p -> %l\n' 2>&1 | LC_ALL=C sort > "$output"
 	else
-		printf 'absent\n'
+		printf 'absent\n' > "$output"
 	fi
 }
 
-declare -A protected_before=()
 snapshot_protected() {
 	local name
-	protected_before=()
+	fingerprint_workspace || return 1
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
-		protected_before["$name"]="$(tree_fingerprint "$name")"
+		tree_fingerprint "$name" "$fingerprint_dir/$name.before" || return 1
 	done <<< "$1"
 }
 
 verify_protected_unchanged() {
 	local trees="$1" label="$2"
-	local name after line changed=0 count
+	local name line changed=0 count before after
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
-		after="$(tree_fingerprint "$name")"
-		[ "$after" != "${protected_before[$name]-}" ] || continue
+		before="$fingerprint_dir/$name.before"
+		after="$fingerprint_dir/$name.after"
+		tree_fingerprint "$name" "$after"
+		if cmp -s "$before" "$after"; then
+			rm -f "$before" "$after"
+			continue
+		fi
 		changed=1
-		count="$(diff <(printf '%s\n' "${protected_before[$name]-}") <(printf '%s\n' "$after") | grep -c '^[<>]' || true)"
+		count="$(LC_ALL=C comm -3 "$before" "$after" | wc -l)"
 		log "ERROR: protected tree PROD/COMP/$name changed while $label ran ($count entries differ); review it before the next run"
-		diff <(printf '%s\n' "${protected_before[$name]-}") <(printf '%s\n' "$after") | grep '^[<>]' | head -n 5 \
+		LC_ALL=C comm -3 "$before" "$after" | head -n 5 | sed $'s/^\t/> /; t; s/^/< /' \
 			| while IFS= read -r line; do log "  $line"; done
+		rm -f "$before" "$after"
 	done <<< "$trees"
 	return "$changed"
 }
@@ -466,6 +479,7 @@ write_state '. + {running:true, armed:true, currentTarget:null, startedAt:$t, ta
 
 finish_state() {
 	write_state '. + {running:false, currentTarget:null, finishedAt:$t}' --arg t "$(now)"
+	[ -z "$fingerprint_dir" ] || rm -rf -- "$fingerprint_dir"
 	diag_lock_release
 	stop_log_publisher
 }
@@ -512,7 +526,13 @@ run_target() {
 		else
 			log "$label lists nothing to download for its filter, so it writes no PROD/COMP tree"
 		fi
-		snapshot_protected "$protected"
+		if ! snapshot_protected "$protected"; then
+			log "ERROR: could not record the protected trees before running $label, so the target is not run"
+			last_status="FAILED:UNVERIFIED"
+			overall_rc=1
+			log "<<< $label $last_status, continuing"
+			return
+		fi
 	fi
 	local target_rc=0
 	"$@" || target_rc=$?
