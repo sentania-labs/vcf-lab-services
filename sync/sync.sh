@@ -179,6 +179,9 @@ components_for_download() {
 # re-timed, re-linked or re-permissioned changes a line. The lines are
 # streamed to a temporary file rather than held in the shell, and compared
 # with streaming tools, so memory stays bounded however large the tree is.
+# An entry find cannot read is logged as a warning naming its path and its
+# error line stays in the fingerprint, so it compares equal before and after
+# the run; only a fingerprint that cannot be written fails the snapshot.
 fingerprint_dir=""
 fingerprint_workspace() {
 	[ -z "$fingerprint_dir" ] || return 0
@@ -186,11 +189,22 @@ fingerprint_workspace() {
 }
 
 tree_fingerprint() {
-	local tree="$comp_root/$1" output="$2"
+	local tree="$comp_root/$1" output="$2" entries="$2.entries" errors="$2.errors"
+	local count line
 	if [ -e "$tree" ] || [ -L "$tree" ]; then
-		find "$tree" -printf '%y %m %U %G %s %T@ %n %i %p -> %l\n' 2>&1 | LC_ALL=C sort > "$output"
+		find "$tree" -printf '%y %m %U %G %s %T@ %n %i %p -> %l\n' > "$entries" 2> "$errors"
+		if ! LC_ALL=C sort "$entries" "$errors" > "$output"; then
+			rm -f "$entries" "$errors"
+			return 1
+		fi
+		if [ -s "$errors" ]; then
+			count="$(grep -c . "$errors")"
+			log "WARNING: find could not read some entries under protected tree PROD/COMP/$1 ($count); the sync runs as the same user, so it cannot write inside them either"
+			head -n 5 "$errors" | while IFS= read -r line; do log "  $line"; done
+		fi
+		rm -f "$entries" "$errors"
 	else
-		printf 'absent\n' > "$output"
+		printf 'absent\n' > "$output" || return 1
 	fi
 }
 

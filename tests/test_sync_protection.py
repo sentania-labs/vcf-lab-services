@@ -294,6 +294,36 @@ class SyncProtectionScopeTests(unittest.TestCase):
                 self.assertEqual((vkr / "releases" / "v1" / "image.ova").read_bytes(), vkr_bytes)
                 self.assertFalse((harness.depot / "STUB" / "patches").exists())
 
+    def test_an_unreadable_entry_in_a_protected_tree_does_not_block_the_run(self):
+        # An adopted library can hold a directory this user cannot read. The
+        # run is not refused over it: find's error line becomes part of the
+        # fingerprint, so it compares equal around the run, and the log names
+        # the path so an operator can fix the permissions.
+        if os.geteuid() == 0:
+            self.skipTest("root can read every directory, so the case cannot be staged")
+        harness = self.harness
+        vkr = harness.content_library("VKR")
+        harness.protect("VKR")
+        closed = vkr / "releases" / "closed"
+        closed.mkdir()
+        (closed / "image.ova").write_bytes(b"operator bytes")
+        os.chmod(closed, 0o000)
+        self.addCleanup(os.chmod, closed, 0o755)
+        before = fingerprint(vkr)
+
+        result = harness.run("patches")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(), {"patches": "OK"})
+        self.assertEqual(harness.called(), ["binaries list", "binaries download"])
+        self.assertIn("WARNING: find could not read some entries under protected tree "
+                      "PROD/COMP/VKR (1)", result.stdout)
+        self.assertIn(str(closed), result.stdout)
+        self.assertNotIn("FAILED", result.stdout)
+        self.assertIn("<<< vcf-patches OK", result.stdout)
+        self.assertEqual(fingerprint(vkr), before)
+        self.assertEqual(list(harness.scratch.iterdir()), [])
+
     def test_a_large_protected_tree_is_checked_with_bounded_memory(self):
         # A protected library with tens of thousands of entries is
         # fingerprinted through temporary files and streaming comparisons, so
