@@ -164,9 +164,12 @@ afterwards: any entry added, removed, resized, re-timed, re-linked or
 re-permissioned below a protected tree during the run is reported and the
 target is recorded as `FAILED:PROTECTED-CHANGED`. That after-run check
 compares the metadata of each entry, reads no file content, and reports an
-unexpected write rather than preventing it. When the listing cannot be
-obtained the target is not run and is recorded as failed. Protection remains
-until an operator turns it off in the Depot tab.
+unexpected write rather than preventing it. An entry the sync cannot read is
+logged with its path and does not stop the run, and an after-run check that
+cannot be completed is recorded as unverified rather than reported as a
+change. When the listing cannot be obtained the target is not run and is
+recorded as failed. Protection remains until an operator turns it off in the
+Depot tab.
 
 Adopting an existing VKR content tree as the VKR sync target is a follow-up.
 This release inventories and protects that tree but does not adopt it.

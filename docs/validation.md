@@ -77,12 +77,14 @@ separately, that a target whose tool listing names a protected tree skips and
 names only that tree, that an unobtainable or unparseable listing leaves the
 target unrun, that a write or link change inside a protected tree during a run
 is reported, that an entry the sync cannot read leaves the run going with a
-warning naming the path rather than refusing the target, that a protected tree
-of tens of thousands of entries is checked
-with bounded memory and no leftover scratch files, plus dispatch refusal and manifest preservation when ownership
-reads or persistence fail. It also proves that a depot lock which cannot be
-opened is reported as a locking failure rather than as a run in progress, and
-that the verbose lock diagnostics stay silent until the console turns them on.
+warning naming the path rather than refusing the target, that an after-run
+fingerprint that cannot be taken is recorded as unverified instead of being
+reported as a change, that a protected tree of tens of thousands of entries is
+checked with bounded memory and no leftover scratch files, plus dispatch
+refusal and manifest preservation when ownership reads or persistence fail. It
+also proves that a depot lock which cannot be opened is reported as a locking
+failure rather than as a run in progress, and that the verbose lock
+diagnostics stay silent until the console turns them on.
 
 `tests/test_scheduler_lock.sh` is the executable form of the scheduler lock
 reproduction. It runs the real scheduler and the real `sync.sh` with a stub
