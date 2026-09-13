@@ -587,14 +587,25 @@ async function loadDepotArchives(report=false) {
   updateDepotInstallState();
 }
 
-let identityPending=false;
+let identityPending=false, identityPendingSince=0, identityCheckedAt=0;
 function populateIdentity(data) {
   $('machine-id').textContent=data.machineId || (data.tool.installed ? 'Not verified yet' : 'Install the tool first');
   $('machine-id-status').textContent=identityStatusText(data);
   $('adoption-flash').textContent=data.adoptedMachineId ? (data.machineIdMessage || '') : '';
   $('verify-machine-id').disabled=!data.tool.installed;
   if (data.machineIdStatus === 'confirmed') $('verify-flash').textContent='';
-  identityPending=data.tool.installed && (data.machineIdStatus === 'unverified' || data.machineIdStatus === 'adopted');
+  const pending=data.tool.installed && (data.machineIdStatus === 'unverified' || data.machineIdStatus === 'adopted');
+  if (pending && !identityPending) identityPendingSince=identityCheckedAt=Date.now();
+  identityPending=pending;
+}
+
+async function refreshIdentity() {
+  const now=Date.now();
+  if (now-identityPendingSince >= 60000 && now-identityCheckedAt < 60000) return;
+  identityCheckedAt=now;
+  const data=await api('api/bootstrap');
+  if (!data.authenticated || !data.tool) { identityPending=false; return; }
+  populateIdentity(data);
 }
 
 function populateSetup(data) {
@@ -853,7 +864,7 @@ $('finish-setup').onclick=async()=>{
 
 async function poll(){
   try {
-    if (identityPending) populateIdentity(await api('api/bootstrap'));
+    if (identityPending) await refreshIdentity();
     const status=await api('api/status'); const running=status.running, armed=status.armed;
     $('st-state').innerHTML=running?'<span class="pill run">running</span>':armed?'<span class="pill ok">armed, idle</span>':'<span class="pill bad">not armed</span>';
     $('st-current').textContent=status.currentTarget||'none'; $('st-next').textContent=fmt(status.nextRun); $('st-tool').textContent=status.vcfdtVersion;

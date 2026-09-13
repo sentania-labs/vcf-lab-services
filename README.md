@@ -66,11 +66,12 @@ installed, replaced or rolled back, and once in the background at appliance
 start when the saved result is missing, failed, out of date, or still waiting
 to confirm an adopted ID. Each read records the outcome with the installed
 release, and sign-in, the dashboard, and every worker show that saved result
-without launching the tool. The start-time check is bounded: it tries a few
-times over the first quarter hour, waits out a running sync or tool update,
-launches the tool at most once, and never runs on a request. So an appliance
-upgraded from an earlier console, or one whose identity file was changed
-outside the console, verifies itself without operator action. Until that
+without launching the tool. The start-time check launches the tool at most
+once and never runs on a request. It tries a few times over the first quarter
+hour and then every quarter hour for as long as a running sync or tool update
+holds it back. So an appliance upgraded from an earlier console, or one whose
+identity file was changed outside the console, verifies itself without
+operator action, even when a long sync is running at start. Until that
 completes the ID is shown as unverified (or as failed with the last verified
 ID after a failed probe), and activation-code saving and setup completion stay
 blocked. **Verify with the tool** on the Setup tab runs the same verification

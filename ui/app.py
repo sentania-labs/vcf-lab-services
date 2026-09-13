@@ -1000,7 +1000,7 @@ def _record_release_identity(release_root, machine_id):
     metadata_path = release_root / ".vcf-services.json"
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (FileNotFoundError, json.JSONDecodeError):
         metadata = {}
     if not isinstance(metadata, dict):
         metadata = {}
@@ -1714,6 +1714,13 @@ def _adoption_message(adoption, tool_installed):
     return message
 
 
+def _identity_changed_message(machine_id):
+    return (
+        f"{machine_id} was verified with the installed tool, but the tool's "
+        f"identity changed afterwards. {IDENTITY_VERIFICATION_RUNS}"
+    )
+
+
 def _registration_details(tool=None):
     """Describe the Software Depot ID from durable state alone.
 
@@ -1735,6 +1742,11 @@ def _registration_details(tool=None):
         machine_id = (
             adoption["adoptedId"] if status == "confirmed" else adoption.get("reportedId")
         )
+        if tool["machineIdProbed"] and _identity_changed_since(tool["machineIdProbedAt"]):
+            status = "unverified"
+            machine_id = adoption["adoptedId"]
+            verified_at = tool["machineIdProbedAt"]
+            message = _identity_changed_message(machine_id)
     elif adoption is not None:
         status = "adopted"
         machine_id = adoption["adoptedId"]
@@ -1760,10 +1772,7 @@ def _registration_details(tool=None):
         status = "unverified"
         machine_id = tool["machineId"]
         verified_at = tool["machineIdProbedAt"]
-        message = (
-            f"{machine_id} was verified with the installed tool, but the tool's "
-            f"identity changed afterwards. {IDENTITY_VERIFICATION_RUNS}"
-        )
+        message = _identity_changed_message(machine_id)
     else:
         status = "confirmed"
         machine_id = tool["machineId"]
@@ -2506,23 +2515,30 @@ def _verify_identity_now():
 
 
 STARTUP_VERIFICATION_DELAYS = (10, 60, 300, 900)
+STARTUP_VERIFICATION_RETRY_EVERY = 900
 
 
-def _startup_identity_verification(delays=STARTUP_VERIFICATION_DELAYS, sleep=time.sleep):
+def _startup_identity_verification(
+    delays=STARTUP_VERIFICATION_DELAYS,
+    retry_every=STARTUP_VERIFICATION_RETRY_EVERY,
+    sleep=time.sleep,
+):
     """Verify a missing, failed, stale or pending identity once after start.
 
     This is the background verification behind an appliance upgrade (a
     release recorded by an older console), an identity file changed outside
-    the console, or an install-time probe that failed. It is bounded: at most
-    one probe, attempted at the listed delays and given up after the last
-    one. It never runs on a request. A running sync or a tool update in
-    flight defers it to the next attempt instead of launching the tool
-    beside them; the exclusive lock also makes a second worker skip while
-    the first is probing.
+    the console, or an install-time probe that failed. It launches the tool
+    at most once and never runs on a request. A running sync or a tool
+    update in flight defers it instead of launching the tool beside them:
+    after the listed delays it keeps retrying every retry_every seconds for
+    as long as it is deferred, so a long sync running at start only delays
+    it. The exclusive lock also makes a second worker skip while the first
+    is probing. It returns once verification is not needed or has run.
     """
-    outcome = "deferred"
-    for delay in delays:
-        sleep(delay)
+    attempt = 0
+    while True:
+        sleep(delays[attempt] if attempt < len(delays) else retry_every)
+        attempt += 1
         if not _identity_verification_needed(_current_tool_info(), _machine_id_adoption()):
             return "not needed"
         if _state().get("running", False):
@@ -2542,7 +2558,6 @@ def _startup_identity_verification(delays=STARTUP_VERIFICATION_DELAYS, sleep=tim
             return "error"
         print(f"[identity] startup verification {outcome}", flush=True)
         return outcome
-    return outcome
 
 
 def verify_identity_on_start():
