@@ -189,15 +189,15 @@ fingerprint_workspace() {
 }
 
 tree_fingerprint() {
-	local tree="$comp_root/$1" output="$2" entries="$2.entries" errors="$2.errors"
-	local count line
+	local tree="$comp_root/$1" output="$2" report="${3:-}"
+	local entries="$2.entries" errors="$2.errors" count line
 	if [ -e "$tree" ] || [ -L "$tree" ]; then
 		find "$tree" -printf '%y %m %U %G %s %T@ %n %i %p -> %l\n' > "$entries" 2> "$errors"
 		if ! LC_ALL=C sort "$entries" "$errors" > "$output"; then
 			rm -f "$entries" "$errors"
 			return 1
 		fi
-		if [ -s "$errors" ]; then
+		if [ -n "$report" ] && [ -s "$errors" ]; then
 			count="$(grep -c . "$errors")"
 			log "WARNING: find could not read some entries under protected tree PROD/COMP/$1 ($count); the sync runs as the same user, so it cannot write inside them either"
 			head -n 5 "$errors" | while IFS= read -r line; do log "  $line"; done
@@ -213,18 +213,23 @@ snapshot_protected() {
 	fingerprint_workspace || return 1
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
-		tree_fingerprint "$name" "$fingerprint_dir/$name.before" || return 1
+		tree_fingerprint "$name" "$fingerprint_dir/$name.before" report || return 1
 	done <<< "$1"
 }
 
 verify_protected_unchanged() {
 	local trees="$1" label="$2"
-	local name line changed=0 count before after
+	local name line changed=0 unverifiable=0 count before after
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
 		before="$fingerprint_dir/$name.before"
 		after="$fingerprint_dir/$name.after"
-		tree_fingerprint "$name" "$after"
+		if ! tree_fingerprint "$name" "$after"; then
+			unverifiable=1
+			log "ERROR: could not take the after-run fingerprint of PROD/COMP/$name after $label ran, so the protected tree could not be verified"
+			rm -f "$before" "$after"
+			continue
+		fi
 		if cmp -s "$before" "$after"; then
 			rm -f "$before" "$after"
 			continue
@@ -236,7 +241,9 @@ verify_protected_unchanged() {
 			| while IFS= read -r line; do log "  $line"; done
 		rm -f "$before" "$after"
 	done <<< "$trees"
-	return "$changed"
+	[ "$changed" -eq 0 ] || return 1
+	[ "$unverifiable" -eq 0 ] || return 2
+	return 0
 }
 
 record_tree_if_absent() {
@@ -556,12 +563,25 @@ run_target() {
 		overall_rc=$target_rc
 		last_status="FAILED:$target_rc"
 	fi
-	if [ -n "$protected" ] && ! verify_protected_unchanged "$protected" "$label"; then
-		[ "$target_rc" -ne 0 ] || overall_rc=1
-		last_status="FAILED:PROTECTED-CHANGED"
+	local verify_rc=0
+	if [ -n "$protected" ]; then
+		verify_protected_unchanged "$protected" "$label" || verify_rc=$?
 	fi
+	case "$verify_rc" in
+		1)
+			[ "$target_rc" -ne 0 ] || overall_rc=1
+			last_status="FAILED:PROTECTED-CHANGED"
+			;;
+		2)
+			if [ "$target_rc" -eq 0 ]; then
+				overall_rc=1
+				last_status="FAILED:UNVERIFIED"
+			fi
+			;;
+	esac
 	case "$last_status" in
 		OK) log "<<< $label OK" ;;
+		FAILED:UNVERIFIED) log "<<< $label $last_status, continuing" ;;
 		FAILED:PROTECTED-CHANGED)
 			if [ "$target_rc" -ne 0 ]; then
 				log "<<< $label $last_status (tool rc=$target_rc), continuing"

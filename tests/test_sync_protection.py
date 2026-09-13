@@ -316,11 +316,43 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"patches": "OK"})
         self.assertEqual(harness.called(), ["binaries list", "binaries download"])
-        self.assertIn("WARNING: find could not read some entries under protected tree "
-                      "PROD/COMP/VKR (1)", result.stdout)
+        self.assertEqual(result.stdout.count(
+            "WARNING: find could not read some entries under protected tree PROD/COMP/VKR (1)"), 1)
         self.assertIn(str(closed), result.stdout)
         self.assertNotIn("FAILED", result.stdout)
         self.assertIn("<<< vcf-patches OK", result.stdout)
+        self.assertEqual(fingerprint(vkr), before)
+        self.assertEqual(list(harness.scratch.iterdir()), [])
+
+    def test_an_after_run_fingerprint_that_cannot_be_taken_is_not_called_a_change(self):
+        # Scratch space that fails while the after-run fingerprint is written
+        # leaves the protected tree unverified, not modified: the operator is
+        # never told a library changed on the strength of a missing snapshot.
+        harness = self.harness
+        vkr = harness.content_library("VKR")
+        harness.protect("VKR")
+        before = fingerprint(vkr)
+        fault = harness.root / "fingerprint-fault.bash"
+        fault.write_text(
+            'function sort() {\n'
+            '  local argument\n'
+            '  for argument in "$@"; do\n'
+            '    case "$argument" in\n'
+            '      *.after.entries) return 1 ;;\n'
+            '    esac\n'
+            '  done\n'
+            '  command sort "$@"\n}\n'
+        )
+
+        result = harness.run("patches", bash_env=fault)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(), {"patches": "FAILED:UNVERIFIED"})
+        self.assertEqual(harness.called(), ["binaries list", "binaries download"])
+        self.assertIn("ERROR: could not take the after-run fingerprint of PROD/COMP/VKR after "
+                      "vcf-patches ran, so the protected tree could not be verified", result.stdout)
+        self.assertNotIn("changed while", result.stdout)
+        self.assertIn("<<< vcf-patches FAILED:UNVERIFIED, continuing", result.stdout)
         self.assertEqual(fingerprint(vkr), before)
         self.assertEqual(list(harness.scratch.iterdir()), [])
 

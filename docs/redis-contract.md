@@ -79,7 +79,9 @@ A target whose download ran but whose run changed a protected tree receives
 `FAILED:PROTECTED-CHANGED`, which takes precedence over the tool's own failure
 status, with the tool's exit code kept in the run log. A tool-backed target
 whose listing could not be obtained or read while trees are protected is not
-run and receives `FAILED:<exit code>` or `FAILED:UNVERIFIED`. See
+run and receives `FAILED:<exit code>` or `FAILED:UNVERIFIED`;
+`FAILED:UNVERIFIED` is also recorded when the after-run check of a protected
+tree could not be completed. See
 [depot protection](../README.md#operator-provided-depot-content) for how a
 target's trees are decided. Targets not selected for the run retain their
 earlier records. Older records may omit
