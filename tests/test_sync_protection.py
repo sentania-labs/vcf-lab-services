@@ -81,7 +81,7 @@ class Harness:
             "STUB_CALL_LOG": str(self.calls),
         }
         for key in ("STUB_LIST_COMPONENTS", "STUB_FAIL_TARGET", "STUB_LIST_NO_TABLE",
-                    "STUB_WRITE_TREES", "STUB_RETARGET_LINKS"):
+                    "STUB_LIST_RAW_ROWS", "STUB_WRITE_TREES", "STUB_RETARGET_LINKS"):
             environment.pop(key, None)
         environment.update(env or {})
         if bash_env:
@@ -244,13 +244,51 @@ class SyncProtectionScopeTests(unittest.TestCase):
                 self.assertIn("<<< vcf-patches FAILED:PROTECTED-CHANGED, continuing", result.stdout)
                 self.assertEqual(fingerprint(untouched_tree), before)
         # A misbehaving tool that also fails keeps its own exit code, and the
-        # change is still reported.
+        # recorded status still says a protected tree changed.
         result = harness.run("patches", env={"STUB_WRITE_TREES": "VKR", "STUB_FAIL_TARGET": "patches"})
         self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
-        self.assertEqual(harness.statuses(), {"patches": "FAILED:23"})
+        self.assertEqual(harness.statuses(), {"patches": "FAILED:PROTECTED-CHANGED"})
         self.assertEqual(harness.called(), ["binaries list", "binaries download"])
         self.assertRegex(result.stdout, r"ERROR: protected tree PROD/COMP/VKR changed while vcf-patches ran")
-        self.assertIn("<<< vcf-patches FAILED rc=23, continuing", result.stdout)
+        self.assertIn("<<< vcf-patches FAILED:PROTECTED-CHANGED (tool rc=23), continuing", result.stdout)
+
+    def test_a_full_name_containing_the_delimiter_still_names_its_component(self):
+        harness = self.harness
+        vkr = harness.content_library("VKR")
+        harness.protect("VKR")
+        before = fingerprint(vkr)
+        row = ("0000000f-0000-4000-8000-000000000015 | VKR | Kubernetes | Releases | "
+               "9.1.0.0.20000000 | 2026-01-01 | 1 KiB | PATCH")
+
+        result = harness.run("patches", env={"STUB_LIST_RAW_ROWS": row})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(), {"patches": "SKIPPED:PROTECTED"})
+        self.assertEqual(harness.called(), ["binaries list"])
+        self.assertIn("PROD/COMP/VKR is protected and vcf-patches writes it", result.stdout)
+        self.assertEqual(fingerprint(vkr), before)
+
+    def test_an_unreadable_listing_row_leaves_the_target_unrun(self):
+        harness = self.harness
+        vkr = harness.content_library("VKR")
+        harness.protect("VKR")
+        before = fingerprint(vkr)
+        vkr_bytes = (vkr / "releases" / "v1" / "image.ova").read_bytes()
+        rows = {
+            "fewer cells": "0000000f-0000-4000-8000-000000000015 | VKR | Kubernetes Releases",
+            "empty component": ("0000000f-0000-4000-8000-000000000015 |  | Kubernetes Releases | "
+                                "9.1.0.0.20000000 | 2026-01-01 | 1 KiB | PATCH"),
+        }
+        for case, row in rows.items():
+            with self.subTest(case=case):
+                result = harness.run("patches", env={"STUB_LIST_RAW_ROWS": row})
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(harness.statuses(), {"patches": "FAILED:UNVERIFIED"})
+                self.assertEqual(harness.called(), ["binaries list"])
+                self.assertIn("<<< vcf-patches FAILED:UNVERIFIED, continuing", result.stdout)
+                self.assertEqual(fingerprint(vkr), before)
+                self.assertEqual((vkr / "releases" / "v1" / "image.ova").read_bytes(), vkr_bytes)
+                self.assertFalse((harness.depot / "STUB" / "patches").exists())
 
     def test_vkr_target_respects_its_own_tree(self):
         harness = self.harness

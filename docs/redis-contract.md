@@ -76,7 +76,8 @@ the target uses a separate helper.
 Targets skipped for depot protection receive `status: "SKIPPED:PROTECTED"`
 and the current provenance fields even though the target was not invoked.
 A target whose download ran but whose run changed a protected tree receives
-`FAILED:PROTECTED-CHANGED`; a tool-backed target whose listing could not be
+`FAILED:PROTECTED-CHANGED`, which takes precedence over the tool's own failure
+status, with the tool's exit code kept in the run log; a tool-backed target whose listing could not be
 obtained while trees are protected is not run and receives `FAILED:<exit
 code>` or `FAILED:UNVERIFIED`. See
 [depot protection](../README.md#operator-provided-depot-content) for how a

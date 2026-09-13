@@ -88,7 +88,12 @@ protected_trees() {
 
 # Each Component value in the tool's binaries table is the PROD/COMP tree that
 # binary lands in. The header names the column, so its position is read rather
-# than assumed; a listing with no such table exits 3. `binaries list` and the
+# than assumed; a listing with no such table exits 3. After the header, lines
+# without a '|' (rules, the element count, prose) are ignored, and every other
+# line is a row whose trimmed Component cell is printed as it stands. A row
+# with fewer cells than the header or an empty Component cell exits 3 rather
+# than being dropped, since a dropped row could hide a protected tree. A Full
+# Name containing ' | ' only adds cells after Component. `binaries list` and the
 # "Binaries to be downloaded" table the download itself prints come from the
 # same table printer in the tool, which labels that column 'Component' and
 # delimits columns with ' | ', as the live download logs show. A listing
@@ -103,11 +108,13 @@ components_from_listing() {
 			}
 			next
 		}
-		NF == columns {
+		index($0, "|") == 0 { next }
+		{
 			value = trim($column)
-			if (value ~ /^[A-Z][A-Z0-9_]*$/) print value
+			if (NF < columns || value == "") { unparsed = 1; exit 3 }
+			print value
 		}
-		END { if (column == 0) exit 3 }'
+		END { if (column == 0 || unparsed) exit 3 }'
 }
 
 # The trees a target writes, one name per line. The ESX image library and the
@@ -116,8 +123,10 @@ components_from_listing() {
 # PROD/COMP/VKR. A `binaries download` run spans whatever components its
 # filter selects, so those targets ask the tool: `binaries list` with the same
 # filter prints the table the download itself prints under "Binaries to be
-# downloaded" before it starts writing. Nothing about those targets is mapped
-# by hand.
+# downloaded" before it starts writing. The tool's own help documents the same
+# filter group for list as for download (--automated-install, --patches-only,
+# --sku, --type, --vcf-version), so the download's filters are passed
+# unchanged. Nothing about those targets is mapped by hand.
 written_trees=""
 scope_status=""
 scope_rc=0
@@ -513,13 +522,19 @@ run_target() {
 		overall_rc=$target_rc
 		last_status="FAILED:$target_rc"
 	fi
-	if [ -n "$protected" ] && ! verify_protected_unchanged "$protected" "$label" && [ "$target_rc" -eq 0 ]; then
-		overall_rc=1
+	if [ -n "$protected" ] && ! verify_protected_unchanged "$protected" "$label"; then
+		[ "$target_rc" -ne 0 ] || overall_rc=1
 		last_status="FAILED:PROTECTED-CHANGED"
 	fi
 	case "$last_status" in
 		OK) log "<<< $label OK" ;;
-		FAILED:PROTECTED-CHANGED) log "<<< $label $last_status, continuing" ;;
+		FAILED:PROTECTED-CHANGED)
+			if [ "$target_rc" -ne 0 ]; then
+				log "<<< $label $last_status (tool rc=$target_rc), continuing"
+			else
+				log "<<< $label $last_status, continuing"
+			fi
+			;;
 		*) log "<<< $label FAILED rc=$target_rc, continuing" ;;
 	esac
 }

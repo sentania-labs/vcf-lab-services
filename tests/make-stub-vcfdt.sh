@@ -47,6 +47,8 @@ fi
 # patches include ESX_HOST and the tool's own VCFDT archive. Tests override
 # the set with STUB_LIST_COMPONENTS (space separated), fail the listing with
 # STUB_FAIL_TARGET=list, or drop the table with STUB_LIST_NO_TABLE=1.
+# STUB_LIST_RAW_ROWS is printed verbatim after the generated table rows, so
+# tests can add rows the table printer might produce.
 components_for_filter() {
 	if [ -n "${STUB_LIST_COMPONENTS+set}" ]; then
 		printf '%s\n' "$STUB_LIST_COMPONENTS"
@@ -78,6 +80,7 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 		printf '%08x-0000-4000-8000-%012d | %s | Stub %s | 9.1.0.0.20000000 | 2026-01-01 | 1 KiB | UPGRADE\n' \
 			"$index" "$index" "$component" "$component"
 	done
+	[ -z "${STUB_LIST_RAW_ROWS:-}" ] || printf '%s\n' "$STUB_LIST_RAW_ROWS"
 	printf -- '-----\n%s elements\n' "$#"
 	exit 0
 fi
