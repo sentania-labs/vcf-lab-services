@@ -594,7 +594,7 @@ function populateIdentity(data) {
   $('adoption-flash').textContent=data.adoptedMachineId ? (data.machineIdMessage || '') : '';
   $('verify-machine-id').disabled=!data.tool.installed;
   if (data.machineIdStatus === 'confirmed') $('verify-flash').textContent='';
-  const pending=data.tool.installed && (data.machineIdStatus === 'unverified' || data.machineIdStatus === 'adopted');
+  const pending=data.tool.installed && ['unverified', 'adopted', 'failed'].includes(data.machineIdStatus);
   if (pending && !identityPending) identityPendingSince=identityCheckedAt=Date.now();
   identityPending=pending;
 }

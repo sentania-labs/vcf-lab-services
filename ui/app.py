@@ -975,11 +975,13 @@ def _recorded_identity(metadata):
 
 
 def _identity_changed_since(probed_at):
-    """True when the tool's identity file was written after the recorded probe."""
+    """True when the tool's identity file was written after the recorded probe,
+    or is gone: a probe was recorded against an identity that no longer exists
+    (a volume restore or cleanup), so the record no longer stands."""
     try:
         changed_at = VCFDT_MACHINE_ID_FILE.stat().st_mtime
     except OSError:
-        return False
+        return True
     try:
         recorded_at = datetime.fromisoformat(probed_at).timestamp()
     except (TypeError, ValueError):
@@ -1717,7 +1719,8 @@ def _adoption_message(adoption, tool_installed):
 def _identity_changed_message(machine_id):
     return (
         f"{machine_id} was verified with the installed tool, but the tool's "
-        f"identity changed afterwards. {IDENTITY_VERIFICATION_RUNS}"
+        "identity changed afterwards or its identity file was removed. "
+        f"{IDENTITY_VERIFICATION_RUNS}"
     )
 
 
@@ -1752,7 +1755,8 @@ def _registration_details(tool=None):
                 reported = adoption.get("reportedId") or "no recognizable ID"
                 message = (
                     f"Adopted {machine_id}, but the installed tool reported {reported}, "
-                    f"and the tool's identity changed afterwards. {IDENTITY_VERIFICATION_RUNS}"
+                    "and the tool's identity changed afterwards or its identity file "
+                    f"was removed. {IDENTITY_VERIFICATION_RUNS}"
                 )
     elif adoption is not None:
         status = "adopted"
@@ -2504,16 +2508,17 @@ def _identity_verification_needed(tool, adoption, started_at):
     or still waiting to confirm an adopted ID.
 
     A probe recorded at or after started_at is this start's attempt whatever
-    its outcome, so a second worker does not launch the tool again; an
-    identity file changed after that probe still needs verification.
+    its outcome, so a second worker does not launch the tool again, even when
+    that probe left no identity file behind. An identity file changed or
+    removed after an earlier start's probe needs verification.
     """
     if not tool["installed"]:
         return False
     probed_at = tool["machineIdProbedAt"]
-    if tool["machineIdProbed"] and _identity_changed_since(probed_at):
-        return True
     if tool["machineIdProbed"] and _recorded_since(probed_at, started_at):
         return False
+    if tool["machineIdProbed"] and _identity_changed_since(probed_at):
+        return True
     if adoption is not None and adoption["status"] == "adopted":
         return True
     return not tool["machineIdProbed"] or tool["machineId"] is None

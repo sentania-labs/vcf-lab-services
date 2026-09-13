@@ -215,8 +215,8 @@ class UiApiTests(unittest.TestCase):
         (tree / "payload.bin").write_bytes(b"content")
         return tree
 
-    @staticmethod
     def tar_tool(
+        self,
         version="9.1.2",
         machine_id="11111111-1111-4111-8111-111111111111",
         machine_id_file=None,
@@ -225,11 +225,21 @@ class UiApiTests(unittest.TestCase):
     ):
         if version_output is None:
             version_output = f"Version: {version}\n{version}"
-        machine_id_command = (
-            f"  cat '{machine_id_file}'\n"
-            if machine_id_file is not None
-            else f"  echo 'Software Depot ID: {machine_id}'\n"
-        )
+        if machine_id_file is not None:
+            machine_id_command = f"  cat '{machine_id_file}'\n"
+        else:
+            # The real tool keeps its identity in the state volume and creates
+            # it on first use; a stub that reports a plausible ID does the same.
+            identity = self.vcfdt_state / "machine_id"
+            keep_identity = (
+                f"  mkdir -p '{self.vcfdt_state}'\n"
+                f"  [ -s '{identity}' ] || printf '%s' '{machine_id}' > '{identity}'\n"
+                if len(machine_id) == 36
+                else ""
+            )
+            machine_id_command = (
+                f"{keep_identity}  echo 'Software Depot ID: {machine_id}'\n"
+            )
         payload = (
             "#!/bin/sh\n"
             'if [ "${1:-}" = configuration ]; then\n'
@@ -558,7 +568,11 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         # and the record outlives the request.
         new_id = "22222222-2222-4222-8222-222222222222"
         tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
-        tool.write_text(f"#!/bin/sh\necho 'Software Depot ID: {new_id}'\n")
+        tool.write_text(
+            f"#!/bin/sh\nmkdir -p '{self.vcfdt_state}'\n"
+            f"printf '%s' '{new_id}' > '{self.vcfdt_state / 'machine_id'}'\n"
+            f"echo 'Software Depot ID: {new_id}'\n"
+        )
         tool.chmod(0o755)
         self.allow_tool_launch()
         verified = self.post("/api/registration/verify")
@@ -815,6 +829,47 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
         )
 
+    def test_removed_identity_file_invalidates_the_record_until_reverified(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        verified_id = "11111111-1111-4111-8111-111111111111"
+        identity = self.vcfdt_state / "machine_id"
+        self.assertEqual(identity.read_text(), verified_id)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "confirmed"
+        )
+
+        # A volume restore or cleanup removed the tool's identity file after
+        # the probe was recorded: the record no longer stands.
+        identity.unlink()
+        self.forbid_tool_launch()
+        gone = self.get("/api/bootstrap").get_json()
+        self.assertEqual(gone["machineIdStatus"], "unverified")
+        self.assertEqual(gone["machineId"], verified_id)
+        self.assertIn("identity file was removed", gone["machineIdMessage"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        refused = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(refused.status_code, 409)
+        self.assertFalse((self.secrets / "activation-code.txt").exists())
+        self.assertTrue(
+            self.module._identity_verification_needed(
+                self.module._current_tool_info(),
+                self.module._machine_id_adoption(),
+                datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+        # The start-time check probes once; the tool recreates its identity.
+        self.allow_tool_launch()
+        self.assertEqual(self.run_startup_verification(), "verified")
+        self.forbid_tool_launch()
+        self.assertTrue(identity.exists())
+        restored = self.get("/api/bootstrap").get_json()
+        self.assertEqual(restored["machineIdStatus"], "confirmed")
+        self.assertEqual(restored["machineId"], verified_id)
+        self.assertEqual(self.get("/api/registration").status_code, 200)
+
     def test_identity_changed_after_verification_is_reverified_at_start(self):
         self.claim()
         self.write_state()
@@ -1069,6 +1124,32 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual([step["statusCalls"] for step in backoff], list(range(1, 13)))
         self.assertIn("Confirmed by the installed tool", backoff[-1]["machineIdStatus"])
 
+        # A failed probe is retried in the background at start, so the card
+        # keeps refreshing until that retry confirms the ID, then stops.
+        bogus = self.tar_tool(machine_id="fake")
+        self.assertEqual(
+            self.post(
+                "/api/vcfdt",
+                data={"archive": (bogus, "vcf-download-tool-9.1.3.tar.gz")},
+                content_type="multipart/form-data",
+            ).status_code,
+            201,
+        )
+        failed = self.get("/api/bootstrap").get_json()
+        self.assertEqual(failed["machineIdStatus"], "failed")
+        recovered = self.run_console({
+            "status": status,
+            "identity": failed,
+            "polls": [
+                {"at": 5000, "responses": {"api/bootstrap": {"status": 200, "body": failed}}},
+                {"at": 10000, "responses": {"api/bootstrap": {"status": 200, "body": confirmed}}},
+                {"at": 15000, "responses": {"api/bootstrap": {"status": 200, "body": failed}}},
+            ],
+        })
+        self.assertEqual([step["bootstrapCalls"] for step in recovered], [1, 2, 2])
+        self.assertIn("probe failed", recovered[0]["machineIdStatus"])
+        self.assertIn("Confirmed by the installed tool", recovered[-1]["machineIdStatus"])
+
     @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
     def test_console_sign_in_shows_progress_while_the_credential_is_checked(self):
         rendered = self.run_console({
@@ -1103,7 +1184,11 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         )
         new_id = "22222222-2222-4222-8222-222222222222"
         tool = self.tool_store / "current" / "bin" / "vcf-download-tool"
-        tool.write_text(f"#!/bin/sh\necho 'Software Depot ID: {new_id}'\n")
+        tool.write_text(
+            f"#!/bin/sh\nmkdir -p '{self.vcfdt_state}'\n"
+            f"printf '%s' '{new_id}' > '{self.vcfdt_state / 'machine_id'}'\n"
+            f"echo 'Software Depot ID: {new_id}'\n"
+        )
         tool.chmod(0o755)
         self.assertEqual(self.run_startup_verification(), "verified")
         self.assertEqual(self.get("/api/bootstrap").get_json()["machineId"], new_id)
