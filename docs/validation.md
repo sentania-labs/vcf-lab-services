@@ -70,8 +70,13 @@ Kubernetes manifest test also asserts that product images default to the
 latest tags with an always-pull policy.
 
 `tests/test_sync.sh` also runs `tests/test_sync_protection.py`, which checks
-protected-target dispatch refusal and dispatch after unprotecting for all five
-sync targets, plus dispatch refusal and manifest preservation when ownership
+that protected content libraries are untouched while unrelated install,
+upgrade and patches downloads run, with the runtime fingerprint covering their
+links and metadata and the tests comparing the fixture files' bytes
+separately, that a target whose tool listing names a protected tree skips and
+names only that tree, that an unobtainable or unparseable listing leaves the
+target unrun, that a write or link change inside a protected tree during a run
+is reported, plus dispatch refusal and manifest preservation when ownership
 reads or persistence fail. It also proves that a depot lock which cannot be
 opened is reported as a locking failure rather than as a run in progress, and
 that the verbose lock diagnostics stay silent until the console turns them on.
@@ -90,10 +95,11 @@ housekeeping and versions refresh report an unopenable lock once instead of
 claiming a run is in progress.
 
 `tests/test_sync_image.sh IMAGE` runs the `sync.sh` shipped inside a built
-sync image, with that image's own jq, against a stub tool and a protected
-operator tree. Debian bookworm ships jq 1.6, which rejects a query the host's
-jq 1.7 accepts, so this proof has to run in the image; CI runs it against the
-freshly built `vcf-services-sync-base:ci`.
+sync image, with that image's own jq and awk, against a stub tool and a
+protected operator tree: targets that do not write the tree run, targets whose
+listing names it skip. Debian bookworm ships jq 1.6, which rejects a query the
+host's jq 1.7 accepts, and mawk rather than GNU awk, so this proof has to run
+in the image; CI runs it against the freshly built `vcf-services-sync-base:ci`.
 
 `tests/make-stub-depot.sh <dir> [version ...]` builds a stub depot tree that
 models the reference depot layout for the tool itself, a flat

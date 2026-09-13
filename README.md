@@ -152,10 +152,20 @@ or schema validation; only an absent manifest starts empty. Sync refuses further
 target dispatch when ownership cannot be read or persisted, preserving the
 existing manifest if an update fails.
 
-Protection skips the `esx` target when `ESX_HOST` is protected and the `vkr`
-target when `VKR` is protected. The `install`, `upgrade`, and `patches` targets
-are skipped whenever any tree is protected, because their writes can span
-multiple trees. The run log names the protected trees. Protection remains
+Protection skips a target only when it would write a protected tree. The
+`esx` target writes `ESX_HOST` and the `vkr` target writes `VKR`. The
+`install`, `upgrade`, and `patches` targets write one tree per component the
+download tool selects, so while any tree is protected the sync first runs the
+tool's `binaries list` with the same filter and reads the Component column;
+the target is skipped, with the conflicting trees named in the run log, only
+when a listed component is protected. Otherwise the run log names the trees
+the target writes, the download runs, and the protected trees are checked
+afterwards: any entry added, removed, resized, re-timed, re-linked or
+re-permissioned below a protected tree during the run is reported and the
+target is recorded as `FAILED:PROTECTED-CHANGED`. That after-run check
+compares the metadata of each entry, reads no file content, and reports an
+unexpected write rather than preventing it. When the listing cannot be
+obtained the target is not run and is recorded as failed. Protection remains
 until an operator turns it off in the Depot tab.
 
 Adopting an existing VKR content tree as the VKR sync target is a follow-up.
