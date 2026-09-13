@@ -721,9 +721,12 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn(other_id, mismatch.get_json()["error"])
         self.assertEqual(self.get("/api/bootstrap").get_json()["machineIdStatus"], "mismatch")
 
-    def run_startup_verification(self, module=None, sleep=lambda _seconds: None):
+    def run_startup_verification(self, module=None, sleep=lambda _seconds: None, started_at=None):
         module = module or self.module
-        return module._startup_identity_verification(delays=(0,), retry_every=0, sleep=sleep)
+        return module._startup_identity_verification(
+            started_at or datetime.now(timezone.utc).isoformat(),
+            delays=(0,), retry_every=0, sleep=sleep,
+        )
 
     def test_startup_verification_confirms_a_legacy_release_without_operator_action(self):
         self.claim()
@@ -782,7 +785,8 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 self.allow_tool_launch()
 
         verification = self.module._startup_identity_verification(
-            delays=(10, 60, 300, 900), retry_every=900, sleep=sync_ends_after_six_waits
+            datetime.now(timezone.utc).isoformat(),
+            delays=(10, 60, 300, 900), retry_every=900, sleep=sync_ends_after_six_waits,
         )
         self.assertEqual(verification, "verified")
         self.assertEqual(slept, [10, 60, 300, 900, 900, 900])
@@ -927,6 +931,76 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(confirmed["machineId"], adopted_id)
         self.assertEqual(self.get("/api/registration").status_code, 200)
 
+    def test_identity_changed_after_a_mismatch_never_claims_the_adopted_id_verified(self):
+        self.claim()
+        self.write_state()
+        adopted_id = "22222222-2222-4222-8222-222222222222"
+        reported_id = "11111111-1111-4111-8111-111111111111"
+        self.assertEqual(
+            self.post("/api/registration/adopt", json={"machineId": adopted_id}).status_code,
+            200,
+        )
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "mismatch"
+        )
+
+        self.backdate_recorded_probe()
+        (self.vcfdt_state / "machine_id").write_text(reported_id + "\n")
+        self.forbid_tool_launch()
+        stale = self.get("/api/bootstrap").get_json()
+        self.assertEqual(stale["machineIdStatus"], "unverified")
+        self.assertIn(adopted_id, stale["machineIdMessage"])
+        self.assertIn(reported_id, stale["machineIdMessage"])
+        self.assertIn("changed afterwards", stale["machineIdMessage"])
+        self.assertNotIn("was verified", stale["machineIdMessage"])
+        self.assertEqual(self.get("/api/registration").status_code, 409)
+        refused = self.post("/api/registration", json={"activationCode": "code"})
+        self.assertEqual(refused.status_code, 409)
+        self.assertFalse((self.secrets / "activation-code.txt").exists())
+
+    def test_workers_share_one_start_time_verification_of_a_failed_probe(self):
+        self.claim()
+        self.write_state()
+        response = self.post(
+            "/api/vcfdt",
+            data={"archive": (self.tar_tool(machine_id="fake"), "vcf-download-tool-9.1.3.tar.gz")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "failed"
+        )
+        # The failed record predates this start, so it is retried once.
+        started_at = datetime.now(timezone.utc).isoformat()
+        first, _ = self.new_worker()
+        second, _ = self.new_worker()
+        launches = []
+        real_run = first.subprocess.run
+
+        def counted_run(*args, **kwargs):
+            launches.append(args)
+            return real_run(*args, **kwargs)
+
+        with mock.patch.object(first.subprocess, "run", side_effect=counted_run):
+            self.assertEqual(
+                self.run_startup_verification(first, started_at=started_at), "failed"
+            )
+        self.assertTrue(launches)
+        launched = len(launches)
+
+        self.forbid_tool_launch(second)
+        self.assertEqual(
+            self.run_startup_verification(second, started_at=started_at), "not needed"
+        )
+        self.assertEqual(
+            self.run_startup_verification(first, started_at=started_at), "not needed"
+        )
+        self.assertEqual(len(launches), launched)
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["machineIdStatus"], "failed"
+        )
+
     @unittest.skipIf(os.geteuid() == 0, "root reads files regardless of their mode")
     def test_unreadable_release_metadata_is_not_replaced_by_verification(self):
         self.claim()
@@ -1059,22 +1133,34 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         spec = importlib.util.spec_from_file_location("gunicorn_conf", GUNICORN_CONF_PATH)
         hooks = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hooks)
-        with mock.patch.dict(sys.modules, {"app": self.module}), mock.patch.object(
-            self.module, "verify_identity_on_start"
-        ) as start:
-            hooks.post_worker_init(mock.Mock())
-        start.assert_called_once_with()
-
         outcomes = []
-        with mock.patch.object(
+        with mock.patch.dict(os.environ), mock.patch.dict(
+            sys.modules, {"app": self.module}
+        ), mock.patch.object(
             self.module,
             "_startup_identity_verification",
-            side_effect=lambda: outcomes.append("ran"),
+            side_effect=lambda started_at: outcomes.append(started_at),
         ):
-            thread = self.module.verify_identity_on_start()
-            thread.join(timeout=5)
-        self.assertTrue(thread.daemon)
-        self.assertEqual(outcomes, ["ran"])
+            os.environ.pop("VCF_UI_STARTED_AT", None)
+            before = datetime.now(timezone.utc)
+            hooks.on_starting(mock.Mock())
+            started_at = os.environ["VCF_UI_STARTED_AT"]
+            self.assertGreaterEqual(datetime.fromisoformat(started_at), before)
+            start_verification = self.module.verify_identity_on_start
+            threads = []
+            with mock.patch.object(
+                self.module,
+                "verify_identity_on_start",
+                side_effect=lambda: threads.append(start_verification()),
+            ) as start:
+                hooks.post_worker_init(mock.Mock())
+            start.assert_called_once_with()
+            threads[0].join(timeout=5)
+            self.assertTrue(threads[0].daemon)
+            os.environ.pop("VCF_UI_STARTED_AT")
+            self.module.verify_identity_on_start().join(timeout=5)
+        self.assertEqual(outcomes[0], started_at)
+        self.assertGreater(datetime.fromisoformat(outcomes[1]), datetime.fromisoformat(started_at))
 
     def test_verify_is_refused_without_a_tool_during_sync_or_tool_update(self):
         self.claim()

@@ -1746,7 +1746,14 @@ def _registration_details(tool=None):
             status = "unverified"
             machine_id = adoption["adoptedId"]
             verified_at = tool["machineIdProbedAt"]
-            message = _identity_changed_message(machine_id)
+            if adoption["status"] == "confirmed":
+                message = _identity_changed_message(machine_id)
+            else:
+                reported = adoption.get("reportedId") or "no recognizable ID"
+                message = (
+                    f"Adopted {machine_id}, but the installed tool reported {reported}, "
+                    f"and the tool's identity changed afterwards. {IDENTITY_VERIFICATION_RUNS}"
+                )
     elif adoption is not None:
         status = "adopted"
         machine_id = adoption["adoptedId"]
@@ -2485,16 +2492,31 @@ def adopt_registration():
         ), 500
 
 
-def _identity_verification_needed(tool, adoption):
+def _recorded_since(probed_at, started_at):
+    try:
+        return datetime.fromisoformat(probed_at) >= datetime.fromisoformat(started_at)
+    except (TypeError, ValueError):
+        return False
+
+
+def _identity_verification_needed(tool, adoption, started_at):
     """Whether the installed tool's identity record is missing, failed, stale,
-    or still waiting to confirm an adopted ID."""
+    or still waiting to confirm an adopted ID.
+
+    A probe recorded at or after started_at is this start's attempt whatever
+    its outcome, so a second worker does not launch the tool again; an
+    identity file changed after that probe still needs verification.
+    """
     if not tool["installed"]:
+        return False
+    probed_at = tool["machineIdProbedAt"]
+    if tool["machineIdProbed"] and _identity_changed_since(probed_at):
+        return True
+    if tool["machineIdProbed"] and _recorded_since(probed_at, started_at):
         return False
     if adoption is not None and adoption["status"] == "adopted":
         return True
-    if not tool["machineIdProbed"] or tool["machineId"] is None:
-        return True
-    return _identity_changed_since(tool["machineIdProbedAt"])
+    return not tool["machineIdProbed"] or tool["machineId"] is None
 
 
 def _verify_identity_now():
@@ -2519,6 +2541,7 @@ STARTUP_VERIFICATION_RETRY_EVERY = 900
 
 
 def _startup_identity_verification(
+    started_at,
     delays=STARTUP_VERIFICATION_DELAYS,
     retry_every=STARTUP_VERIFICATION_RETRY_EVERY,
     sleep=time.sleep,
@@ -2532,21 +2555,25 @@ def _startup_identity_verification(
     update in flight defers it instead of launching the tool beside them:
     after the listed delays it keeps retrying every retry_every seconds for
     as long as it is deferred, so a long sync running at start only delays
-    it. The exclusive lock also makes a second worker skip while the first
-    is probing. It returns once verification is not needed or has run.
+    it. started_at is the appliance start shared by every worker: the
+    exclusive lock makes a second worker wait while the first is probing,
+    and the probe the first recorded then counts for both. It returns once
+    verification is not needed or has run.
     """
     attempt = 0
     while True:
         sleep(delays[attempt] if attempt < len(delays) else retry_every)
         attempt += 1
-        if not _identity_verification_needed(_current_tool_info(), _machine_id_adoption()):
+        if not _identity_verification_needed(
+            _current_tool_info(), _machine_id_adoption(), started_at
+        ):
             return "not needed"
         if _state().get("running", False):
             continue
         try:
             with _tool_update_lock():
                 if not _identity_verification_needed(
-                    _current_tool_info(), _machine_id_adoption()
+                    _current_tool_info(), _machine_id_adoption(), started_at
                 ):
                     return "not needed"
                 machine_id = _verify_identity_now()
@@ -2561,9 +2588,12 @@ def _startup_identity_verification(
 
 
 def verify_identity_on_start():
-    """Start the bounded background verification; called by gunicorn.conf.py."""
+    """Start the background verification; called by gunicorn.conf.py, whose
+    on_starting hook records the appliance start for every worker."""
+    started_at = os.environ.get("VCF_UI_STARTED_AT") or datetime.now(timezone.utc).isoformat()
     thread = threading.Thread(
         target=_startup_identity_verification,
+        kwargs={"started_at": started_at},
         name="identity-verification",
         daemon=True,
     )
