@@ -258,8 +258,8 @@ saved, the stack stays healthy but sync reports `not armed`.
 After every admitted sync, the same locked run queries the tool's install,
 upgrade, and patch inventories. The Sync tab shows one row per component with
 available versions newest first. The last successful catalog is retained on
-the sync state volume across service restarts, and a later failure is shown
-without replacing those results. The catalog describes upstream availability;
+the sync state volume across service restarts, and a later failure, or a filter
+that matches nothing, is shown without replacing those results. The catalog describes upstream availability;
 it does not infer local download presence from depot filenames.
 
 The scheduler takes the depot lock before it launches a run and hands the

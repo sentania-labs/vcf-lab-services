@@ -1845,11 +1845,24 @@ def _catalog_version_key(version):
     )
 
 
+def _catalog_attempt_abandoned(attempt, state):
+    # A sync closes its catalog attempt before it records finishedAt, so an
+    # attempt still open when a run finished at or after it started has lost
+    # its owner. An attempt that started after the last recorded finish is
+    # still owned by a live run, even before that run publishes running.
+    started = attempt.get("startedAt")
+    finished = state.get("finishedAt")
+    if not isinstance(started, str) or not isinstance(finished, str):
+        return False
+    return finished >= started
+
+
 def _catalog(state):
     saved = _read_json(CATALOG_FILE) or {}
     attempt = _read_json(CATALOG_ATTEMPT_FILE) or {}
     items = saved.get("items") if isinstance(saved.get("items"), list) else []
     grouped = {}
+    labels = {}
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -1860,9 +1873,13 @@ def _catalog(state):
         if not isinstance(version, str) or not version.strip():
             continue
         grouped.setdefault(component, []).append(item)
+        name = item.get("name")
+        if isinstance(name, str) and name.strip() and component not in labels:
+            labels[component] = name.strip()
     components = [
         {
             "component": component,
+            "name": labels.get(component, component),
             "versions": sorted(
                 versions,
                 key=lambda item: _catalog_version_key(item.get("version")),
@@ -1879,13 +1896,12 @@ def _catalog(state):
     ):
         attempt_status = "success"
         attempt_error = None
-    elif attempt_status == "running" and not state.get("running", False):
+    elif attempt_status == "running" and _catalog_attempt_abandoned(attempt, state):
         attempt_status = "interrupted"
         attempt_error = "the last catalog update was interrupted"
     return {
         "components": components,
         "updatedAt": saved.get("updatedAt"),
-        "vcfVersion": saved.get("vcfVersion"),
         "attempt": {
             "status": attempt_status,
             "startedAt": attempt.get("startedAt"),

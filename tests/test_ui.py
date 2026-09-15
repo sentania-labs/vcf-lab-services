@@ -3142,7 +3142,6 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             "version": 1,
             "attemptId": "catalog-success",
             "updatedAt": "2026-09-14T12:00:00Z",
-            "vcfVersion": "9.1.0",
             "items": [
                 {"id": "older", "component": "VCENTER", "name": "vCenter",
                  "version": "9.1.0.0.20000000", "date": "2026-01-01",
@@ -3205,7 +3204,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
 
     def test_status_marks_unfinished_catalog_attempt_interrupted(self):
         self.claim()
-        self.write_state(running=False)
+        self.write_state(running=False, finishedAt="2026-09-14T13:02:00Z")
         (self.state_dir / "catalog-attempt.json").write_text(json.dumps({
             "version": 1, "attemptId": "catalog-running", "status": "running",
             "startedAt": "2026-09-14T13:00:00Z",
@@ -3213,6 +3212,75 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         attempt = self.get("/api/status").get_json()["catalog"]["attempt"]
         self.assertEqual(attempt["status"], "interrupted")
         self.assertIn("interrupted", attempt["error"])
+
+    def test_catalog_attempt_opened_after_the_last_finish_is_not_interrupted(self):
+        # A run opens its catalog attempt before it publishes running, so the
+        # console must not report a failure during that window.
+        self.claim()
+        self.write_state(running=False, finishedAt="2026-09-14T12:30:00Z")
+        (self.state_dir / "catalog-attempt.json").write_text(json.dumps({
+            "version": 1, "attemptId": "catalog-running", "status": "running",
+            "startedAt": "2026-09-14T13:00:00Z",
+        }))
+        attempt = self.get("/api/status").get_json()["catalog"]["attempt"]
+        self.assertEqual(attempt["status"], "running")
+        self.assertIsNone(attempt["error"])
+
+    def test_status_labels_components_by_full_name_falling_back_to_the_key(self):
+        self.claim()
+        self.write_state(running=False)
+        (self.state_dir / "catalog.json").write_text(json.dumps({
+            "version": 1, "attemptId": "catalog-success",
+            "updatedAt": "2026-09-14T12:00:00Z",
+            "items": [
+                {"id": "a", "component": "VCENTER", "name": "VMware vCenter",
+                 "version": "9.1.0.0.20000000", "type": "UPGRADE"},
+                {"id": "b", "component": "ESX_HOST", "name": "",
+                 "version": "9.1.0.0.20000000", "type": "PATCH"},
+            ],
+        }))
+        components = self.get("/api/status").get_json()["catalog"]["components"]
+        self.assertEqual({group["component"]: group["name"] for group in components},
+                         {"VCENTER": "VMware vCenter", "ESX_HOST": "ESX_HOST"})
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_reports_empty_catalog_without_claiming_a_successful_update(self):
+        self.claim()
+        self.write_state()
+        status = self.get("/api/status").get_json()
+        status["catalog"] = {
+            "updatedAt": "2026-09-14T12:00:00Z", "components": [],
+            "attempt": {"status": "empty", "finishedAt": "2026-09-14T12:00:00Z",
+                        "error": None},
+        }
+        rendered = self.run_console({"status": status})
+        self.assertIn("No components matched the current filter",
+                      rendered["catalogRows"])
+        self.assertNotIn("No successful catalog is saved yet",
+                         rendered["catalogRows"])
+        self.assertNotIn("Last successful update", rendered["catalogMeta"])
+        self.assertIn("No components matched the current filter",
+                      rendered["catalogMeta"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_shows_the_empty_outcome_beside_retained_components(self):
+        self.claim()
+        self.write_state()
+        status = self.get("/api/status").get_json()
+        status["catalog"] = {
+            "updatedAt": "2026-09-14T12:00:00Z",
+            "components": [{"component": "VCENTER", "name": "VMware vCenter",
+                            "versions": [{"version": "9.1.1.0.25000000",
+                                          "type": "UPGRADE"}]}],
+            "attempt": {"status": "empty", "finishedAt": "2026-09-14T13:00:00Z",
+                        "error": None},
+        }
+        rendered = self.run_console({"status": status})
+        self.assertIn("VMware vCenter", rendered["catalogRows"])
+        self.assertNotIn("VCENTER", rendered["catalogRows"])
+        self.assertIn("Last successful update", rendered["catalogMeta"])
+        self.assertIn("No components matched the current filter",
+                      rendered["catalogMeta"])
 
 
 class BootstrapVersionTests(unittest.TestCase):

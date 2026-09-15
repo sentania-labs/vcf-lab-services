@@ -330,6 +330,12 @@ write_state() {
 catalog_attempt_id=""
 catalog_attempt_started=""
 catalog_attempt_open=false
+catalog_workspace=""
+
+clear_catalog_workspace() {
+	[ -z "$catalog_workspace" ] || rm -rf -- "$catalog_workspace"
+	catalog_workspace=""
+}
 
 write_catalog_attempt() {
 	local status="$1" error="${2:-}" finished="${3:-}" tmp
@@ -364,6 +370,7 @@ fail_catalog_attempt() {
 }
 
 finish_catalog_on_exit() {
+	clear_catalog_workspace
 	[ "$catalog_attempt_open" = true ] || return 0
 	if [ "${sync_rc:-1}" -eq 0 ]; then
 		fail_catalog_attempt "the sync ended before catalog generation completed"
@@ -419,9 +426,10 @@ catalog_rows() {
 }
 
 refresh_catalog() {
-	local workspace mode output rows rc=0 error="" updated tmp count
+	local mode output rows rc=0 error="" updated tmp count previous
 	local -a arguments=()
-	workspace="$(mktemp -d "$STATE_DIR/catalog-build.XXXXXX")" || {
+	catalog_workspace="$(mktemp -d "$STATE_DIR/catalog-build.XXXXXX")" || {
+		catalog_workspace=""
 		fail_catalog_attempt "catalog storage could not be prepared"
 		return 0
 	}
@@ -431,21 +439,21 @@ refresh_catalog() {
 			upgrade) arguments=("--vcf-version=$VCF_VERSION" "--sku=$SKU" --type=UPGRADE) ;;
 			patch) arguments=("--vcf-version=$VCF_VERSION" "--sku=$SKU" --patches-only) ;;
 		esac
-		output="$workspace/$mode.out"
+		output="$catalog_workspace/$mode.out"
 		CATALOG_QUERY_MODE="$mode" "$tool" binaries list "$ceip_opt" "$auth_opt" \
 			"${arguments[@]}" > "$output" 2>&1 || rc=$?
 		if [ "$rc" -ne 0 ]; then
 			error="$mode inventory query failed with exit code $rc"
 			break
 		fi
-		rows="$workspace/$mode.rows"
+		rows="$catalog_workspace/$mode.rows"
 		if ! catalog_rows < "$output" > "$rows"; then
 			error="$mode inventory returned an unreadable component table"
 			break
 		fi
-		if ! jq -Rn --arg query "$mode" \
-			'[inputs | split("\t") | {id:.[0], component:.[1], name:.[2], version:.[3], date:.[4], size:.[5], type:.[6], query:$query}]' \
-			< "$rows" > "$workspace/$mode.json"; then
+		if ! jq -Rn \
+			'[inputs | split("\t") | {id:.[0], component:.[1], name:.[2], version:.[3], date:.[4], size:.[5], type:.[6]}]' \
+			< "$rows" > "$catalog_workspace/$mode.json"; then
 			error="$mode inventory could not be encoded"
 			break
 		fi
@@ -453,32 +461,49 @@ refresh_catalog() {
 	if [ -n "$error" ]; then
 		log "WARNING: catalog update failed: $error; keeping the previous successful catalog"
 		fail_catalog_attempt "$error"
-		rm -rf -- "$workspace"
+		clear_catalog_workspace
 		return 0
 	fi
 	updated="$(now)"
 	tmp="$(mktemp "$STATE_DIR/catalog.json.XXXXXX")" || {
 		log "WARNING: catalog update failed: durable publish could not be prepared; keeping the previous successful catalog"
 		fail_catalog_attempt "catalog storage could not be prepared"
-		rm -rf -- "$workspace"
+		clear_catalog_workspace
 		return 0
 	}
-	if jq -s --arg attempt "$catalog_attempt_id" --arg updated "$updated" \
-		--arg vcfVersion "$VCF_VERSION" \
-		'{version:1, attemptId:$attempt, updatedAt:$updated, vcfVersion:$vcfVersion,
-		  items:([.[][]] | group_by([.id,.component,.version,.type]) |
-		    map(.[0] + {queries:(map(.query) | unique)} | del(.query)))}' \
-		"$workspace/install.json" "$workspace/upgrade.json" "$workspace/patch.json" > "$tmp" \
-		&& mv -- "$tmp" "$catalog_file"; then
-		count="$(jq '.items | length' "$catalog_file" 2>/dev/null || printf unknown)"
-		write_catalog_attempt success "" "$updated"
-		log "catalog updated with $count available bundles from install, upgrade and patch inventories"
+	if ! jq -s --arg attempt "$catalog_attempt_id" --arg updated "$updated" \
+		'{version:1, attemptId:$attempt, updatedAt:$updated,
+		  items:([.[][]] | group_by([.id,.component,.version,.type]) | map(.[0]))}' \
+		"$catalog_workspace/install.json" "$catalog_workspace/upgrade.json" \
+		"$catalog_workspace/patch.json" > "$tmp"; then
+		rm -f -- "$tmp"
+		log "WARNING: catalog update failed during atomic publish; keeping the previous successful catalog"
+		fail_catalog_attempt "catalog could not be published"
+		clear_catalog_workspace
+		return 0
+	fi
+	count="$(jq '.items | length' "$tmp" 2>/dev/null || true)"
+	case "$count" in ''|*[!0-9]*) count=0 ;; esac
+	previous="$(jq '.items | length' "$catalog_file" 2>/dev/null || true)"
+	case "$previous" in ''|*[!0-9]*) previous=0 ;; esac
+	if [ "$count" -eq 0 ] && [ "$previous" -gt 0 ]; then
+		rm -f -- "$tmp"
+		log "no components matched the current filter; keeping the previous catalog of $previous bundles"
+		write_catalog_attempt empty "" "$updated"
+	elif mv -- "$tmp" "$catalog_file"; then
+		if [ "$count" -eq 0 ]; then
+			log "no components matched the current filter, so the catalog lists nothing"
+			write_catalog_attempt empty "" "$updated"
+		else
+			write_catalog_attempt success "" "$updated"
+			log "catalog updated with $count available bundles from install, upgrade and patch inventories"
+		fi
 	else
 		rm -f -- "$tmp"
 		log "WARNING: catalog update failed during atomic publish; keeping the previous successful catalog"
 		fail_catalog_attempt "catalog could not be published"
 	fi
-	rm -rf -- "$workspace"
+	clear_catalog_workspace
 }
 
 not_armed_message() {

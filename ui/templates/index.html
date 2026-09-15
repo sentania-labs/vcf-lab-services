@@ -889,10 +889,12 @@ $('sync-btn').onclick=async()=>{
 
 function renderCatalog(catalog){
   const groups=catalog.components||[], attempt=catalog.attempt||{};
-  $('versions').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${esc(group.component)}</strong></td><td>${(group.versions||[]).map(item=>`<div><strong>${esc(item.version)}</strong> <span class="pill">${esc(item.type)}</span><span class="help">${item.date?` ${esc(item.date)}`:''}${item.size?` · ${esc(item.size)}`:''}</span></div>`).join('')}</td></tr>`).join(''):'<tr><td colspan="2" class="muted">No successful catalog is saved yet.</td></tr>';
+  const blank=catalog.updatedAt?'No components matched the current filter.':'No successful catalog is saved yet.';
+  $('versions').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${esc(group.name||group.component)}</strong></td><td>${(group.versions||[]).map(item=>`<div><strong>${esc(item.version)}</strong> <span class="pill">${esc(item.type)}</span><span class="help">${item.date?` ${esc(item.date)}`:''}${item.size?` · ${esc(item.size)}`:''}</span></div>`).join('')}</td></tr>`).join(''):`<tr><td colspan="2" class="muted">${blank}</td></tr>`;
   const messages=[];
-  if(catalog.updatedAt) messages.push(`Last successful update ${fmt(catalog.updatedAt)}`);
+  if(groups.length&&catalog.updatedAt) messages.push(`Last successful update ${fmt(catalog.updatedAt)}`);
   if(attempt.status==='running') messages.push('Updating after the current sync');
+  if(attempt.status==='empty') messages.push(`No components matched the current filter ${fmt(attempt.finishedAt)}`);
   if(attempt.status==='failed'||attempt.status==='interrupted') messages.push(`Last attempt failed: ${attempt.error||'unknown error'}`);
   $('version-meta').textContent=messages.join('; ');
   $('version-meta').className=attempt.status==='failed'||attempt.status==='interrupted'?'help error':'muted';

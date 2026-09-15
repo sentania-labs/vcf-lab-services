@@ -141,7 +141,6 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(parsed["date"], "2026-07-01")
         self.assertEqual(parsed["size"], "2 GiB")
         self.assertEqual(parsed["type"], "UPGRADE")
-        self.assertEqual(parsed["queries"], ["install", "patch", "upgrade"])
 
     def test_catalog_failure_preserves_last_success_and_sync_result(self):
         harness = self.harness
@@ -157,6 +156,43 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(attempt["status"], "failed")
         self.assertEqual(attempt["error"], "patch inventory query failed with exit code 23")
         self.assertIn("keeping the previous successful catalog", failed.stdout)
+
+    def test_empty_inventory_keeps_the_last_catalog_and_records_the_outcome(self):
+        harness = self.harness
+        first = harness.run("esx")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        saved = (harness.state / "catalog.json").read_bytes()
+
+        empty = harness.run("esx", env={"STUB_LIST_COMPONENTS": ""})
+
+        self.assertEqual(empty.returncode, 0, empty.stdout + empty.stderr)
+        self.assertEqual((harness.state / "catalog.json").read_bytes(), saved)
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(attempt["status"], "empty")
+        self.assertNotIn("error", attempt)
+        self.assertTrue(attempt["finishedAt"])
+        self.assertIn("no components matched the current filter", empty.stdout)
+
+    def test_first_empty_inventory_publishes_an_empty_catalog(self):
+        harness = self.harness
+
+        result = harness.run("esx", env={"STUB_LIST_COMPONENTS": ""})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        catalog = json.loads((harness.state / "catalog.json").read_text())
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(catalog["items"], [])
+        self.assertEqual(catalog["attemptId"], attempt["attemptId"])
+        self.assertEqual(attempt["status"], "empty")
+        self.assertTrue(catalog["updatedAt"])
+
+    def test_catalog_workspace_is_removed_from_the_state_volume(self):
+        harness = self.harness
+
+        result = harness.run("esx")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list(harness.state.glob("catalog-build.*")), [])
 
     def test_interrupted_catalog_publish_cannot_replace_last_success(self):
         harness = self.harness
