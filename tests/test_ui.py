@@ -3213,6 +3213,37 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(attempt["status"], "interrupted")
         self.assertIn("interrupted", attempt["error"])
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_reports_a_reconciled_interrupted_attempt_not_progress(self):
+        # The scheduler reconciles an attempt left running by an unclean stop,
+        # so the console must show the retained catalog and the failure rather
+        # than reporting an update still in progress.
+        self.claim()
+        self.write_state(running=False, finishedAt="2026-09-14T03:10:00Z")
+        (self.state_dir / "catalog.json").write_text(json.dumps({
+            "version": 1, "attemptId": "catalog-older",
+            "updatedAt": "2026-09-14T03:10:00Z",
+            "items": [{"id": "a", "component": "VCENTER", "name": "VMware vCenter",
+                       "version": "9.1.0.0.20000000", "type": "UPGRADE"}],
+        }))
+        (self.state_dir / "catalog-attempt.json").write_text(json.dumps({
+            "version": 1, "attemptId": "catalog-open", "status": "interrupted",
+            "startedAt": "2026-09-21T03:00:05Z",
+            "finishedAt": "2026-09-21T04:00:00Z",
+            "error": "the last catalog update was interrupted",
+        }))
+
+        status = self.get("/api/status").get_json()
+        self.assertEqual(status["catalog"]["attempt"]["status"], "interrupted")
+        self.assertEqual(status["catalog"]["attempt"]["startedAt"],
+                         "2026-09-21T03:00:05Z")
+        rendered = self.run_console({"status": status})
+        self.assertIn("VMware vCenter", rendered["catalogRows"])
+        self.assertIn("Last successful update", rendered["catalogMeta"])
+        self.assertIn("Last attempt failed: the last catalog update was interrupted",
+                      rendered["catalogMeta"])
+        self.assertNotIn("Updating after the current sync", rendered["catalogMeta"])
+
     def test_catalog_attempt_opened_after_the_last_finish_is_not_interrupted(self):
         # A run opens its catalog attempt before it publishes running, so the
         # console must not report a failure during that window.

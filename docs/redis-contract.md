@@ -105,8 +105,11 @@ a target downloaded, failed, or was skipped for depot protection.
 `catalog.json` on the sync state volume is the last successful catalog. It is
 written to a temporary file and renamed into place only after all three
 inventories parse successfully. `catalog-attempt.json` is separate metadata for
-the latest attempt, with `running`, `success`, `empty`, or `failed` status and
-any error. A failed or interrupted attempt therefore never replaces the last
+the latest attempt, with `running`, `success`, `empty`, `failed`, or
+`interrupted` status and any error. A scheduler boot reconciles an attempt
+still marked `running` to `interrupted`, keeping its original start time,
+because a scheduler that is only now starting proves no run it launched
+survives; the attempt that published the saved catalog is left alone. A failed or interrupted attempt therefore never replaces the last
 successful catalog, and an inventory that parses but lists nothing is recorded
 as `empty` without replacing a catalog that did list components. The admin console reads both files during its normal status polling,
 groups entries by the verified Component value, and sorts verified Version

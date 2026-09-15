@@ -199,6 +199,32 @@ handle_request() {
 	esac
 }
 
+# A scheduler that is only now starting proves that no run it launched is
+# still alive, so a catalog attempt left open was ended by the stop before
+# this boot. The published catalog's own attempt is the exception: it reached
+# its durable result and only its metadata write was lost.
+reconcile_catalog_attempt() {
+	local attempt_file="$STATE_DIR/catalog-attempt.json"
+	local open_attempt published tmp_attempt
+	[ -s "$attempt_file" ] || return 0
+	open_attempt="$(jq -r 'select(.status == "running") | .attemptId // "-"' \
+		"$attempt_file" 2>/dev/null || true)"
+	[ -n "$open_attempt" ] || return 0
+	published="$(jq -r '.attemptId // ""' "$STATE_DIR/catalog.json" 2>/dev/null || true)"
+	[ "$open_attempt" != "$published" ] || return 0
+	tmp_attempt="$(mktemp "$STATE_DIR/catalog-attempt.json.XXXXXX")"
+	if jq --arg finished "$(date -u +%FT%TZ)" \
+		'. + {status:"interrupted", finishedAt:$finished,
+		      error:"the last catalog update was interrupted"}' \
+		"$attempt_file" > "$tmp_attempt" 2>/dev/null && [ -s "$tmp_attempt" ]; then
+		mv "$tmp_attempt" "$attempt_file"
+		echo "[scheduler] the last catalog update did not finish before the previous stop"
+	else
+		rm -f "$tmp_attempt"
+		echo "[scheduler] WARNING: could not reconcile the unfinished catalog attempt"
+	fi
+}
+
 init_state() {
 	mkdir -p "$STATE_DIR"
 	# The admin console opens this lock read only to tell whether a run already
@@ -206,6 +232,7 @@ init_state() {
 	[ -e "$STATE_DIR/settings-snapshot.lock" ] || : > "$STATE_DIR/settings-snapshot.lock"
 	local armed=false tmp_state
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
+	reconcile_catalog_attempt
 	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
 	if ! jq --argjson armed "$armed" '. + {running:false, armed:$armed, currentTarget:null}' \
 		"$STATE_DIR/state.json" > "$tmp_state" 2>/dev/null || [ ! -s "$tmp_state" ]; then

@@ -186,13 +186,26 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(attempt["status"], "empty")
         self.assertTrue(catalog["updatedAt"])
 
-    def test_catalog_workspace_is_removed_from_the_state_volume(self):
+    def test_catalog_workspace_is_cleared_when_a_run_is_terminated(self):
+        # The workspace lives on the durable state volume, so a run stopped
+        # between inventory queries must reap it through the exit path.
         harness = self.harness
+        faults = harness.root / "catalog-term.bash"
+        faults.write_text(
+            'jq() {\n'
+            '  if [ "${1:-}" = -Rn ]; then kill -TERM $$; fi\n'
+            '  command jq "$@"\n'
+            '}\n'
+        )
 
-        result = harness.run("esx")
+        terminated = harness.run("esx", bash_env=faults)
 
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(terminated.returncode, 143,
+                         terminated.stdout + terminated.stderr)
         self.assertEqual(list(harness.state.glob("catalog-build.*")), [])
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(attempt["status"], "failed")
+        self.assertIn("ended before catalog generation completed", attempt["error"])
 
     def test_interrupted_catalog_publish_cannot_replace_last_success(self):
         harness = self.harness
