@@ -41,7 +41,7 @@ primary_pid=$!
 sleep 0.1
 run_sync patches > "$work_dir/locked-secondary.log"
 wait "$primary_pid"
-grep -q 'another sync or versions refresh already holds the depot lock, skipping this trigger' \
+grep -q 'another sync already holds the depot lock, skipping this trigger' \
 	"$work_dir/locked-secondary.log"
 grep -qx 'written' "$work_dir/tool/conf/telemetry/telemetry.flag"
 

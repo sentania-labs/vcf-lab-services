@@ -25,7 +25,13 @@ if [ ! -s "$state_dir/machine_id" ]; then
 fi
 
 # Tests that need to know which subcommands ran name a file in STUB_CALL_LOG.
-[ -z "${STUB_CALL_LOG:-}" ] || printf '%s %s\n' "${1:-}" "${2:-}" >> "$STUB_CALL_LOG"
+if [ -n "${STUB_CALL_LOG:-}" ]; then
+	if [ -n "${CATALOG_QUERY_MODE:-}" ]; then
+		printf 'catalog %s\n' "$CATALOG_QUERY_MODE" >> "$STUB_CALL_LOG"
+	else
+		printf '%s %s\n' "${1:-}" "${2:-}" >> "$STUB_CALL_LOG"
+	fi
+fi
 
 if [ "${1:-}" = "--version" ]; then
 	cat <<'VERSION'
@@ -63,6 +69,8 @@ components_for_filter() {
 }
 
 if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
+	[ -z "${STUB_FAIL_CATALOG_MODE:-}" ] \
+		|| [ "${STUB_FAIL_CATALOG_MODE}" != "${CATALOG_QUERY_MODE:-}" ] || exit 23
 	[ "${STUB_FAIL_TARGET:-}" != list ] || exit 23
 	printf '*********Welcome to VCF Download Tool***********\n\nVersion: 0.0.0.0.20000000\n'
 	printf 'Validating depot credentials.\nDepot credentials are valid.\n'
@@ -72,13 +80,18 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	fi
 	# shellcheck disable=SC2046
 	set -- $(components_for_filter "$@")
+	row_type=UPGRADE
+	case " ${*:-} ${CATALOG_QUERY_MODE:-} " in
+		*" install "*) row_type=INSTALL ;;
+		*" patch "*) row_type=PATCH ;;
+	esac
 	printf 'ID                                   | Component | Component Full Name | Version | Release Date | Size | Type\n'
 	printf -- '-----\n'
 	index=0
 	for component in "$@"; do
 		index=$((index + 1))
-		printf '%08x-0000-4000-8000-%012d | %s | Stub %s | 9.1.0.0.20000000 | 2026-01-01 | 1 KiB | UPGRADE\n' \
-			"$index" "$index" "$component" "$component"
+		printf '%08x-0000-4000-8000-%012d | %s | Stub %s | 9.1.0.0.20000000 | 2026-01-01 | 1 KiB | %s\n' \
+			"$index" "$index" "$component" "$component" "$row_type"
 	done
 	[ -z "${STUB_LIST_RAW_ROWS:-}" ] || printf '%s\n' "$STUB_LIST_RAW_ROWS"
 	printf -- '-----\n%s elements\n' "$#"

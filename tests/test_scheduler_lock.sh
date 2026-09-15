@@ -6,8 +6,8 @@
 # slowed by 50ms, exactly as in the reproduction where a scheduler that let
 # housekeeping take the lock ahead of a run it had just launched made that
 # run skip itself on every trial. With the lock handed to the run at launch,
-# every trial runs, while genuinely concurrent syncs and versions refreshes
-# stay excluded, a killed run releases the lock, and a lock that cannot be
+# every trial runs, while the post-sync catalog stays inside the inherited
+# lock, a killed run releases it, and a lock that cannot be
 # opened is reported as a failure rather than as a run in progress.
 set -euo pipefail
 
@@ -85,9 +85,10 @@ cat > "$work_dir/tool/bin/vcf-download-tool" <<'STUB'
 #!/bin/bash
 control_dir="${STUB_CONTROL_DIR:?}"
 if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
-	echo "list $$" >> "$control_dir/tool-calls.log"
+	echo "catalog ${CATALOG_QUERY_MODE:-unknown} $$" >> "$control_dir/tool-calls.log"
 	sleep "$(cat "$control_dir/list-sleep" 2>/dev/null || echo 0)"
-	echo "stub versions output"
+	printf 'ID                                   | Component | Component Full Name | Version | Release Date | Size | Type\n'
+	printf '11111111-1111-4111-8111-111111111111 | VCENTER | Stub vCenter | 9.1.0.0.20000000 | 2026-01-01 | 1 KiB | UPGRADE\n'
 	exit 0
 fi
 echo "download $$" >> "$control_dir/tool-calls.log"
@@ -126,7 +127,7 @@ bash "$project_dir/sync/entrypoint.sh" > "$scheduler_log" 2>&1 &
 scheduler_pid=$!
 
 completed='sync finished overall rc=0'
-skipped='another sync or versions refresh already holds the depot lock, skipping this trigger'
+skipped='another sync already holds the depot lock, skipping this trigger'
 admitted='diag: lock acquired op=sync fd=9'
 enqueue() { printf '%s\n' "$1" >> "$FAKE_QUEUE_FILE"; }
 # A negated command is exempt from errexit, so absence is asserted explicitly.
@@ -161,6 +162,7 @@ done
 [ "$(count "$completed")" -eq 10 ]
 [ "$(count "$skipped")" -eq 0 ]
 [ "$(grep -c '^download ' "$tool_calls")" -eq 10 ]
+[ "$(grep -c '^catalog ' "$tool_calls")" -eq 30 ]
 jq -e '.running == false and .armed == true and .lastRun.esx.status == "OK"' \
 	"$work_dir/state/state.json" >/dev/null
 # The lock the run holds is the one the scheduler took for it: same file, same
@@ -177,23 +179,6 @@ grep -Eq "\[sync [^]]*\] diag: lock acquired op=sync fd=9 dev=[0-9a-f]+:[0-9a-f]
 grep -Eq "\[sync [^]]*\] diag: lock released op=sync fd=9 dev=[0-9a-f]+:[0-9a-f]+ ino=$lock_inode pid=$launched exit=0$" \
 	"$scheduler_log"
 echo "dispatch under active housekeeping tests passed: $(count "$completed") of 10 requested runs admitted, $(count "$skipped") skipped"
-
-# A versions refresh requested while housekeeping is active runs every time
-# as well, instead of being refused by the loop that launched it.
-for trial in 1 2 3 4 5; do
-	enqueue '{"kind":"versions"}'
-	wait_until "[ \$(grep -c '^list ' '$tool_calls' || true) -ge $trial ] || grep -q 'versions refresh skipped' '$scheduler_log'" 20 \
-		"versions trial $trial neither ran nor was refused"
-done
-[ "$(grep -c '^list ' "$tool_calls")" -eq 5 ]
-absent 'versions refresh skipped' "$scheduler_log"
-wait_until "[ \$(count 'diag: lock released op=versions-refresh fd=8') -ge 5 ]" 10 \
-	"a versions refresh did not release the lock"
-grep -Eq "\[scheduler\] diag: lock acquired op=versions-refresh fd=8 dev=[0-9a-f]+:[0-9a-f]+ ino=$lock_inode pid=$scheduler_pid$" \
-	"$scheduler_log"
-grep -Eq "\[scheduler\] diag: lock handed off op=versions-refresh fd=8 pid=$scheduler_pid to=[0-9]+$" \
-	"$scheduler_log"
-echo "versions refresh under active housekeeping tests passed: $(grep -c '^list ' "$tool_calls") of 5 requested refreshes ran"
 
 # The scheduler polls its queue about every two seconds, so each held window
 # below is long enough for a request made at its start to be picked up inside it.
@@ -213,28 +198,20 @@ grep -q '\[scheduler\] diag: lock contended op=armed-refresh fd=8' "$scheduler_l
 absent 'ERROR: could not' "$scheduler_log"
 echo "concurrent sync exclusion tests passed"
 
-# A versions refresh during a run is skipped without calling the tool, and a
-# run requested during a versions refresh is refused while the refresh finishes.
-enqueue '{"kind":"sync","targets":["esx"]}'
-wait_until "[ \$(count '$admitted') -ge 12 ]" 10 "the second long run was not admitted"
-enqueue '{"kind":"versions"}'
-wait_until "grep -q 'versions refresh skipped: a sync or refresh already holds the depot lock' '$scheduler_log'" 10 \
-	"the versions refresh was not refused during a run"
-wait_until "[ \$(count '$completed') -ge 12 ]" 15 "the second long run did not finish"
-[ "$(grep -c '^list ' "$tool_calls")" -eq 5 ]
+# Catalog generation remains part of the run that inherited fd 9. A second
+# request made while the catalog query is in flight is refused by that lock.
 echo 0 > "$control_dir/download-sleep"
 echo 5 > "$control_dir/list-sleep"
-enqueue '{"kind":"versions"}'
-wait_until "grep -q '^list ' '$tool_calls'" 10 "the versions refresh did not start"
 enqueue '{"kind":"sync","targets":["esx"]}'
-wait_until "[ \$(count '$skipped') -ge 2 ]" 10 "the run was not refused during a versions refresh"
-wait_until "[ \$(count 'diag: lock released op=versions-refresh fd=8') -ge 6 ]" 15 \
-	"the versions refresh did not finish"
+wait_until "[ \$(count '$admitted') -ge 12 ]" 10 "the catalog-holding run was not admitted"
+wait_until "[ \$(grep -c '^catalog ' '$tool_calls' || true) -ge 34 ]" 10 "the catalog query did not start"
+enqueue '{"kind":"sync","targets":["esx"]}'
+wait_until "[ \$(count '$skipped') -ge 2 ]" 10 "the run was not refused during catalog generation"
+wait_until "[ \$(count '$completed') -ge 12 ]" 25 "the catalog-holding run did not finish"
 echo 0 > "$control_dir/list-sleep"
 [ "$(count "$completed")" -eq 12 ]
-[ "$(grep -c '^list ' "$tool_calls")" -eq 6 ]
-grep -q 'vcf-services:sync:versions' "$FAKE_SET_LOG"
-echo "versions refresh exclusion tests passed"
+[ "$(grep -c '^catalog ' "$tool_calls")" -eq 36 ]
+echo "catalog lock ownership tests passed"
 
 # A run killed outright releases the lock once its download stops, and the
 # next request is admitted; nothing has to be removed to recover.
@@ -274,7 +251,7 @@ grep -Eq 'diag: sync launched pid=[0-9]+ ppid=[0-9]+ targets=configured$' "$sche
 echo "scheduled dispatch hand-off tests passed"
 
 # A lock that cannot be opened is a reported failure, not a run in progress,
-# for housekeeping (reported once per reason) and for a versions refresh.
+# for housekeeping, reported once per reason.
 broken_state="$work_dir/broken-state"
 mkdir -p "$broken_state/sync.lock"
 broken_set_log="$work_dir/broken-set.log"
@@ -292,15 +269,11 @@ touch "$broken_set_log"
 	source "$project_dir/sync/entrypoint.sh"
 	refresh_armed_state
 	refresh_armed_state
-	refresh_versions
 	echo "scheduler-functions-survived"
 ) > "$work_dir/broken.log" 2>&1
 grep -q 'scheduler-functions-survived' "$work_dir/broken.log"
 [ "$(grep -c "ERROR: armed-state refresh could not take the depot lock: could not open $broken_state/sync.lock (Is a directory)" "$work_dir/broken.log")" -eq 1 ]
-grep -q "ERROR: versions refresh could not take the depot lock: could not open $broken_state/sync.lock (Is a directory)" \
-	"$work_dir/broken.log"
 absent 'already holds the depot lock' "$work_dir/broken.log"
-grep -q 'vcf-services:sync:versions' "$broken_set_log"
 [ -d "$broken_state/sync.lock" ]
 echo "lock failure reporting tests passed"
 

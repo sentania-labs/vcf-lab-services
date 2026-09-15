@@ -45,6 +45,8 @@ apply_settings_defaults() {
 status_key="vcf-services:sync:status"
 log_key="vcf-services:sync:log"
 state_file="$STATE_DIR/state.json"
+catalog_file="$STATE_DIR/catalog.json"
+catalog_attempt_file="$STATE_DIR/catalog-attempt.json"
 tool="$TOOL_ROOT/bin/vcf-download-tool"
 mkdir -p "$STATE_DIR"
 
@@ -325,6 +327,160 @@ write_state() {
 	fi
 }
 
+catalog_attempt_id=""
+catalog_attempt_started=""
+catalog_attempt_open=false
+
+write_catalog_attempt() {
+	local status="$1" error="${2:-}" finished="${3:-}" tmp
+	tmp="$(mktemp "$STATE_DIR/catalog-attempt.json.XXXXXX")" || {
+		log "WARNING: could not create catalog attempt metadata"
+		return 0
+	}
+	if jq -n --arg id "$catalog_attempt_id" --arg status "$status" \
+		--arg started "$catalog_attempt_started" --arg finished "$finished" \
+		--arg error "$error" \
+		'{version:1, attemptId:$id, status:$status, startedAt:$started}
+		 | if $finished != "" then .finishedAt=$finished else . end
+		 | if $error != "" then .error=$error else . end' > "$tmp" \
+		&& mv -- "$tmp" "$catalog_attempt_file"; then
+		[ "$status" = running ] || catalog_attempt_open=false
+	else
+		rm -f -- "$tmp"
+		log "WARNING: could not publish catalog attempt metadata"
+	fi
+}
+
+begin_catalog_attempt() {
+	catalog_attempt_started="$(now)"
+	catalog_attempt_id="catalog-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
+	catalog_attempt_open=true
+	write_catalog_attempt running
+}
+
+fail_catalog_attempt() {
+	[ "$catalog_attempt_open" = true ] || return 0
+	write_catalog_attempt failed "$1" "$(now)"
+}
+
+finish_catalog_on_exit() {
+	[ "$catalog_attempt_open" = true ] || return 0
+	if [ "${sync_rc:-1}" -eq 0 ]; then
+		fail_catalog_attempt "the sync ended before catalog generation completed"
+	else
+		fail_catalog_attempt "the sync ended before catalog generation completed (sync exit ${sync_rc:-1})"
+	fi
+}
+
+# Read the tool's real table headings rather than assigning component or
+# version names from the query that produced them. Component is fixed on the
+# left of the table. Version, release date, size and type are fixed on the
+# right, so a Full Name containing the delimiter is retained without shifting
+# those verified fields.
+catalog_rows() {
+	awk -F'|' '
+		function trim(text) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", text); return text }
+		header == 0 {
+			for (i = 1; i <= NF; i++) cell[i] = trim($i)
+			if (NF == 7 && cell[1] == "ID" && cell[2] == "Component" &&
+			    cell[3] == "Component Full Name" &&
+			    cell[NF-3] == "Version" && cell[NF-2] == "Release Date" &&
+			    cell[NF-1] == "Size" && cell[NF] == "Type") {
+				header = NF
+				name_column = 3
+			}
+			next
+		}
+		index($0, "|") == 0 { next }
+		{
+			id = trim($1)
+			if (length(id) != 36 || id !~ /^[0-9A-Fa-f-]+$/ ||
+			    substr(id,9,1) != "-" || substr(id,14,1) != "-" ||
+			    substr(id,19,1) != "-" || substr(id,24,1) != "-") next
+			hex = id
+			gsub(/-/, "", hex)
+			if (length(hex) != 32) next
+			if (NF < header) { bad = 1; exit 4 }
+			shift = NF - header
+			version_column = header - 3 + shift
+			component = trim($2)
+			version = trim($version_column)
+			date = trim($(version_column + 1))
+			size = trim($(version_column + 2))
+			type = trim($(version_column + 3))
+			name = ""
+			for (i = name_column; i < version_column; i++) {
+				name = name (name == "" ? "" : " | ") trim($i)
+			}
+			if (component == "" || version == "" || type == "") { bad = 1; exit 4 }
+			print id "\t" component "\t" name "\t" version "\t" date "\t" size "\t" type
+		}
+		END { if (header == 0) exit 3; if (bad) exit 4 }'
+}
+
+refresh_catalog() {
+	local workspace mode output rows rc=0 error="" updated tmp count
+	local -a arguments=()
+	workspace="$(mktemp -d "$STATE_DIR/catalog-build.XXXXXX")" || {
+		fail_catalog_attempt "catalog storage could not be prepared"
+		return 0
+	}
+	for mode in install upgrade patch; do
+		case "$mode" in
+			install) arguments=("--vcf-version=$VCF_VERSION" "--sku=$SKU" --automated-install --type=INSTALL) ;;
+			upgrade) arguments=("--vcf-version=$VCF_VERSION" "--sku=$SKU" --type=UPGRADE) ;;
+			patch) arguments=("--vcf-version=$VCF_VERSION" "--sku=$SKU" --patches-only) ;;
+		esac
+		output="$workspace/$mode.out"
+		CATALOG_QUERY_MODE="$mode" "$tool" binaries list "$ceip_opt" "$auth_opt" \
+			"${arguments[@]}" > "$output" 2>&1 || rc=$?
+		if [ "$rc" -ne 0 ]; then
+			error="$mode inventory query failed with exit code $rc"
+			break
+		fi
+		rows="$workspace/$mode.rows"
+		if ! catalog_rows < "$output" > "$rows"; then
+			error="$mode inventory returned an unreadable component table"
+			break
+		fi
+		if ! jq -Rn --arg query "$mode" \
+			'[inputs | split("\t") | {id:.[0], component:.[1], name:.[2], version:.[3], date:.[4], size:.[5], type:.[6], query:$query}]' \
+			< "$rows" > "$workspace/$mode.json"; then
+			error="$mode inventory could not be encoded"
+			break
+		fi
+	done
+	if [ -n "$error" ]; then
+		log "WARNING: catalog update failed: $error; keeping the previous successful catalog"
+		fail_catalog_attempt "$error"
+		rm -rf -- "$workspace"
+		return 0
+	fi
+	updated="$(now)"
+	tmp="$(mktemp "$STATE_DIR/catalog.json.XXXXXX")" || {
+		log "WARNING: catalog update failed: durable publish could not be prepared; keeping the previous successful catalog"
+		fail_catalog_attempt "catalog storage could not be prepared"
+		rm -rf -- "$workspace"
+		return 0
+	}
+	if jq -s --arg attempt "$catalog_attempt_id" --arg updated "$updated" \
+		--arg vcfVersion "$VCF_VERSION" \
+		'{version:1, attemptId:$attempt, updatedAt:$updated, vcfVersion:$vcfVersion,
+		  items:([.[][]] | group_by([.id,.component,.version,.type]) |
+		    map(.[0] + {queries:(map(.query) | unique)} | del(.query)))}' \
+		"$workspace/install.json" "$workspace/upgrade.json" "$workspace/patch.json" > "$tmp" \
+		&& mv -- "$tmp" "$catalog_file"; then
+		count="$(jq '.items | length' "$catalog_file" 2>/dev/null || printf unknown)"
+		write_catalog_attempt success "" "$updated"
+		log "catalog updated with $count available bundles from install, upgrade and patch inventories"
+	else
+		rm -f -- "$tmp"
+		log "WARNING: catalog update failed during atomic publish; keeping the previous successful catalog"
+		fail_catalog_attempt "catalog could not be published"
+	fi
+	rm -rf -- "$workspace"
+}
+
 not_armed_message() {
 	log "not armed: activation code missing"
 	log "Register the Software Depot ID and save the activation code in the admin console."
@@ -365,7 +521,7 @@ case "$lock_rc" in
 		diag "lock acquired op=sync $(lock_identity 9) pid=$$ ppid=$PPID source=$lock_source"
 		;;
 	1)
-		log "another sync or versions refresh already holds the depot lock, skipping this trigger"
+		log "another sync already holds the depot lock, skipping this trigger"
 		diag "lock contended op=sync $(lock_identity 9) pid=$$ ppid=$PPID source=$lock_source"
 		exit 0
 		;;
@@ -379,7 +535,8 @@ sync_rc=0
 diag_lock_release() {
 	diag "lock released op=sync $(lock_identity 9) pid=$$ exit=$sync_rc"
 }
-trap 'sync_rc=$?; diag_lock_release' EXIT
+begin_catalog_attempt
+trap 'sync_rc=$?; finish_catalog_on_exit; diag_lock_release' EXIT
 
 if [ -d "$comp_root" ]; then
 	while IFS= read -r -d '' tree; do
@@ -423,6 +580,7 @@ if [ "$#" -gt 0 ]; then SYNC_TARGETS="$*"; fi
 if [ ! -x "$tool" ]; then
 	write_state '. + {running:false, currentTarget:null}'
 	log "VCF Download Tool is not installed; upload it in the admin console"
+	fail_catalog_attempt "VCF Download Tool is not installed"
 	exit 1
 fi
 tool_lock="$VCFDT_TOOL_STORE/.update.lock"
@@ -430,6 +588,7 @@ if [ ! -e "$tool_lock" ]; then
 	write_state '. + {running:false, currentTarget:null}'
 	log "ERROR: the tool volume has no $tool_lock update lock; the tool store is incomplete"
 	log "Re-upload the VCF Download Tool in the admin console to repair the tool volume."
+	fail_catalog_attempt "the VCF Download Tool store is incomplete"
 	exit 1
 fi
 exec 7<"$tool_lock"
@@ -468,7 +627,7 @@ stop_log_publisher() {
 	fi
 	publish_log_tail
 }
-trap 'sync_rc=$?; diag_lock_release; stop_log_publisher' EXIT
+trap 'sync_rc=$?; finish_catalog_on_exit; diag_lock_release; stop_log_publisher' EXIT
 
 prune_logs() {
 	if [[ "$LOG_RETENTION" =~ ^[1-9][0-9]*$ ]]; then
@@ -482,11 +641,13 @@ prune_logs
 if [ ! -s "$AUTH_FILE" ]; then
 	write_state '. + {running:false, armed:false, currentTarget:null}'
 	not_armed_message
+	fail_catalog_attempt "not armed: activation code missing"
 	exit 0
 fi
 
 if [ "$CEIP" != "DISABLE" ] && [ "$CEIP" != "ENABLE" ]; then
 	log "ERROR: CEIP must be explicitly set to ENABLE or DISABLE"
+	fail_catalog_attempt "CEIP is not set to ENABLE or DISABLE"
 	exit 2
 fi
 
@@ -499,6 +660,7 @@ write_state '. + {running:true, armed:true, currentTarget:null, startedAt:$t, ta
 	--arg t "$(now)" --arg targets "$SYNC_TARGETS"
 
 finish_state() {
+	finish_catalog_on_exit
 	write_state '. + {running:false, currentTarget:null, finishedAt:$t}' --arg t "$(now)"
 	[ -z "$fingerprint_dir" ] || rm -rf -- "$fingerprint_dir"
 	diag_lock_release
@@ -640,6 +802,11 @@ for target in $SYNC_TARGETS; do
 		--arg toolVersion "$tool_version" --arg toolReleaseId "$tool_release_id" \
 		--argjson toolBacked "$tool_backed_target"
 done
+
+# The run already owns the depot lock on fd 9 and the tool update lock on fd
+# 7. Generate the catalog here without opening or flocking either file again.
+# A catalog failure is reported separately and never changes the sync result.
+refresh_catalog
 
 if [ "$overall_rc" -eq 0 ] && [ "$successful_tool_sync" = true ]; then
 	previous_link="$VCFDT_TOOL_STORE/previous"

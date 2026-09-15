@@ -153,29 +153,6 @@ grep -q 'Sync dispatch is disabled' "$work_dir/blocked.log"
 [ ! -s "$dispatch_log" ]
 echo "version mismatch safe-stop tests passed"
 
-refresh_set_log="$work_dir/refresh-set.log"
-touch "$refresh_set_log"
-(
-	export FAKE_SET_LOG="$refresh_set_log"
-	export PATH="$stub_bin:$PATH"
-	export SETTINGS_FILE="$settings"
-	export STATE_DIR="$work_dir/state"
-	export AUTH_FILE="$work_dir/activation-code.txt"
-	export TOOL_ROOT="$work_dir/tool"
-	export REDIS_HOST=stub
-	# shellcheck source=/dev/null
-	source "$project_dir/sync/entrypoint.sh"
-	exec 7>"$STATE_DIR/sync.lock"
-	flock 7
-	refresh_versions
-	flock -u 7
-	exec 7>&-
-	refresh_versions
-)
-[ "$(grep -c '^invoked$' "$work_dir/tool-calls.log")" -eq 1 ]
-[ "$(grep -c 'vcf-services:sync:versions' "$refresh_set_log")" -eq 2 ]
-echo "versions refresh lock tests passed"
-
 armed_set_log="$work_dir/armed-set.log"
 touch "$armed_set_log"
 mkdir -p "$work_dir/state-armed"
@@ -210,7 +187,7 @@ armed_state_inode="$(stat -c %i "$work_dir/state-armed/state.json")"
 echo "armed-state skip-unchanged tests passed"
 
 printf '%s\n' '{"kind":"sync","targets":["patches","bogus"]}' > "$FAKE_QUEUE_FILE"
-printf '%s\n' '{"kind":"versions"}' >> "$FAKE_QUEUE_FILE"
+printf '%s\n' '{"kind":"unknown"}' >> "$FAKE_QUEUE_FILE"
 
 PATH="$stub_bin:$PATH" \
 SETTINGS_FILE="$settings" \
@@ -227,7 +204,7 @@ sleep 4
 grep -q 'vcf-services:sync:status' "$FAKE_SET_LOG"
 grep -q '^dispatch:patches$' "$dispatch_log"
 ! grep -q bogus "$dispatch_log"
-grep -q 'vcf-services:sync:versions' "$FAKE_SET_LOG"
+grep -q "ignored unknown request kind 'unknown'" "$work_dir/scheduler.log"
 ! grep -q '^dispatch:$' "$dispatch_log"
 jq -e '.running == false' "$work_dir/state/state.json" >/dev/null
 

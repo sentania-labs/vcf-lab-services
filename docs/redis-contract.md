@@ -20,7 +20,6 @@ services must follow the same pattern with their own prefix
 | `vcf-services:sync:requests` | list (queue) | admin console (`LPUSH`) | sync scheduler (`BRPOP`) |
 | `vcf-services:sync:status` | string (JSON) | sync run (`SET` on every state change) | admin console |
 | `vcf-services:sync:log` | string (last 500 log lines) | sync run (`SET`, refreshed every 2 seconds) | admin console |
-| `vcf-services:sync:versions` | string (JSON) | sync scheduler | admin console |
 
 ## Request shape (`vcf-services:sync:requests`)
 
@@ -30,8 +29,8 @@ Each queue entry is one JSON object:
 {"kind": "sync", "targets": ["esx", "patches"], "requestedAt": "2026-08-13T00:00:00+00:00"}
 ```
 
-- `kind`: `sync` dispatches a run of the listed targets. `versions` asks the
-  scheduler to refresh `vcf-services:sync:versions`. Unknown kinds are ignored.
+- `kind`: `sync` dispatches a run of the listed targets. Unknown kinds are
+  ignored.
 - `targets`: required for `sync`. The publisher must validate entries against
   `esx`, `install`, `upgrade`, `patches`, `vkr`; the scheduler drops anything
   else and ignores a request with no valid target.
@@ -41,9 +40,9 @@ The scheduler invokes `sync.sh` locally for each accepted request. The
 scheduler takes the depot lock before it launches the run and hands the locked
 descriptor to it, so the scheduler's own housekeeping can never take the lock
 ahead of a run it just launched. The persistent `flock` inside `sync.sh`
-remains the single-writer control: a request that arrives while another run or
-a versions refresh holds the lock exits with "another sync or versions refresh
-already holds the depot lock, skipping this trigger". A lock that cannot be
+remains the single-writer control: a request that arrives while another run
+holds the lock exits with "another sync already holds the depot lock, skipping
+this trigger". A lock that cannot be
 opened or taken at all is reported as an `ERROR` and the run refuses to
 continue.
 
@@ -95,16 +94,20 @@ false plus `startupBlocked: true` and a `startupError` message, republished
 every poll interval while the startup block remains. See the
 [config recovery guidance](../README.md#storage-ownership).
 
-## Versions shape (`vcf-services:sync:versions`)
+## Durable available-component catalog
 
-```json
-{"output": "<raw VCFDT binaries list output>", "fetchedAt": "2026-08-13T00:00:00Z", "exitCode": 0}
-```
+Every admitted sync queries the download tool's supported install, upgrade and
+patch inventories after its targets finish, while the run still owns the depot
+and tool locks. It parses the table's actual Component, Version, Type, Release
+Date, Size and Component Full Name fields. The result is independent of whether
+a target downloaded, failed, or was skipped for depot protection.
 
-On failure the scheduler stores `{"error": "...", "fetchedAt": "..."}` instead:
-`not armed: activation code missing` when the sync engine is dormant,
-`refresh skipped: a sync or refresh is already running, retry when it finishes`
-when the depot lock is held and no earlier versions value exists,
-`VCF Download Tool is not installed; upload it in the admin console` when no
-executable tool is mounted, or a re-upload instruction when the mounted tool
-volume is missing its update lock.
+`catalog.json` on the sync state volume is the last successful catalog. It is
+written to a temporary file and renamed into place only after all three
+inventories parse successfully. `catalog-attempt.json` is separate metadata for
+the latest attempt, with `running`, `success`, or `failed` status and any error.
+A failed or interrupted attempt therefore never replaces the last successful
+catalog. The admin console reads both files during its normal status polling,
+groups entries by the verified Component value, and sorts verified Version
+values newest first. It does not infer whether an upstream entry is already
+downloaded in the local depot.

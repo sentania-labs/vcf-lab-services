@@ -2342,7 +2342,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "new-password",
                 "save-password",
             },
-            "tab-sync": {"sync-btn", "refresh-remote"},
+            "tab-sync": {"sync-btn"},
             "tab-depot": {
                 "depot-refresh",
                 "depot-up",
@@ -3135,20 +3135,84 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.post("/api/logout")
         self.assertEqual(self.get("/api/schedule/preview?cron=0+3+*+*+*").status_code, 401)
 
-    def test_versions_parse_bus_document(self):
+    def test_status_reads_durable_catalog_newest_first_after_restart(self):
         self.claim()
-        doc = {
-            "output": (
-                "11111111-1111-4111-8111-111111111111 | SDDC_MANAGER | Stub bundle "
-                "| 9.1.0.0.20000000 | 2026-01-01 | 1 KiB | UPGRADE"
-            ),
-            "fetchedAt": "2026-08-13T00:00:00Z",
-            "exitCode": 0,
+        self.write_state(running=False)
+        catalog = {
+            "version": 1,
+            "attemptId": "catalog-success",
+            "updatedAt": "2026-09-14T12:00:00Z",
+            "vcfVersion": "9.1.0",
+            "items": [
+                {"id": "older", "component": "VCENTER", "name": "vCenter",
+                 "version": "9.1.0.0.20000000", "date": "2026-01-01",
+                 "size": "1 GiB", "type": "UPGRADE"},
+                {"id": "esx", "component": "ESX_HOST", "name": "ESX",
+                 "version": "9.1.0.0100.25429019", "date": "2026-08-01",
+                 "size": "2 GiB", "type": "PATCH"},
+                {"id": "newer", "component": "VCENTER", "name": "vCenter",
+                 "version": "9.1.1.0.25000000", "date": "2026-07-01",
+                 "size": "1 GiB", "type": "UPGRADE"},
+            ],
         }
-        bus = self.fake_bus({"vcf-services:sync:versions": json.dumps(doc)})
-        with mock.patch.object(self.module, "_redis", return_value=bus):
-            body = self.get("/api/versions/remote").get_json()
-        self.assertEqual(body["components"][0]["build"], "20000000")
+        (self.state_dir / "catalog.json").write_text(json.dumps(catalog))
+        (self.state_dir / "catalog-attempt.json").write_text(json.dumps({
+            "version": 1, "attemptId": "catalog-failed", "status": "failed",
+            "startedAt": "2026-09-14T13:00:00Z",
+            "finishedAt": "2026-09-14T13:01:00Z",
+            "error": "patch inventory query failed with exit code 23",
+        }))
+
+        body = self.get("/api/status").get_json()["catalog"]
+        self.assertEqual([group["component"] for group in body["components"]],
+                         ["ESX_HOST", "VCENTER"])
+        self.assertEqual(
+            [item["version"] for item in body["components"][1]["versions"]],
+            ["9.1.1.0.25000000", "9.1.0.0.20000000"],
+        )
+        self.assertEqual(body["updatedAt"], "2026-09-14T12:00:00Z")
+        self.assertEqual(body["attempt"]["status"], "failed")
+        self.assertIn("patch inventory", body["attempt"]["error"])
+
+        _module, restarted = self.new_worker()
+        restarted_body = restarted.get(
+            "/api/status", base_url="https://localhost"
+        ).get_json()["catalog"]
+        self.assertEqual(restarted_body, body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_renders_grouped_saved_catalog_and_failure(self):
+        self.claim()
+        self.write_state()
+        status = self.get("/api/status").get_json()
+        status["catalog"] = {
+            "updatedAt": "2026-09-14T12:00:00Z",
+            "components": [{"component": "VCENTER", "versions": [
+                {"version": "9.1.1.0.25000000", "type": "UPGRADE",
+                 "date": "2026-07-01", "size": "1 GiB"},
+                {"version": "9.1.0.0.20000000", "type": "INSTALL",
+                 "date": "2026-01-01", "size": "900 MiB"},
+            ]}],
+            "attempt": {"status": "failed", "error": "patch inventory failed"},
+        }
+        rendered = self.run_console({"status": status})
+        self.assertEqual(rendered["catalogRows"].count("<tr>"), 1)
+        self.assertLess(rendered["catalogRows"].index("9.1.1.0.25000000"),
+                        rendered["catalogRows"].index("9.1.0.0.20000000"))
+        self.assertIn("Last successful update", rendered["catalogMeta"])
+        self.assertIn("Last attempt failed: patch inventory failed",
+                      rendered["catalogMeta"])
+
+    def test_status_marks_unfinished_catalog_attempt_interrupted(self):
+        self.claim()
+        self.write_state(running=False)
+        (self.state_dir / "catalog-attempt.json").write_text(json.dumps({
+            "version": 1, "attemptId": "catalog-running", "status": "running",
+            "startedAt": "2026-09-14T13:00:00Z",
+        }))
+        attempt = self.get("/api/status").get_json()["catalog"]["attempt"]
+        self.assertEqual(attempt["status"], "interrupted")
+        self.assertIn("interrupted", attempt["error"])
 
 
 class BootstrapVersionTests(unittest.TestCase):
