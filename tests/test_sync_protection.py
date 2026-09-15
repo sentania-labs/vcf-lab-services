@@ -346,6 +346,8 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertNotIn("SUPERVISOR is protected", result.stdout)
 
     def test_listing_uses_scratch_when_home_is_not_writable(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes through a read-only home, so the case cannot be staged")
         harness = self.harness
         harness.content_library("VKR")
         harness.protect("VKR")
@@ -396,6 +398,8 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(list(harness.scratch.iterdir()), [])
 
     def test_a_scratch_that_cannot_be_cleared_keeps_a_good_listing(self):
+        if os.geteuid() == 0:
+            self.skipTest("root clears a directory it has no write bit on, so the case cannot be staged")
         harness = self.harness
         harness.content_library("VKR")
         harness.protect("VKR")
