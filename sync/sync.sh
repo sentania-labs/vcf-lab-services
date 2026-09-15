@@ -440,7 +440,7 @@ refresh_catalog() {
 			patch) arguments=("--vcf-version=$VCF_VERSION" "--sku=$SKU" --patches-only) ;;
 		esac
 		output="$catalog_workspace/$mode.out"
-		CATALOG_QUERY_MODE="$mode" "$tool" binaries list "$ceip_opt" "$auth_opt" \
+		"$tool" binaries list "$ceip_opt" "$auth_opt" \
 			"${arguments[@]}" > "$output" 2>&1 || rc=$?
 		if [ "$rc" -ne 0 ]; then
 			error="$mode inventory query failed with exit code $rc"

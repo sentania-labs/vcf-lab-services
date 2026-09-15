@@ -85,7 +85,13 @@ cat > "$work_dir/tool/bin/vcf-download-tool" <<'STUB'
 #!/bin/bash
 control_dir="${STUB_CONTROL_DIR:?}"
 if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
-	echo "catalog ${CATALOG_QUERY_MODE:-unknown} $$" >> "$control_dir/tool-calls.log"
+	mode=unknown
+	case " $* " in
+		*" --automated-install "*) mode=install ;;
+		*" --patches-only "*) mode=patch ;;
+		*" --type=UPGRADE "*) mode=upgrade ;;
+	esac
+	echo "catalog $mode $$" >> "$control_dir/tool-calls.log"
 	sleep "$(cat "$control_dir/list-sleep" 2>/dev/null || echo 0)"
 	printf 'ID                                   | Component | Component Full Name | Version | Release Date | Size | Type\n'
 	printf '11111111-1111-4111-8111-111111111111 | VCENTER | Stub vCenter | 9.1.0.0.20000000 | 2026-01-01 | 1 KiB | UPGRADE\n'

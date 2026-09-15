@@ -24,10 +24,21 @@ if [ ! -s "$state_dir/machine_id" ]; then
 	cat /proc/sys/kernel/random/uuid > "$state_dir/machine_id"
 fi
 
+# The filter arguments name the inventory a listing asks for, both for the
+# scope check a download target runs first and for the catalog refresh.
+catalog_mode() {
+	case " $* " in
+		*" --automated-install "*) echo install ;;
+		*" --patches-only "*) echo patch ;;
+		*" --type=UPGRADE "*) echo upgrade ;;
+		*) echo unknown ;;
+	esac
+}
+
 # Tests that need to know which subcommands ran name a file in STUB_CALL_LOG.
 if [ -n "${STUB_CALL_LOG:-}" ]; then
-	if [ -n "${CATALOG_QUERY_MODE:-}" ]; then
-		printf 'catalog %s\n' "$CATALOG_QUERY_MODE" >> "$STUB_CALL_LOG"
+	if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
+		printf 'binaries list %s\n' "$(catalog_mode "$@")" >> "$STUB_CALL_LOG"
 	else
 		printf '%s %s\n' "${1:-}" "${2:-}" >> "$STUB_CALL_LOG"
 	fi
@@ -69,8 +80,9 @@ components_for_filter() {
 }
 
 if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
+	query_mode="$(catalog_mode "$@")"
 	[ -z "${STUB_FAIL_CATALOG_MODE:-}" ] \
-		|| [ "${STUB_FAIL_CATALOG_MODE}" != "${CATALOG_QUERY_MODE:-}" ] || exit 23
+		|| [ "${STUB_FAIL_CATALOG_MODE}" != "$query_mode" ] || exit 23
 	[ "${STUB_FAIL_TARGET:-}" != list ] || exit 23
 	printf '*********Welcome to VCF Download Tool***********\n\nVersion: 0.0.0.0.20000000\n'
 	printf 'Validating depot credentials.\nDepot credentials are valid.\n'
@@ -80,10 +92,10 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	fi
 	# shellcheck disable=SC2046
 	set -- $(components_for_filter "$@")
-	row_type=UPGRADE
-	case " ${*:-} ${CATALOG_QUERY_MODE:-} " in
-		*" install "*) row_type=INSTALL ;;
-		*" patch "*) row_type=PATCH ;;
+	case "$query_mode" in
+		install) row_type=INSTALL ;;
+		patch) row_type=PATCH ;;
+		*) row_type=UPGRADE ;;
 	esac
 	printf 'ID                                   | Component | Component Full Name | Version | Release Date | Size | Type\n'
 	printf -- '-----\n'
