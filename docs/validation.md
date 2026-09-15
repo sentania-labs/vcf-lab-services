@@ -55,7 +55,9 @@ blocked, a save that lands under the run's settings snapshot lock before the
 run publishes its state still being flagged for the next run, the live backup
 service settings being reported as applied now instead of deferred, the tabbed
 console rendering every control including the daily, weekly, and custom cron
-schedule picker with its next-run readout, advisory tool probes as described in
+schedule picker with its next-run readout, durable catalog grouping newest
+versions first after a UI worker restart while retaining and displaying a later
+attempt failure, advisory tool probes as described in
 [release validation](releasing.md), forward config migration with an
 in-volume backup, and newer-version downgrade refusal. The Compose test
 enforces the latest-tracking published-image defaults,
@@ -63,6 +65,7 @@ their always-pull behavior, and their override variables,
 first-boot state initialization, internal TLS, the platform-provided storage
 boundary, protected Redis, fixed mount contracts, version mismatch safe-stop
 wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
+catalog attempt and build-workspace reconciliation at scheduler boot,
 single-writer sync behavior, sync safe-stop on a version mismatch, log
 retention, tool-version run state, post-success release promotion, retention
 after a successful VKR-only run with non-tool provenance, lifecycle
@@ -89,18 +92,21 @@ refusal and manifest preservation when ownership reads or persistence fail. It
 also proves that a depot lock which cannot be opened is reported as a locking
 failure rather than as a run in progress, and that the verbose lock
 diagnostics stay silent until the console turns them on.
+The same suite drives the real install, upgrade, and patch listing forms through
+the stub tool, verifies the actual table fields including a Full Name containing
+the table delimiter, and proves a tool or atomic-publish failure preserves the
+previous successful catalog without changing the sync result. Protected and
+partially successful runs still refresh the catalog.
 
 `tests/test_scheduler_lock.sh` is the executable form of the scheduler lock
 reproduction. It runs the real scheduler and the real `sync.sh` with a stub
 tool and a queue-file bus, slows the scheduler's housekeeping read the way
-the reproduction did, and requires every requested run and every requested
-versions refresh to be admitted. It
-then proves that a second sync during a run, a versions refresh during a run,
-and a run during a versions refresh are each refused with the contention
-message, that a run killed outright releases the lock once its download
-stops, that a scheduled dispatch takes the same hand-off, that the console's
-diagnostics switch is picked up without a restart, and that scheduler
-housekeeping and versions refresh report an unopenable lock once instead of
+the reproduction did, and requires every requested run to be admitted. It
+then proves that a second sync during a target or the post-sync catalog query
+is refused with the contention message, that a run killed outright releases
+the lock once its download stops, that a scheduled dispatch takes the same
+hand-off, that the console's diagnostics switch is picked up without a restart,
+and that scheduler housekeeping reports an unopenable lock once instead of
 claiming a run is in progress.
 
 `tests/test_sync_image.sh IMAGE` runs the `sync.sh` shipped inside a built

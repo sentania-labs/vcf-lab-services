@@ -4,8 +4,6 @@ set -euo pipefail
 settings_file="${SETTINGS_FILE:-/etc/vcf-services/settings.env}"
 STATE_DIR="${STATE_DIR:-/state}"
 AUTH_FILE="${AUTH_FILE:-/etc/vcf-services/secrets/activation-code.txt}"
-TOOL_ROOT="${TOOL_ROOT:-/opt/vcfdt}"
-VCFDT_TOOL_STORE="${VCFDT_TOOL_STORE:-}"
 SYNC_COMMAND="${SYNC_COMMAND:-/usr/local/bin/sync.sh}"
 POLL_SECONDS="${POLL_SECONDS:-10}"
 REDIS_HOST="${REDIS_HOST:-}"
@@ -15,7 +13,6 @@ VERSION_STATUS_FILE="${VERSION_STATUS_FILE:-/etc/vcf-services/.vcf-services-vers
 
 REQUEST_QUEUE="vcf-services:sync:requests"
 STATUS_KEY="vcf-services:sync:status"
-VERSIONS_KEY="vcf-services:sync:versions"
 
 load_settings() {
 	if [ -f "$settings_file" ]; then
@@ -59,7 +56,7 @@ lock_identity() {
 }
 
 # Take the shared depot lock on fd 8 without blocking. Returns 0 when it is
-# held, 1 when a sync or versions refresh legitimately holds it, and 2 when
+# held, 1 when a sync legitimately holds it, and 2 when
 # the lock could not be opened or taken at all; depot_lock_error then names
 # the reason. util-linux flock exits 1 only for a conflicting lock, so any
 # other status is a locking failure rather than a run in progress.
@@ -106,8 +103,8 @@ release_depot_lock() {
 # itself. sync.sh keeps an inherited fd 9 that refers to its lock file and
 # opens the file only when invoked any other way. The scheduler closes its own
 # copy right after the fork, so the lock lives exactly as long as the run and
-# a run that exits or crashes releases it. When another sync or a versions
-# refresh genuinely holds the lock, the run is still launched and reports the
+# a run that exits or crashes releases it. When another sync genuinely holds
+# the lock, the run is still launched and reports the
 # contention itself, exactly as before.
 dispatch_sync() {
 	local rc=0 output child
@@ -181,83 +178,6 @@ cron_matches() {
 	fi
 }
 
-# Refresh the versions listing. The scheduler loop forks this with the depot
-# lock outcome it already obtained (see dispatch_versions_refresh); a direct
-# call takes the lock itself.
-refresh_versions() {
-	local lock_state="${1:-}"
-	load_settings
-	local tool="$TOOL_ROOT/bin/vcf-download-tool"
-	if [ ! -s "$AUTH_FILE" ]; then
-		jq -n --arg t "$(date -u +%FT%TZ)" \
-			'{error:"not armed: activation code missing", fetchedAt:$t}' \
-			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
-		[ "$lock_state" != 0 ] || release_depot_lock versions-refresh
-		return 0
-	fi
-	if [ -z "$lock_state" ]; then
-		lock_state=0
-		take_depot_lock versions-refresh || lock_state=$?
-	fi
-	if [ "$lock_state" -eq 1 ]; then
-		echo "[scheduler] versions refresh skipped: a sync or refresh already holds the depot lock"
-		if [ "$(redis_cmd EXISTS "$VERSIONS_KEY")" != "1" ]; then
-			jq -n --arg t "$(date -u +%FT%TZ)" \
-				'{error:"refresh skipped: a sync or refresh is already running, retry when it finishes", fetchedAt:$t}' \
-				| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
-		fi
-		return 0
-	elif [ "$lock_state" -ne 0 ]; then
-		echo "[scheduler] ERROR: versions refresh could not take the depot lock: $depot_lock_error"
-		jq -n --arg t "$(date -u +%FT%TZ)" --arg reason "$depot_lock_error" \
-			'{error:("refresh failed: the depot lock could not be taken (" + $reason + "); check the sync service log"), fetchedAt:$t}' \
-			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
-		return 0
-	fi
-	local output rc=0
-	if [ ! -x "$tool" ]; then
-		jq -n --arg t "$(date -u +%FT%TZ)" \
-			'{error:"VCF Download Tool is not installed; upload it in the admin console", fetchedAt:$t}' \
-			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
-		exec 7>&-
-		release_depot_lock versions-refresh
-		return 0
-	fi
-	local tool_lock="${VCFDT_TOOL_STORE:-$TOOL_ROOT}/.update.lock"
-	if [ ! -e "$tool_lock" ]; then
-		jq -n --arg t "$(date -u +%FT%TZ)" \
-			'{error:"the tool volume has no update lock; re-upload the VCF Download Tool in the admin console to repair it", fetchedAt:$t}' \
-			| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
-		release_depot_lock versions-refresh
-		return 0
-	fi
-	exec 7<"$tool_lock"
-	flock -s 7
-	output="$("$tool" binaries list "--vcf-version=${VCF_VERSION:-9.1.0}" --type=UPGRADE \
-		"--depot-download-activation-code-file=$AUTH_FILE" "--ceip=${CEIP:-DISABLE}" 2>&1)" || rc=$?
-	jq -n --arg out "$output" --arg t "$(date -u +%FT%TZ)" --argjson rc "$rc" \
-		'{output:$out, fetchedAt:$t, exitCode:$rc}' \
-		| redis_cmd -x SET "$VERSIONS_KEY" >/dev/null || true
-	exec 7>&-
-	release_depot_lock versions-refresh
-}
-
-# The same hand-off as dispatch_sync, for a versions refresh: the lock is
-# taken here before the refresh is forked, so the next housekeeping pass of
-# this loop cannot take it ahead of a refresh it just launched. The forked
-# refresh inherits fd 8 and the lock with it, and this copy is closed right
-# after the fork. A contended or failed lock is passed down for the refresh
-# to report.
-dispatch_versions_refresh() {
-	local lock_state=0
-	take_depot_lock versions-refresh || lock_state=$?
-	refresh_versions "$lock_state" &
-	if [ "$lock_state" -eq 0 ]; then
-		exec 8>&-
-		diag "lock handed off op=versions-refresh fd=8 pid=$BASHPID to=$!"
-	fi
-}
-
 handle_request() {
 	local payload="$1" kind
 	kind="$(jq -r '.kind // "sync"' <<< "$payload" 2>/dev/null || true)"
@@ -273,13 +193,58 @@ handle_request() {
 				echo "[scheduler] ignored sync request with no valid targets"
 			fi
 			;;
-		versions)
-			dispatch_versions_refresh
-			;;
 		*)
 			echo "[scheduler] ignored unknown request kind '$kind'"
 			;;
 	esac
+}
+
+# A scheduler that is only now starting proves that no run it launched is
+# still alive, so a catalog attempt left open was ended by the stop before
+# this boot. The published catalog's own attempt is the exception: it reached
+# its durable result and only its metadata write was lost.
+reconcile_catalog_attempt() {
+	local attempt_file="$STATE_DIR/catalog-attempt.json"
+	local open_attempt published tmp_attempt
+	[ -s "$attempt_file" ] || return 0
+	open_attempt="$(jq -r 'select(.status == "running") | .attemptId // "-"' \
+		"$attempt_file" 2>/dev/null || true)"
+	[ -n "$open_attempt" ] || return 0
+	published="$(jq -r '.attemptId // ""' "$STATE_DIR/catalog.json" 2>/dev/null || true)"
+	[ "$open_attempt" != "$published" ] || return 0
+	tmp_attempt="$(mktemp "$STATE_DIR/catalog-attempt.json.XXXXXX")"
+	if jq --arg finished "$(date -u +%FT%TZ)" \
+		'. + {status:"interrupted", finishedAt:$finished,
+		      error:"the last catalog update was interrupted"}' \
+		"$attempt_file" > "$tmp_attempt" 2>/dev/null && [ -s "$tmp_attempt" ]; then
+		mv "$tmp_attempt" "$attempt_file"
+		echo "[scheduler] the last catalog update did not finish before the previous stop"
+	else
+		rm -f "$tmp_attempt"
+		echo "[scheduler] WARNING: could not reconcile the unfinished catalog attempt"
+	fi
+}
+
+# Catalog workspaces are temporary, but they live on the durable state volume
+# so an unclean stop cannot make the published catalog disappear with them.
+# Only reap them while no sync owns the depot lock, which leaves a live run's
+# workspace untouched if initialization overlaps an independently started run.
+reap_catalog_workspaces() {
+	local lock_state=0 workspace
+	take_depot_lock catalog-reap || lock_state=$?
+	if [ "$lock_state" -eq 1 ]; then
+		return 0
+	elif [ "$lock_state" -ne 0 ]; then
+		echo "[scheduler] WARNING: could not reap stale catalog workspaces: $depot_lock_error"
+		return 0
+	fi
+	while IFS= read -r -d '' workspace; do
+		if ! rm -rf -- "$workspace"; then
+			echo "[scheduler] WARNING: could not remove stale catalog workspace $workspace"
+		fi
+	done < <(find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d \
+		-name 'catalog-build.*' -print0)
+	release_depot_lock catalog-reap
 }
 
 init_state() {
@@ -289,6 +254,8 @@ init_state() {
 	[ -e "$STATE_DIR/settings-snapshot.lock" ] || : > "$STATE_DIR/settings-snapshot.lock"
 	local armed=false tmp_state
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
+	reap_catalog_workspaces
+	reconcile_catalog_attempt
 	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
 	if ! jq --argjson armed "$armed" '. + {running:false, armed:$armed, currentTarget:null}' \
 		"$STATE_DIR/state.json" > "$tmp_state" 2>/dev/null || [ ! -s "$tmp_state" ]; then
@@ -311,7 +278,7 @@ refresh_armed_state() {
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
 	take_depot_lock armed-refresh || lock_state=$?
 	if [ "$lock_state" -eq 1 ]; then
-		# A sync or versions refresh holds the lock and publishes state itself.
+		# A sync holds the lock and publishes state itself.
 		return 0
 	elif [ "$lock_state" -ne 0 ]; then
 		# Reported once per distinct reason rather than on every loop pass.

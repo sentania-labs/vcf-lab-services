@@ -255,12 +255,19 @@ later targets still run after a failure, state is written atomically, and only
 the newest configured run logs are retained. Until an activation code is
 saved, the stack stays healthy but sync reports `not armed`.
 
-The scheduler takes the depot lock before it launches a run or a versions
-refresh and hands the locked descriptor to it, so the scheduler's own
-housekeeping (the armed-state refresh on every loop) can never take the lock
-ahead of work it just launched. A run that finds the lock genuinely held by another
-sync or by a versions refresh logs `another sync or versions refresh already
-holds the depot lock, skipping this trigger` and exits without changing
+After every admitted sync, the same locked run queries the tool's install,
+upgrade, and patch inventories. The Sync tab shows one row per component with
+available versions newest first. The last successful catalog is retained on
+the sync state volume across service restarts, and a later failure, or a filter
+that matches nothing, is shown without replacing those results. The catalog
+describes upstream availability; it does not infer local download presence from
+depot filenames.
+
+The scheduler takes the depot lock before it launches a run and hands the
+locked descriptor to it, so the scheduler's own housekeeping (the armed-state
+refresh on every loop) can never take the lock ahead of work it just launched.
+A run that finds the lock genuinely held by another sync logs `another sync
+already holds the depot lock, skipping this trigger` and exits without changing
 anything; that is contention, not a fault. A lock that cannot be opened or
 taken at all is logged as `ERROR: could not open the depot lock` or
 `ERROR: could not take the depot lock` with the reason, the run refuses to

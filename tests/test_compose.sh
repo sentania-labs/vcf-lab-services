@@ -136,7 +136,7 @@ PATH="$work_dir/bin:$PATH" ./compose.sh up -d
 grep -qx 'compose up -d' "$DOCKER_CALLS" || fail "compose arguments were not preserved"
 
 for name in 'vcf-services:sync:requests' 'vcf-services:sync:status' \
-	'vcf-services:sync:log' 'vcf-services:sync:versions'; do
+	'vcf-services:sync:log'; do
 	grep -q "$name" docs/redis-contract.md || fail "$name missing from Redis contract"
 	grep -q "$name" ui/app.py || fail "$name missing from console"
 done

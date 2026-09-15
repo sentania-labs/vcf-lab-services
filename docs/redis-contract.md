@@ -20,7 +20,6 @@ services must follow the same pattern with their own prefix
 | `vcf-services:sync:requests` | list (queue) | admin console (`LPUSH`) | sync scheduler (`BRPOP`) |
 | `vcf-services:sync:status` | string (JSON) | sync run (`SET` on every state change) | admin console |
 | `vcf-services:sync:log` | string (last 500 log lines) | sync run (`SET`, refreshed every 2 seconds) | admin console |
-| `vcf-services:sync:versions` | string (JSON) | sync scheduler | admin console |
 
 ## Request shape (`vcf-services:sync:requests`)
 
@@ -30,8 +29,8 @@ Each queue entry is one JSON object:
 {"kind": "sync", "targets": ["esx", "patches"], "requestedAt": "2026-08-13T00:00:00+00:00"}
 ```
 
-- `kind`: `sync` dispatches a run of the listed targets. `versions` asks the
-  scheduler to refresh `vcf-services:sync:versions`. Unknown kinds are ignored.
+- `kind`: `sync` dispatches a run of the listed targets. Unknown kinds are
+  ignored.
 - `targets`: required for `sync`. The publisher must validate entries against
   `esx`, `install`, `upgrade`, `patches`, `vkr`; the scheduler drops anything
   else and ignores a request with no valid target.
@@ -41,11 +40,10 @@ The scheduler invokes `sync.sh` locally for each accepted request. The
 scheduler takes the depot lock before it launches the run and hands the locked
 descriptor to it, so the scheduler's own housekeeping can never take the lock
 ahead of a run it just launched. The persistent `flock` inside `sync.sh`
-remains the single-writer control: a request that arrives while another run or
-a versions refresh holds the lock exits with "another sync or versions refresh
-already holds the depot lock, skipping this trigger". A lock that cannot be
-opened or taken at all is reported as an `ERROR` and the run refuses to
-continue.
+remains the single-writer control: a request that arrives while another run
+holds the lock exits with "another sync already holds the depot lock, skipping
+this trigger". A lock that cannot be opened or taken at all is reported as an
+`ERROR` and the run refuses to continue.
 
 ## Status shape (`vcf-services:sync:status`)
 
@@ -95,16 +93,32 @@ false plus `startupBlocked: true` and a `startupError` message, republished
 every poll interval while the startup block remains. See the
 [config recovery guidance](../README.md#storage-ownership).
 
-## Versions shape (`vcf-services:sync:versions`)
+## Durable available-component catalog
 
-```json
-{"output": "<raw VCFDT binaries list output>", "fetchedAt": "2026-08-13T00:00:00Z", "exitCode": 0}
-```
+Every admitted sync queries the download tool's supported install, upgrade and
+patch inventories after its targets finish, while the run still owns the depot
+and tool locks. It parses the table's actual Component, Version, Type, Release
+Date, Size and Component Full Name fields. The result is independent of whether
+a target downloaded, failed, or was skipped for depot protection.
 
-On failure the scheduler stores `{"error": "...", "fetchedAt": "..."}` instead:
-`not armed: activation code missing` when the sync engine is dormant,
-`refresh skipped: a sync or refresh is already running, retry when it finishes`
-when the depot lock is held and no earlier versions value exists,
-`VCF Download Tool is not installed; upload it in the admin console` when no
-executable tool is mounted, or a re-upload instruction when the mounted tool
-volume is missing its update lock.
+`catalog.json` on the sync state volume is the last successful catalog. It is
+written to a temporary file and renamed into place only after all three
+inventories parse successfully. `catalog-attempt.json` is separate metadata for
+the latest attempt, with `running`, `success`, `empty`, `failed`, or
+`interrupted` status and any error. A scheduler boot reconciles an attempt
+still marked `running` to `interrupted`, keeping its original start time,
+because a scheduler that is only now starting proves no run it launched
+survives; the attempt that published the saved catalog is left alone. Each
+attempt builds in its own `catalog-build.*` directory on that same volume, so
+an unclean stop can strand one; the same boot removes any it finds, and only
+while no sync holds the depot lock, so a live run's workspace is left
+untouched. A failed or interrupted attempt never replaces the last successful
+catalog, and an inventory that parses but lists nothing is recorded as `empty`
+without replacing a catalog that did list components. The admin console reads
+both files during its normal status polling, groups entries by the verified
+Component value, and sorts verified Version values newest first. It does not
+infer whether an upstream entry is already downloaded in the local depot. It
+also reports an attempt still marked `running` as interrupted once the last run
+finished strictly later than that attempt started, because a sync closes its
+attempt before it records `finishedAt`; equal timestamps are a run dispatched
+in the same whole second and stay `running`.

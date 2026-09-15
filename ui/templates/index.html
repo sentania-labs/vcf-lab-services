@@ -215,7 +215,7 @@
         <div class="targets" id="run-targets">
           {% for target in targets %}<label class="choice"><input type="checkbox" class="run-target" value="{{target}}"> {{target}}</label>{% endfor %}
         </div>
-        <div class="row" style="margin-top:14px"><button id="sync-btn">Sync selected</button><button id="refresh-remote" class="secondary">Check versions</button><span id="sync-flash" class="muted"></span></div>
+        <div class="row" style="margin-top:14px"><button id="sync-btn">Sync selected</button><span id="sync-flash" class="muted"></span></div>
       </section>
       <section class="panel">
         <h2>Current state</h2>
@@ -231,7 +231,7 @@
     <section class="panel"><h2>Per-target last sync</h2><div id="last-runs" class="grid"></div></section>
     <section class="panel">
       <h2>Available versions <span id="version-meta" class="muted"></span></h2>
-      <div class="tablewrap"><table><thead><tr><th>Component</th><th>Version</th><th>Type</th><th>Date</th><th>Size</th><th>Depot</th></tr></thead><tbody id="versions"><tr><td colspan="6" class="muted">Check versions after registration.</td></tr></tbody></table></div>
+      <div class="tablewrap"><table><thead><tr><th>Component</th><th>Available versions, newest first</th></tr></thead><tbody id="versions"><tr><td colspan="2" class="muted">The catalog will populate after the next sync.</td></tr></tbody></table></div>
     </section>
   </div>
 
@@ -873,7 +873,8 @@ async function poll(){
     savedNextRun=status.nextRun; renderScheduleNext();
     $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}${result?`<br>tool ${esc(result.toolVersion||'unknown')}`:''}</span></div></div>`;}).join('');
     showPending(status);
-    $('sync-btn').disabled=running||!armed; $('refresh-remote').disabled=running||!armed; $('vcfdt-upload').disabled=running;
+    renderCatalog(status.catalog||{});
+    $('sync-btn').disabled=running||!armed; $('vcfdt-upload').disabled=running;
     syncRunning=running; updateDepotInstallState();
     const log=await api('api/log'); if(log.log){const node=$('log');const bottom=node.scrollTop+node.clientHeight>=node.scrollHeight-30;node.textContent=log.log;if(bottom)node.scrollTop=node.scrollHeight;}
   } catch(error){$('sync-flash').textContent=error.message;}
@@ -886,11 +887,18 @@ $('sync-btn').onclick=async()=>{
   catch(error){$('sync-flash').textContent=error.message;}
 };
 
-$('refresh-remote').onclick=async()=>{
-  $('version-meta').textContent='loading';
-  try{const result=await api('api/versions/remote?refresh=1');if(result.pending){$('version-meta').textContent='refresh requested';return;}const rows=result.components||[];$('versions').innerHTML=rows.length?rows.map(item=>`<tr><td>${esc(item.name||item.component)}</td><td>${esc(item.version)}</td><td>${esc(item.type)}</td><td>${esc(item.date)}</td><td>${esc(item.size)}</td><td>${item.present?'present':'available'}</td></tr>`).join(''):'<tr><td colspan="6">No bundles returned</td></tr>';$('version-meta').textContent=`${rows.length} bundles`;}
-  catch(error){$('version-meta').textContent=error.message;}
-};
+function renderCatalog(catalog){
+  const groups=catalog.components||[], attempt=catalog.attempt||{};
+  const blank=catalog.updatedAt?'No components matched the current filter.':'No successful catalog is saved yet.';
+  $('versions').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${esc(group.name||group.component)}</strong></td><td>${(group.versions||[]).map(item=>`<div><strong>${esc(item.version)}</strong> <span class="pill">${esc(item.type)}</span><span class="help">${item.date?` ${esc(item.date)}`:''}${item.size?` · ${esc(item.size)}`:''}</span></div>`).join('')}</td></tr>`).join(''):`<tr><td colspan="2" class="muted">${blank}</td></tr>`;
+  const messages=[];
+  if(groups.length&&catalog.updatedAt) messages.push(`Last successful update ${fmt(catalog.updatedAt)}`);
+  if(attempt.status==='running') messages.push('Updating after the current sync');
+  if(attempt.status==='empty') messages.push(`No components matched the current filter ${fmt(attempt.finishedAt)}`);
+  if(attempt.status==='failed'||attempt.status==='interrupted') messages.push(`Last attempt failed: ${attempt.error||'unknown error'}`);
+  $('version-meta').textContent=messages.join('; ');
+  $('version-meta').className=attempt.status==='failed'||attempt.status==='interrupted'?'help error':'muted';
+}
 
 $('save-password').onclick=async()=>{
   $('password-flash').textContent='Saving';

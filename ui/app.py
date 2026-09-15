@@ -106,7 +106,8 @@ REDIS_PASSWORD_FILE = os.environ.get(
 REQUEST_QUEUE = "vcf-services:sync:requests"
 STATUS_KEY = "vcf-services:sync:status"
 LOG_KEY = "vcf-services:sync:log"
-VERSIONS_KEY = "vcf-services:sync:versions"
+CATALOG_FILE = STATE / "catalog.json"
+CATALOG_ATTEMPT_FILE = STATE / "catalog-attempt.json"
 VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr"]
 # settings.env keys the console owns, paired with their JSON field names.
 SETTING_ENV_FIELDS = {
@@ -134,7 +135,6 @@ LIVE_TOOL_FIELDS = {"depotEndpoint", "tokenUrl"}
 # The SFTP backup service re-reads these every few seconds, so a save takes
 # effect at once and must never be reported as waiting for the next run.
 LIVE_SERVICE_FIELDS = {"backupEnabled", "uidGid"}
-BUILD_RE = re.compile(r"\b(2[0-9]{7})\b")
 TOOL_VERSION_VALUE = r"v?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z._-]*)?"
 TOOL_VERSION_RE = re.compile(rf"^{TOOL_VERSION_VALUE}$", re.IGNORECASE)
 TOOL_VERSION_LABEL_RE = re.compile(
@@ -173,8 +173,6 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Strict",
     SESSION_COOKIE_SECURE=True,
 )
-_local_cache = {"ts": 0.0, "builds": None}
-
 MAX_ARCHIVE_MEMBERS = 20000
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -1832,56 +1830,87 @@ def _state():
         return {}
 
 
-def _scan_local_builds(max_age=300):
-    now = time.time()
-    if _local_cache["builds"] is not None and now - _local_cache["ts"] < max_age:
-        return _local_cache["builds"]
-    builds = set()
-    seen = 0
+def _read_json(path):
     try:
-        for _root, dirs, files in os.walk(DEPOT):
-            for name in dirs + files:
-                seen += 1
-                match = BUILD_RE.search(name)
-                if match:
-                    builds.add(match.group(1))
-            if seen > 400000:
-                break
-    except OSError:
-        pass
-    _local_cache.update(ts=now, builds=builds)
-    return builds
-
-
-def _parse_binaries(text):
-    rows = []
-    for line in text.splitlines():
-        if "|" not in line:
-            continue
-        parts = [part.strip() for part in line.split("|")]
-        if len(parts) < 7 or not re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-", parts[0]):
-            continue
-        version = parts[3]
-        rows.append(
-            {
-                "id": parts[0],
-                "component": parts[1],
-                "name": parts[2],
-                "version": version,
-                "build": version.split(".")[-1] if version else "",
-                "date": parts[4],
-                "size": parts[5],
-                "type": parts[6],
-            }
-        )
-    return rows
-
-
-def _epoch(iso_value):
-    try:
-        return datetime.fromisoformat(str(iso_value).replace("Z", "+00:00")).timestamp()
-    except (TypeError, ValueError):
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
+    return document if isinstance(document, dict) else None
+
+
+def _catalog_version_key(version):
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.casefold())
+        for part in re.findall(r"[0-9]+|[A-Za-z]+", str(version))
+    )
+
+
+def _catalog_attempt_abandoned(attempt, state):
+    # A sync closes its catalog attempt before it records finishedAt, so an
+    # attempt still open when a run finished strictly after it started has
+    # lost its owner. An attempt that started at or after the last recorded
+    # finish is still owned by a live run, even before that run publishes
+    # running: these timestamps carry whole seconds, so a run dispatched in
+    # the same second as the previous one finished shares its value.
+    started = attempt.get("startedAt")
+    finished = state.get("finishedAt")
+    if not isinstance(started, str) or not isinstance(finished, str):
+        return False
+    return finished > started
+
+
+def _catalog(state):
+    saved = _read_json(CATALOG_FILE) or {}
+    attempt = _read_json(CATALOG_ATTEMPT_FILE) or {}
+    items = saved.get("items") if isinstance(saved.get("items"), list) else []
+    grouped = {}
+    labels = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        component = item.get("component")
+        version = item.get("version")
+        if not isinstance(component, str) or not component.strip():
+            continue
+        if not isinstance(version, str) or not version.strip():
+            continue
+        grouped.setdefault(component, []).append(item)
+        name = item.get("name")
+        if isinstance(name, str) and name.strip() and component not in labels:
+            labels[component] = name.strip()
+    components = [
+        {
+            "component": component,
+            "name": labels.get(component, component),
+            "versions": sorted(
+                versions,
+                key=lambda item: _catalog_version_key(item.get("version")),
+                reverse=True,
+            ),
+        }
+        for component, versions in sorted(grouped.items(), key=lambda pair: pair[0])
+    ]
+    attempt_status = attempt.get("status")
+    attempt_error = attempt.get("error")
+    if (
+        attempt_status == "running"
+        and saved.get("attemptId") == attempt.get("attemptId")
+    ):
+        attempt_status = "success"
+        attempt_error = None
+    elif attempt_status == "running" and _catalog_attempt_abandoned(attempt, state):
+        attempt_status = "interrupted"
+        attempt_error = "the last catalog update was interrupted"
+    return {
+        "components": components,
+        "updatedAt": saved.get("updatedAt"),
+        "attempt": {
+            "status": attempt_status,
+            "startedAt": attempt.get("startedAt"),
+            "finishedAt": attempt.get("finishedAt"),
+            "error": attempt_error,
+        },
+    }
 
 
 @app.get("/healthz")
@@ -2110,6 +2139,7 @@ def status():
             "vcfdtInstalled": tool_info["installed"],
             "vcfdtVersion": tool_info["version"],
             "vcfdtUploadedAt": tool_info.get("uploadedAt"),
+            "catalog": _catalog(state),
             **_pending_settings(state),
         }
     )
@@ -2897,63 +2927,6 @@ def complete_setup():
     except OSError:
         return jsonify({"error": "setup completion could not be saved"}), 500
     return jsonify({"setupComplete": True})
-
-
-@app.get("/api/versions/local")
-def versions_local():
-    return jsonify({"builds": sorted(_scan_local_builds(), reverse=True)})
-
-
-@app.get("/api/versions/remote")
-def versions_remote():
-    doc = None
-    raw = _bus_get(VERSIONS_KEY)
-    if raw:
-        try:
-            doc = json.loads(raw)
-        except ValueError:
-            doc = None
-    refresh = request.args.get("refresh") == "1" or doc is None
-    if refresh:
-        try:
-            _publish_request(
-                {
-                    "kind": "versions",
-                    "requestedAt": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-        except (redis_lib.RedisError, OSError) as exc:
-            if doc is None:
-                return jsonify(
-                    {"error": f"job bus unavailable: {exc}", "components": []}
-                ), 502
-    if doc is None:
-        return jsonify({"components": [], "pending": True}), 202
-    if doc.get("error"):
-        return jsonify({"error": doc["error"], "components": []}), 502
-    if doc.get("exitCode"):
-        detail = (doc.get("output") or "").strip()[-500:]
-        return (
-            jsonify(
-                {
-                    "error": f"version query failed with exit code {doc['exitCode']}: {detail}",
-                    "components": [],
-                }
-            ),
-            502,
-        )
-    local = _scan_local_builds()
-    rows = [
-        {**row, "present": row.get("build") in local}
-        for row in _parse_binaries(doc.get("output", ""))
-    ]
-    return jsonify(
-        {
-            "components": rows,
-            "fetchedAt": _epoch(doc.get("fetchedAt")),
-            "refreshRequested": refresh,
-        }
-    )
 
 
 @app.post("/api/sync")

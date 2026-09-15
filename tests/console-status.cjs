@@ -80,6 +80,8 @@ async function statusSummary() {
   return {
     summary: getElementById('vcfdt-produced').textContent,
     rows: getElementById('last-runs').innerHTML,
+    catalogRows: getElementById('versions').innerHTML,
+    catalogMeta: getElementById('version-meta').textContent,
     error: getElementById('sync-flash').textContent,
   };
 }

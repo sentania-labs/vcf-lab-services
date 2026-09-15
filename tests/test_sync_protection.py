@@ -84,8 +84,9 @@ class Harness:
             "DEPOT_OWNERSHIP_LOCK": str(self.state / "depot-ownership.lock"),
             "STUB_CALL_LOG": str(self.calls),
         }
-        for key in ("STUB_LIST_COMPONENTS", "STUB_FAIL_TARGET", "STUB_LIST_NO_TABLE",
-                    "STUB_LIST_RAW_ROWS", "STUB_WRITE_TREES", "STUB_RETARGET_LINKS"):
+        for key in ("STUB_LIST_COMPONENTS", "STUB_FAIL_TARGET", "STUB_FAIL_CATALOG_MODE",
+                    "STUB_LIST_NO_TABLE", "STUB_LIST_RAW_ROWS", "STUB_WRITE_TREES",
+                    "STUB_RETARGET_LINKS"):
             environment.pop(key, None)
         environment.update(env or {})
         if bash_env:
@@ -102,11 +103,155 @@ class Harness:
         return self.calls.read_text().splitlines()
 
 
+# Every admitted run queries the three inventories in this order after its
+# targets finish, so each expected call sequence ends with them.
+CATALOG = ["binaries list install", "binaries list upgrade", "binaries list patch"]
+
+
 class SyncProtectionScopeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.harness = Harness(self.temporary.name)
+
+    def test_sync_builds_durable_catalog_from_all_supported_inventories(self):
+        harness = self.harness
+        extra = (
+            "aaaaaaaa-0000-4000-8000-000000000001 | VCENTER | VMware vCenter | "
+            "Server Appliance | 9.1.1.0.25000000 | 2026-07-01 | 2 GiB | UPGRADE"
+        )
+
+        result = harness.run("esx", env={"STUB_LIST_RAW_ROWS": extra})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(harness.called(), ["esx download"] + CATALOG)
+        catalog = json.loads((harness.state / "catalog.json").read_text())
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(catalog["version"], 1)
+        self.assertEqual(attempt["status"], "success")
+        self.assertEqual(catalog["attemptId"], attempt["attemptId"])
+        self.assertEqual({item["type"] for item in catalog["items"]},
+                         {"INSTALL", "UPGRADE", "PATCH"})
+        parsed = next(item for item in catalog["items"]
+                      if item["id"] == "aaaaaaaa-0000-4000-8000-000000000001")
+        self.assertEqual(parsed["component"], "VCENTER")
+        self.assertEqual(parsed["name"], "VMware vCenter | Server Appliance")
+        self.assertEqual(parsed["version"], "9.1.1.0.25000000")
+        self.assertEqual(parsed["date"], "2026-07-01")
+        self.assertEqual(parsed["size"], "2 GiB")
+        self.assertEqual(parsed["type"], "UPGRADE")
+
+    def test_catalog_failure_preserves_last_success_and_sync_result(self):
+        harness = self.harness
+        first = harness.run("esx")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        saved = (harness.state / "catalog.json").read_bytes()
+
+        failed = harness.run("esx", env={"STUB_FAIL_CATALOG_MODE": "patch"})
+
+        self.assertEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertEqual((harness.state / "catalog.json").read_bytes(), saved)
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(attempt["status"], "failed")
+        self.assertEqual(attempt["error"], "patch inventory query failed with exit code 23")
+        self.assertIn("keeping the previous successful catalog", failed.stdout)
+
+    def test_empty_inventory_keeps_the_last_catalog_and_records_the_outcome(self):
+        harness = self.harness
+        first = harness.run("esx")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        saved = (harness.state / "catalog.json").read_bytes()
+
+        empty = harness.run("esx", env={"STUB_LIST_COMPONENTS": ""})
+
+        self.assertEqual(empty.returncode, 0, empty.stdout + empty.stderr)
+        self.assertEqual((harness.state / "catalog.json").read_bytes(), saved)
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(attempt["status"], "empty")
+        self.assertNotIn("error", attempt)
+        self.assertTrue(attempt["finishedAt"])
+        self.assertIn("no components matched the current filter", empty.stdout)
+
+    def test_first_empty_inventory_publishes_an_empty_catalog(self):
+        harness = self.harness
+
+        result = harness.run("esx", env={"STUB_LIST_COMPONENTS": ""})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        catalog = json.loads((harness.state / "catalog.json").read_text())
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(catalog["items"], [])
+        self.assertEqual(catalog["attemptId"], attempt["attemptId"])
+        self.assertEqual(attempt["status"], "empty")
+        self.assertTrue(catalog["updatedAt"])
+
+    def test_catalog_workspace_is_cleared_when_a_run_is_terminated(self):
+        # The workspace lives on the durable state volume, so a run stopped
+        # between inventory queries must reap it through the exit path.
+        harness = self.harness
+        faults = harness.root / "catalog-term.bash"
+        faults.write_text(
+            'jq() {\n'
+            '  if [ "${1:-}" = -Rn ]; then kill -TERM $$; fi\n'
+            '  command jq "$@"\n'
+            '}\n'
+        )
+
+        terminated = harness.run("esx", bash_env=faults)
+
+        self.assertEqual(terminated.returncode, 143,
+                         terminated.stdout + terminated.stderr)
+        self.assertEqual(list(harness.state.glob("catalog-build.*")), [])
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(attempt["status"], "failed")
+        self.assertIn("ended before catalog generation completed", attempt["error"])
+
+    def test_interrupted_catalog_publish_cannot_replace_last_success(self):
+        harness = self.harness
+        first = harness.run("esx")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        saved = (harness.state / "catalog.json").read_bytes()
+        faults = harness.root / "catalog-faults.bash"
+        faults.write_text(
+            'mv() {\n'
+            '  case "$*" in *catalog.json.*) return 1 ;; esac\n'
+            '  command mv "$@"\n'
+            '}\n'
+        )
+
+        interrupted = harness.run("esx", bash_env=faults)
+
+        self.assertEqual(interrupted.returncode, 0,
+                         interrupted.stdout + interrupted.stderr)
+        self.assertEqual((harness.state / "catalog.json").read_bytes(), saved)
+        attempt = json.loads((harness.state / "catalog-attempt.json").read_text())
+        self.assertEqual(attempt["status"], "failed")
+        self.assertEqual(attempt["error"], "catalog could not be published")
+        self.assertEqual(list(harness.state.glob("catalog.json.*")), [])
+
+    def test_protected_partial_run_still_refreshes_catalog_without_changing_rc(self):
+        harness = self.harness
+        protected = harness.content_library("ESX_HOST")
+        harness.protect("ESX_HOST")
+        before = fingerprint(protected)
+
+        result = harness.run("esx", "install")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(),
+                         {"esx": "SKIPPED:PROTECTED", "install": "OK"})
+        self.assertEqual(harness.called(),
+                         ["binaries list install", "binaries download"] + CATALOG)
+        self.assertEqual(
+            {item["type"] for item in
+             json.loads((harness.state / "catalog.json").read_text())["items"]},
+            {"INSTALL", "UPGRADE", "PATCH"},
+        )
+        self.assertEqual(
+            json.loads((harness.state / "catalog-attempt.json").read_text())["status"],
+            "success",
+        )
+        self.assertEqual(fingerprint(protected), before)
 
     def test_unrelated_downloads_run_while_content_libraries_stay_protected(self):
         # Issue #47: VKR and SUPERVISOR are protected operator libraries. The
@@ -128,7 +273,11 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(),
                          {"install": "OK", "upgrade": "OK", "patches": "OK"})
-        self.assertEqual(harness.called(), ["binaries list", "binaries download"] * 3)
+        self.assertEqual(harness.called(), [
+            "binaries list install", "binaries download",
+            "binaries list upgrade", "binaries download",
+            "binaries list patch", "binaries download",
+        ] + CATALOG)
         self.assertEqual(fingerprint(vkr), before["VKR"])
         self.assertEqual(fingerprint(supervisor), before["SUPERVISOR"])
         self.assertEqual({path: path.read_bytes() for path in bytes_before}, bytes_before)
@@ -160,7 +309,9 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {
             "esx": "SKIPPED:PROTECTED", "install": "OK", "patches": "SKIPPED:PROTECTED"})
-        self.assertEqual(harness.called(), ["binaries list", "binaries download", "binaries list"])
+        self.assertEqual(harness.called(),
+                         ["binaries list install", "binaries download",
+                          "binaries list patch"] + CATALOG)
         self.assertIn("PROD/COMP/ESX_HOST is protected and esx-image-library writes it, "
                       "skipping the target without changing it", result.stdout)
         self.assertIn("PROD/COMP/ESX_HOST is protected and vcf-patches writes it, "
@@ -182,7 +333,7 @@ class SyncProtectionScopeTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"patches": "SKIPPED:PROTECTED"})
-        self.assertEqual(harness.called(), ["binaries list"])
+        self.assertEqual(harness.called(), ["binaries list patch"] + CATALOG)
         self.assertIn("PROD/COMP/VKR is protected and vcf-patches writes it", result.stdout)
         self.assertNotIn("SUPERVISOR is protected", result.stdout)
 
@@ -195,7 +346,7 @@ class SyncProtectionScopeTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"patches": "OK"})
-        self.assertEqual(harness.called(), ["binaries download"])
+        self.assertEqual(harness.called(), ["binaries download"] + CATALOG)
         self.assertNotIn("writes", result.stdout)
 
     def test_unprovable_scope_does_not_run_and_leaves_protected_trees(self):
@@ -214,7 +365,9 @@ class SyncProtectionScopeTests(unittest.TestCase):
                 result = harness.run("patches", env=env)
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
                 self.assertEqual(harness.statuses(), {"patches": status})
-                self.assertEqual(harness.called(), ["binaries list"])
+                # The same fault stops the catalog after its first inventory.
+                self.assertEqual(harness.called(),
+                                 ["binaries list patch", "binaries list install"])
                 self.assertIn(f"ERROR: {message}", result.stdout)
                 self.assertIn("what vcf-patches would write is not proven, so the target is not run",
                               result.stdout)
@@ -240,7 +393,8 @@ class SyncProtectionScopeTests(unittest.TestCase):
                 result = harness.run("patches", env=env)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertEqual(harness.statuses(), {"patches": "FAILED:PROTECTED-CHANGED"})
-                self.assertEqual(harness.called(), ["binaries list", "binaries download"])
+                self.assertEqual(harness.called(),
+                                 ["binaries list patch", "binaries download"] + CATALOG)
                 self.assertRegex(result.stdout,
                                  rf"ERROR: protected tree PROD/COMP/{changed} changed while "
                                  r"vcf-patches ran \([0-9]+ entries differ\)")
@@ -252,7 +406,8 @@ class SyncProtectionScopeTests(unittest.TestCase):
         result = harness.run("patches", env={"STUB_WRITE_TREES": "VKR", "STUB_FAIL_TARGET": "patches"})
         self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"patches": "FAILED:PROTECTED-CHANGED"})
-        self.assertEqual(harness.called(), ["binaries list", "binaries download"])
+        self.assertEqual(harness.called(),
+                         ["binaries list patch", "binaries download"] + CATALOG)
         self.assertRegex(result.stdout, r"ERROR: protected tree PROD/COMP/VKR changed while vcf-patches ran")
         self.assertIn("<<< vcf-patches FAILED:PROTECTED-CHANGED (tool rc=23), continuing", result.stdout)
 
@@ -268,7 +423,7 @@ class SyncProtectionScopeTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"patches": "SKIPPED:PROTECTED"})
-        self.assertEqual(harness.called(), ["binaries list"])
+        self.assertEqual(harness.called(), ["binaries list patch"] + CATALOG)
         self.assertIn("PROD/COMP/VKR is protected and vcf-patches writes it", result.stdout)
         self.assertEqual(fingerprint(vkr), before)
 
@@ -288,7 +443,9 @@ class SyncProtectionScopeTests(unittest.TestCase):
                 result = harness.run("patches", env={"STUB_LIST_RAW_ROWS": row})
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertEqual(harness.statuses(), {"patches": "FAILED:UNVERIFIED"})
-                self.assertEqual(harness.called(), ["binaries list"])
+                # The malformed row stops the catalog after its first inventory.
+                self.assertEqual(harness.called(),
+                                 ["binaries list patch", "binaries list install"])
                 self.assertIn("<<< vcf-patches FAILED:UNVERIFIED, continuing", result.stdout)
                 self.assertEqual(fingerprint(vkr), before)
                 self.assertEqual((vkr / "releases" / "v1" / "image.ova").read_bytes(), vkr_bytes)
@@ -315,7 +472,8 @@ class SyncProtectionScopeTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"patches": "OK"})
-        self.assertEqual(harness.called(), ["binaries list", "binaries download"])
+        self.assertEqual(harness.called(),
+                         ["binaries list patch", "binaries download"] + CATALOG)
         self.assertEqual(result.stdout.count(
             "WARNING: find could not read some entries under protected tree PROD/COMP/VKR (1)"), 1)
         self.assertIn(str(closed), result.stdout)
@@ -348,7 +506,8 @@ class SyncProtectionScopeTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"patches": "FAILED:UNVERIFIED"})
-        self.assertEqual(harness.called(), ["binaries list", "binaries download"])
+        self.assertEqual(harness.called(),
+                         ["binaries list patch", "binaries download"] + CATALOG)
         self.assertIn("ERROR: could not take the after-run fingerprint of PROD/COMP/VKR after "
                       "vcf-patches ran, so the protected tree could not be verified", result.stdout)
         self.assertNotIn("changed while", result.stdout)
@@ -504,7 +663,8 @@ class SyncOwnershipFailureTests(unittest.TestCase):
                 # tool what install writes before downloading; the post-dispatch
                 # fault has no protected tree, so esx runs and creates the tree
                 # whose recording then fails.
-                expected_calls = {"healthy": "binaries list\nbinaries download\n",
+                expected_calls = {"healthy": "binaries list\nbinaries download\n"
+                                             "binaries list\nbinaries list\nbinaries list\n",
                                   "post-dispatch": "esx download\n"}
                 self.assertEqual(calls.read_text() if calls.exists() else "",
                                  expected_calls.get(failure, ""))

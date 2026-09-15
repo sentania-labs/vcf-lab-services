@@ -41,6 +41,50 @@ jq -e '.running == false and .armed == false and .lastRun == {}' \
 	"$STATE_DIR/state.json" >/dev/null
 echo "malformed state recovery tests passed"
 
+STATE_DIR="$work_dir/state-catalog"
+AUTH_FILE="$work_dir/no-auth"
+mkdir -p "$STATE_DIR"
+printf '%s' '{"running":false,"armed":false,"lastRun":{}}' > "$STATE_DIR/state.json"
+mkdir -p "$STATE_DIR/catalog-build.orphaned"
+printf 'raw inventory\n' > "$STATE_DIR/catalog-build.orphaned/install.out"
+open_attempt='{"version":1,"attemptId":"catalog-open","status":"running","startedAt":"2026-09-21T03:00:05Z"}'
+printf '%s' "$open_attempt" > "$STATE_DIR/catalog-attempt.json"
+printf '%s' '{"version":1,"attemptId":"catalog-older","updatedAt":"2026-09-14T03:10:00Z","items":[]}' \
+	> "$STATE_DIR/catalog.json"
+init_state >/dev/null
+[ ! -e "$STATE_DIR/catalog-build.orphaned" ]
+jq -e '.status == "interrupted" and .attemptId == "catalog-open"
+  and .startedAt == "2026-09-21T03:00:05Z" and (.error | length) > 0
+  and (.finishedAt | length) > 0' "$STATE_DIR/catalog-attempt.json" >/dev/null
+jq -e '.attemptId == "catalog-older" and .updatedAt == "2026-09-14T03:10:00Z"' \
+	"$STATE_DIR/catalog.json" >/dev/null
+# The attempt that published the saved catalog reached its durable result, so
+# only its metadata write was lost and a boot must not call it interrupted.
+printf '%s' "$open_attempt" > "$STATE_DIR/catalog-attempt.json"
+printf '%s' '{"version":1,"attemptId":"catalog-open","updatedAt":"2026-09-21T03:04:00Z","items":[]}' \
+	> "$STATE_DIR/catalog.json"
+init_state >/dev/null
+jq -e '.status == "running"' "$STATE_DIR/catalog-attempt.json" >/dev/null
+printf '%s' '{"version":1,"attemptId":"catalog-done","status":"success","startedAt":"2026-09-21T03:00:05Z","finishedAt":"2026-09-21T03:04:00Z"}' \
+	> "$STATE_DIR/catalog-attempt.json"
+init_state >/dev/null
+jq -e '.status == "success" and .finishedAt == "2026-09-21T03:04:00Z"' \
+	"$STATE_DIR/catalog-attempt.json" >/dev/null
+rm -f "$STATE_DIR/catalog-attempt.json" "$STATE_DIR/catalog.json"
+init_state >/dev/null
+[ ! -e "$STATE_DIR/catalog-attempt.json" ]
+mkdir -p "$STATE_DIR/catalog-build.live"
+printf 'in use\n' > "$STATE_DIR/catalog-build.live/install.out"
+exec 7>"$STATE_DIR/sync.lock"
+flock 7
+init_state >/dev/null
+[ -e "$STATE_DIR/catalog-build.live/install.out" ]
+flock -u 7
+exec 7>&-
+init_state >/dev/null
+[ ! -e "$STATE_DIR/catalog-build.live" ]
+echo "catalog attempt and workspace boot reconciliation tests passed"
+
 STATE_DIR="$work_dir/state-lock"
 AUTH_FILE="$work_dir/activation-code.txt"
 mkdir -p "$STATE_DIR"
@@ -153,29 +197,6 @@ grep -q 'Sync dispatch is disabled' "$work_dir/blocked.log"
 [ ! -s "$dispatch_log" ]
 echo "version mismatch safe-stop tests passed"
 
-refresh_set_log="$work_dir/refresh-set.log"
-touch "$refresh_set_log"
-(
-	export FAKE_SET_LOG="$refresh_set_log"
-	export PATH="$stub_bin:$PATH"
-	export SETTINGS_FILE="$settings"
-	export STATE_DIR="$work_dir/state"
-	export AUTH_FILE="$work_dir/activation-code.txt"
-	export TOOL_ROOT="$work_dir/tool"
-	export REDIS_HOST=stub
-	# shellcheck source=/dev/null
-	source "$project_dir/sync/entrypoint.sh"
-	exec 7>"$STATE_DIR/sync.lock"
-	flock 7
-	refresh_versions
-	flock -u 7
-	exec 7>&-
-	refresh_versions
-)
-[ "$(grep -c '^invoked$' "$work_dir/tool-calls.log")" -eq 1 ]
-[ "$(grep -c 'vcf-services:sync:versions' "$refresh_set_log")" -eq 2 ]
-echo "versions refresh lock tests passed"
-
 armed_set_log="$work_dir/armed-set.log"
 touch "$armed_set_log"
 mkdir -p "$work_dir/state-armed"
@@ -210,7 +231,7 @@ armed_state_inode="$(stat -c %i "$work_dir/state-armed/state.json")"
 echo "armed-state skip-unchanged tests passed"
 
 printf '%s\n' '{"kind":"sync","targets":["patches","bogus"]}' > "$FAKE_QUEUE_FILE"
-printf '%s\n' '{"kind":"versions"}' >> "$FAKE_QUEUE_FILE"
+printf '%s\n' '{"kind":"unknown"}' >> "$FAKE_QUEUE_FILE"
 
 PATH="$stub_bin:$PATH" \
 SETTINGS_FILE="$settings" \
@@ -227,7 +248,7 @@ sleep 4
 grep -q 'vcf-services:sync:status' "$FAKE_SET_LOG"
 grep -q '^dispatch:patches$' "$dispatch_log"
 ! grep -q bogus "$dispatch_log"
-grep -q 'vcf-services:sync:versions' "$FAKE_SET_LOG"
+grep -q "ignored unknown request kind 'unknown'" "$work_dir/scheduler.log"
 ! grep -q '^dispatch:$' "$dispatch_log"
 jq -e '.running == false' "$work_dir/state/state.json" >/dev/null
 
