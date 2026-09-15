@@ -80,6 +80,19 @@ components_for_filter() {
 }
 
 if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
+	# The licensed tool stages listing metadata below Java's user.home even
+	# though the list command does not accept --depot-store. Model that
+	# behavior so image tests exercise the hardened container's real boundary.
+	listing_home="$HOME"
+	for option in ${JAVA_TOOL_OPTIONS:-}; do
+		case "$option" in -Duser.home=*) listing_home="${option#*=}" ;; esac
+	done
+	listing_manifest="$listing_home/tmpRootDir/PROD/metadata/manifest/v1/vcfManifest.json"
+	if ! mkdir -p "$(dirname "$listing_manifest")" 2>/dev/null \
+		|| ! printf '{}\n' > "$listing_manifest" 2>/dev/null; then
+		echo "Could not list the binaries." >&2
+		exit 23
+	fi
 	query_mode="$(catalog_mode "$@")"
 	[ -z "${STUB_FAIL_CATALOG_MODE:-}" ] \
 		|| [ "${STUB_FAIL_CATALOG_MODE}" != "$query_mode" ] || exit 23
@@ -107,6 +120,7 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	done
 	[ -z "${STUB_LIST_RAW_ROWS:-}" ] || printf '%s\n' "$STUB_LIST_RAW_ROWS"
 	printf -- '-----\n%s elements\n' "$#"
+	[ "${STUB_LEAVE_LISTING_STAGE:-0}" = 1 ] || rm -rf -- "$listing_home/tmpRootDir"
 	exit 0
 fi
 

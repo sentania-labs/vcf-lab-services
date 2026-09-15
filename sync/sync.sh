@@ -158,7 +158,7 @@ components_for_download() {
 		return 1
 	fi
 	listing[2]=list
-	output="$("${listing[@]}" 2>&1)" || rc=$?
+	output="$(run_tool_listing "${listing[@]}" 2>&1)" || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		log "ERROR: the tool could not list the binaries this target would download (exit $rc)"
 		printf '%s\n' "$output" | tail -n 5 | while IFS= read -r line; do log "  tool: $line"; done
@@ -173,6 +173,28 @@ components_for_download() {
 		scope_rc=1
 		return 1
 	fi
+}
+
+# The tool's list command does not accept --depot-store. It stages catalog
+# metadata below Java's user.home instead, so give only listing processes an
+# isolated directory on the container's existing scratch mount. Downloads
+# retain their normal home and explicit depot store. Removing the whole unique
+# directory after each call also reaps files left by a failed vendor process.
+run_tool_listing() {
+	local scratch_root="${TMPDIR:-/tmp}" listing_home rc=0
+	if ! listing_home="$(mktemp -d "$scratch_root/vcfdt-listing.XXXXXX" 2>/dev/null)"; then
+		printf 'ERROR: listing scratch root %s is not writable; ensure the container scratch mount is writable\n' \
+			"$scratch_root" >&2
+		return 73
+	fi
+	JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-Duser.home=$listing_home" \
+		"$@" || rc=$?
+	if ! rm -rf -- "$listing_home"; then
+		printf 'ERROR: listing scratch directory %s could not be cleared; check the container scratch mount permissions\n' \
+			"$listing_home" >&2
+		[ "$rc" -ne 0 ] || rc=74
+	fi
+	return "$rc"
 }
 
 # A protected tree is fingerprinted by the type, mode, owner, size, mtime,
@@ -440,9 +462,13 @@ refresh_catalog() {
 			patch) arguments=("--vcf-version=$VCF_VERSION" "--sku=$SKU" --patches-only) ;;
 		esac
 		output="$catalog_workspace/$mode.out"
-		"$tool" binaries list "$ceip_opt" "$auth_opt" \
+		run_tool_listing "$tool" binaries list "$ceip_opt" "$auth_opt" \
 			"${arguments[@]}" > "$output" 2>&1 || rc=$?
 		if [ "$rc" -ne 0 ]; then
+			if [ "$rc" -eq 73 ] || [ "$rc" -eq 74 ]; then
+				line="$(grep -F 'ERROR: listing scratch ' "$output" | tail -n 1 || true)"
+				[ -z "$line" ] || log "$line"
+			fi
 			error="$mode inventory query failed with exit code $rc"
 			break
 		fi

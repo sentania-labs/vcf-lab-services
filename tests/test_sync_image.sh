@@ -23,7 +23,8 @@ absent() {
 }
 
 "$project_dir/tests/make-stub-vcfdt.sh" "$work_dir/vcf-download-tool-0.0.0-stub.tar.gz" >/dev/null
-mkdir -p "$work_dir/tool" "$work_dir/state" "$work_dir/secrets" \
+mkdir -p "$work_dir/tool" "$work_dir/state" "$work_dir/secrets" "$work_dir/vdt-state" \
+	"$work_dir/scratch" \
 	"$work_dir/depot/PROD/COMP/ESX_HOST"
 tar -xzf "$work_dir/vcf-download-tool-0.0.0-stub.tar.gz" \
 	-C "$work_dir/tool" --strip-components=1
@@ -40,11 +41,13 @@ run_shipped_sync() {
 	local log="$1"
 	shift
 	local rc=0
-	docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+	docker run --rm --read-only --user "$(id -u):$(id -g)" -e HOME=/home/vcf \
 		-e SETTINGS_FILE=/nonexistent/settings.env \
 		-v "$work_dir/tool:/opt/vcfdt" \
 		-v "$work_dir/depot:/depot" \
 		-v "$work_dir/state:/state" \
+		-v "$work_dir/vdt-state:/home/vcf/.local/share/vmware/vdt" \
+		-v "$work_dir/scratch:/tmp" \
 		-v "$work_dir/secrets:/etc/vcf-services/secrets:ro" \
 		--entrypoint /usr/local/bin/sync.sh "$image" "$@" > "$log" 2>&1 || rc=$?
 	cat "$log"
@@ -55,6 +58,7 @@ run_shipped_sync() {
 	absent 'syntax error' "$log"
 	absent 'could not read depot ownership' "$log"
 	grep -q 'sync finished overall rc=0' "$log"
+	[ -z "$(find "$work_dir/scratch" -mindepth 1 -print -quit)" ]
 }
 
 # With ESX_HOST protected, the ESX image library skips, install runs because
@@ -96,4 +100,21 @@ grep -qx 'operator content' "$work_dir/depot/PROD/COMP/ESX_HOST/operator.bin"
 jq -e '.trees.ESX_HOST == {ownership:"operator-provided", protected:false}' \
 	"$work_dir/state/depot-ownership.json" >/dev/null
 jq -e '.lastRun.esx.status == "OK" and .lastRun.patches.status == "OK"' "$work_dir/state/state.json" >/dev/null
+
+# An unrelated protected tree forces all three binary targets through their
+# listing step, then proves each real download runs under the same read-only
+# root and unwritable home used above.
+mkdir -p "$work_dir/depot/PROD/COMP/VKR"
+printf '[]\n' > "$work_dir/depot/PROD/COMP/VKR/items.json"
+printf '{}\n' > "$work_dir/depot/PROD/COMP/VKR/lib.json"
+printf 'operator vkr content\n' > "$work_dir/depot/PROD/COMP/VKR/operator.bin"
+printf '%s\n' '{"version":1,"trees":{"ESX_HOST":{"ownership":"operator-provided","protected":false},"VKR":{"ownership":"operator-provided","protected":true}}}' \
+	> "$work_dir/state/depot-ownership.json"
+run_shipped_sync "$work_dir/listing-scratch.log" install upgrade patches
+grep -q '<<< vcf-install OK' "$work_dir/listing-scratch.log"
+grep -q '<<< vcf-upgrade OK' "$work_dir/listing-scratch.log"
+grep -q '<<< vcf-patches OK' "$work_dir/listing-scratch.log"
+grep -qx 'operator vkr content' "$work_dir/depot/PROD/COMP/VKR/operator.bin"
+jq -e '.lastRun.install.status == "OK" and .lastRun.upgrade.status == "OK"
+  and .lastRun.patches.status == "OK"' "$work_dir/state/state.json" >/dev/null
 echo "sync image ownership tests passed on $image ($image_jq)"
