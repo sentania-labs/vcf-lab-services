@@ -45,6 +45,7 @@ class Harness:
         self.activation = self.root / "activation"
         self.activation.write_text("test-activation\n")
         self.calls = self.root / "calls"
+        self.identities = self.root / "identities"
         self.manifest = self.state / "depot-ownership.json"
         self.scratch = self.root / "scratch"
         self.scratch.mkdir()
@@ -72,6 +73,7 @@ class Harness:
 
     def run(self, *targets, env=None, bash_env=None):
         self.calls.write_text("")
+        self.identities.write_text("")
         environment = {
             **os.environ,
             "HOME": str(self.root),
@@ -83,6 +85,7 @@ class Harness:
             "DEPOT_OWNERSHIP_FILE": str(self.manifest),
             "DEPOT_OWNERSHIP_LOCK": str(self.state / "depot-ownership.lock"),
             "STUB_CALL_LOG": str(self.calls),
+            "STUB_IDENTITY_LOG": str(self.identities),
         }
         for key in ("STUB_LIST_COMPONENTS", "STUB_FAIL_TARGET", "STUB_FAIL_CATALOG_MODE",
                     "STUB_LIST_NO_TABLE", "STUB_LIST_RAW_ROWS", "STUB_WRITE_TREES",
@@ -101,6 +104,10 @@ class Harness:
 
     def called(self):
         return self.calls.read_text().splitlines()
+
+    def depot_identities(self):
+        """The Software Depot ID every tool invocation of the run resolved."""
+        return self.identities.read_text().splitlines()
 
 
 # Every admitted run queries the three inventories in this order after its
@@ -360,6 +367,12 @@ class SyncProtectionScopeTests(unittest.TestCase):
             "binaries list patch", "binaries download",
         ] + CATALOG)
         self.assertEqual(list(harness.scratch.iterdir()), [])
+        identities = set(harness.depot_identities())
+        self.assertEqual(len(identities), 1, harness.depot_identities())
+        self.assertEqual(
+            identities,
+            {(home / ".local" / "share" / "vmware" / "vdt" / "machine_id").read_text().strip()},
+        )
 
     def test_unwritable_listing_scratch_has_an_operator_action(self):
         harness = self.harness
