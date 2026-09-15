@@ -1847,14 +1847,16 @@ def _catalog_version_key(version):
 
 def _catalog_attempt_abandoned(attempt, state):
     # A sync closes its catalog attempt before it records finishedAt, so an
-    # attempt still open when a run finished at or after it started has lost
-    # its owner. An attempt that started after the last recorded finish is
-    # still owned by a live run, even before that run publishes running.
+    # attempt still open when a run finished strictly after it started has
+    # lost its owner. An attempt that started at or after the last recorded
+    # finish is still owned by a live run, even before that run publishes
+    # running: these timestamps carry whole seconds, so a run dispatched in
+    # the same second as the previous one finished shares its value.
     started = attempt.get("startedAt")
     finished = state.get("finishedAt")
     if not isinstance(started, str) or not isinstance(finished, str):
         return False
-    return finished >= started
+    return finished > started
 
 
 def _catalog(state):

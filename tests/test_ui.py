@@ -3257,6 +3257,19 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(attempt["status"], "running")
         self.assertIsNone(attempt["error"])
 
+    def test_attempt_started_in_the_same_second_as_the_last_finish_is_live(self):
+        # These timestamps carry whole seconds, so a run dispatched in the
+        # second the previous run finished shares its finishedAt value.
+        self.claim()
+        self.write_state(running=False, finishedAt="2026-09-14T03:10:00Z")
+        (self.state_dir / "catalog-attempt.json").write_text(json.dumps({
+            "version": 1, "attemptId": "catalog-running", "status": "running",
+            "startedAt": "2026-09-14T03:10:00Z",
+        }))
+        attempt = self.get("/api/status").get_json()["catalog"]["attempt"]
+        self.assertEqual(attempt["status"], "running")
+        self.assertIsNone(attempt["error"])
+
     def test_status_labels_components_by_full_name_falling_back_to_the_key(self):
         self.claim()
         self.write_state(running=False)
