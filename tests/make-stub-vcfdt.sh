@@ -100,10 +100,16 @@ components_for_filter() {
 if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	# The licensed tool stages listing metadata below its download root even
 	# though the list command does not accept --depot-store. Model that
-	# behavior so image tests exercise the hardened container's real boundary.
+	# behavior so image tests exercise the hardened container's real boundary,
+	# and model a manifest an earlier listing left staged there being read as
+	# it stands, which is what makes a shared stage stale evidence.
 	listing_manifest="$listing_root/tmpRootDir/PROD/metadata/manifest/v1/vcfManifest.json"
-	if ! mkdir -p "$(dirname "$listing_manifest")" 2>/dev/null \
-		|| ! printf '{}\n' > "$listing_manifest" 2>/dev/null; then
+	if [ -s "$listing_manifest" ]; then
+		staged_components="$(cat "$listing_manifest")"
+	elif mkdir -p "$(dirname "$listing_manifest")" 2>/dev/null \
+		&& components_for_filter "$@" > "$listing_manifest" 2>/dev/null; then
+		staged_components="$(cat "$listing_manifest")"
+	else
 		echo "Could not list the binaries." >&2
 		exit 23
 	fi
@@ -117,8 +123,8 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 		echo "No binaries matched the given filter."
 		exit 0
 	fi
-	# shellcheck disable=SC2046
-	set -- $(components_for_filter "$@")
+	# shellcheck disable=SC2086
+	set -- $staged_components
 	case "$query_mode" in
 		install) row_type=INSTALL ;;
 		patch) row_type=PATCH ;;
@@ -134,7 +140,13 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	done
 	[ -z "${STUB_LIST_RAW_ROWS:-}" ] || printf '%s\n' "$STUB_LIST_RAW_ROWS"
 	printf -- '-----\n%s elements\n' "$#"
-	[ "${STUB_LEAVE_LISTING_STAGE:-0}" = 1 ] || rm -rf -- "$listing_root/tmpRootDir"
+	# A vendor process can leave its stage behind, and STUB_LOCK_LISTING_STAGE
+	# leaves it behind without write permission, so the caller's cleanup fails.
+	if [ "${STUB_LOCK_LISTING_STAGE:-0}" = 1 ]; then
+		chmod 0555 "$listing_root"
+	elif [ "${STUB_LEAVE_LISTING_STAGE:-0}" != 1 ]; then
+		rm -rf -- "$listing_root/tmpRootDir"
+	fi
 	exit 0
 fi
 

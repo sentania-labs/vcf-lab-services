@@ -89,7 +89,8 @@ class Harness:
         }
         for key in ("STUB_LIST_COMPONENTS", "STUB_FAIL_TARGET", "STUB_FAIL_CATALOG_MODE",
                     "STUB_LIST_NO_TABLE", "STUB_LIST_RAW_ROWS", "STUB_WRITE_TREES",
-                    "STUB_RETARGET_LINKS", "STUB_LEAVE_LISTING_STAGE"):
+                    "STUB_RETARGET_LINKS", "STUB_LEAVE_LISTING_STAGE",
+                    "STUB_LOCK_LISTING_STAGE"):
             environment.pop(key, None)
         environment.update(env or {})
         if bash_env:
@@ -373,6 +374,46 @@ class SyncProtectionScopeTests(unittest.TestCase):
             identities,
             {(home / ".local" / "share" / "vmware" / "vdt" / "machine_id").read_text().strip()},
         )
+
+    def test_a_failed_listing_leaves_no_evidence_for_the_next_listing(self):
+        harness = self.harness
+        harness.content_library("ESX_HOST")
+        harness.protect("ESX_HOST")
+        before = fingerprint(harness.comp / "ESX_HOST")
+
+        result = harness.run(
+            "install", "upgrade", "patches",
+            env={"STUB_FAIL_CATALOG_MODE": "install", "STUB_LEAVE_LISTING_STAGE": "1"},
+        )
+
+        self.assertEqual(harness.statuses(), {
+            "install": "FAILED:23",
+            "upgrade": "SKIPPED:PROTECTED",
+            "patches": "SKIPPED:PROTECTED",
+        })
+        self.assertIn("PROD/COMP/ESX_HOST is protected and vcf-upgrade writes it", result.stdout)
+        self.assertEqual(fingerprint(harness.comp / "ESX_HOST"), before)
+        self.assertEqual(list(harness.scratch.iterdir()), [])
+
+    def test_a_scratch_that_cannot_be_cleared_keeps_a_good_listing(self):
+        harness = self.harness
+        harness.content_library("VKR")
+        harness.protect("VKR")
+
+        def unlock_scratch():
+            for entry in harness.scratch.iterdir():
+                if entry.is_dir():
+                    os.chmod(entry, 0o755)
+        self.addCleanup(unlock_scratch)
+
+        result = harness.run("install", env={"STUB_LOCK_LISTING_STAGE": "1"})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(), {"install": "OK"})
+        self.assertEqual(harness.called(), ["binaries list install", "binaries download"] + CATALOG)
+        self.assertIn("could not be cleared", result.stdout)
+        self.assertEqual(json.loads((harness.state / "catalog-attempt.json").read_text())["status"],
+                         "success")
 
     def test_unwritable_listing_scratch_has_an_operator_action(self):
         harness = self.harness

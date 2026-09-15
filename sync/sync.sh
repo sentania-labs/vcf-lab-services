@@ -158,12 +158,13 @@ components_for_download() {
 		return 1
 	fi
 	listing[2]=list
-	if ! listing_workspace; then
+	if ! open_listing_scratch; then
 		scope_status="FAILED:UNVERIFIED"
 		scope_rc=1
 		return 1
 	fi
 	output="$(run_tool_listing "${listing[@]}" 2>&1)" || rc=$?
+	close_listing_scratch
 	if [ "$rc" -ne 0 ]; then
 		log "ERROR: the tool could not list the binaries this target would download (exit $rc)"
 		printf '%s\n' "$output" | tail -n 5 | while IFS= read -r line; do log "  tool: $line"; done
@@ -187,16 +188,28 @@ components_for_download() {
 # root is moved, onto the container's existing scratch mount, and only for
 # listings. Downloads keep their normal home and their explicit depot store,
 # and user.home is left alone so every process resolves the same registered
-# identity. One directory serves the whole run and is removed when the run
-# ends, which also reaps whatever a failed vendor process left behind.
+# identity. Every listing stages into a directory of its own, so a listing
+# that dies partway cannot leave a stale or partial manifest for the next
+# listing to read as the trees a target would write. The directory is removed
+# as soon as its listing returns; a removal that fails is reported, swept
+# again when the run ends, and never changes what the tool reported.
 listing_scratch=""
-listing_workspace() {
-	[ -z "$listing_scratch" ] || return 0
+listing_leftovers=()
+open_listing_scratch() {
 	if ! listing_scratch="$(mktemp -d "${TMPDIR:-/tmp}/vcfdt-listing.XXXXXX" 2>/dev/null)"; then
 		listing_scratch=""
 		log "ERROR: listing scratch root ${TMPDIR:-/tmp} is not writable; ensure the container scratch mount is writable"
 		return 1
 	fi
+}
+
+close_listing_scratch() {
+	[ -n "$listing_scratch" ] || return 0
+	if ! rm -rf -- "$listing_scratch"; then
+		log "WARNING: listing scratch directory $listing_scratch could not be cleared; check the container scratch mount permissions"
+		listing_leftovers+=("$listing_scratch")
+	fi
+	listing_scratch=""
 }
 
 run_tool_listing() {
@@ -469,12 +482,13 @@ refresh_catalog() {
 			patch) arguments=("--vcf-version=$VCF_VERSION" "--sku=$SKU" --patches-only) ;;
 		esac
 		output="$catalog_workspace/$mode.out"
-		if ! listing_workspace; then
+		if ! open_listing_scratch; then
 			error="$mode inventory query has no writable scratch directory"
 			break
 		fi
 		run_tool_listing "$tool" binaries list "$ceip_opt" "$auth_opt" \
 			"${arguments[@]}" > "$output" 2>&1 || rc=$?
+		close_listing_scratch
 		if [ "$rc" -ne 0 ]; then
 			error="$mode inventory query failed with exit code $rc"
 			break
@@ -721,9 +735,8 @@ finish_state() {
 	finish_catalog_on_exit
 	write_state '. + {running:false, currentTarget:null, finishedAt:$t}' --arg t "$(now)"
 	[ -z "$fingerprint_dir" ] || rm -rf -- "$fingerprint_dir"
-	if [ -n "$listing_scratch" ] && ! rm -rf -- "$listing_scratch"; then
-		log "WARNING: listing scratch directory $listing_scratch could not be cleared; check the container scratch mount permissions"
-	fi
+	close_listing_scratch
+	[ "${#listing_leftovers[@]}" -eq 0 ] || rm -rf -- "${listing_leftovers[@]}" 2>/dev/null
 	diag_lock_release
 	stop_log_publisher
 }
