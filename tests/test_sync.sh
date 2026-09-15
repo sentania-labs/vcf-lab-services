@@ -188,7 +188,7 @@ function /usr/local/lib/vcf-services/targets/vkr.sh() {
 STUB
 BASH_ENV="$work_dir/protected-vkr-stub.bash" run_sync vkr > "$work_dir/protected-vkr.log"
 grep -qx 'operator content' "$work_dir/depot/PROD/COMP/VKR/content.txt"
-grep -q 'PROD/COMP/VKR is protected, skipping the target without changing it' \
+grep -q 'PROD/COMP/VKR is protected and vkr-content-library writes it, skipping the target without changing it' \
 	"$work_dir/protected-vkr.log"
 jq -e '.lastRun.vkr.status == "SKIPPED:PROTECTED"' "$work_dir/state/state.json" >/dev/null
 rm -rf "$work_dir/depot/PROD/COMP/VKR"

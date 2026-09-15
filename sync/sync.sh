@@ -79,15 +79,171 @@ lock_identity() {
 	fi
 }
 
-protected_trees_for_target() {
-	local label="$1"
+protected_trees() {
 	[ -e "$DEPOT_OWNERSHIP_FILE" ] || [ -L "$DEPOT_OWNERSHIP_FILE" ] || return 0
-	# jq 1.6 reserves "label" as a keyword, so the argument is named target.
-	jq -er --arg target "$label" 'if (.trees | type) != "object" then error("invalid ownership manifest") else . end | [.trees | to_entries[] |
-		select(.value.protected == true) |
-		select(if $target == "esx-image-library" then .key == "ESX_HOST"
-		       elif $target == "vkr-content-library" then .key == "VKR"
-		       else true end) | .key] | join("\n")' "$DEPOT_OWNERSHIP_FILE"
+	jq -er 'if (.trees | type) != "object" then error("invalid ownership manifest") else . end |
+		[.trees | to_entries[] | select(.value.protected == true) | .key] | join("\n")' \
+		"$DEPOT_OWNERSHIP_FILE" | LC_ALL=C sort -u
+}
+
+# Each Component value in the tool's binaries table is the PROD/COMP tree that
+# binary lands in. The header names the column, so its position is read rather
+# than assumed; a listing with no such table exits 3. After the header, lines
+# without a '|' (rules, the element count, prose) are ignored, and every other
+# line is a row whose trimmed Component cell is printed as it stands. A row
+# with fewer cells than the header or an empty Component cell exits 3 rather
+# than being dropped, since a dropped row could hide a protected tree. A Full
+# Name containing ' | ' only adds cells after Component. `binaries list` and the
+# "Binaries to be downloaded" table the download itself prints come from the
+# same table printer in the tool, which labels that column 'Component' and
+# delimits columns with ' | ', as the live download logs show. A listing
+# without that header is therefore not a table this code can read, and the
+# target fails closed as FAILED:UNVERIFIED rather than running unchecked.
+components_from_listing() {
+	awk -F'|' '
+		function trim(text) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", text); return text }
+		column == 0 {
+			for (i = 1; i <= NF; i++) {
+				if (trim($i) == "Component") { column = i; columns = NF }
+			}
+			next
+		}
+		index($0, "|") == 0 { next }
+		{
+			value = trim($column)
+			if (NF < columns || value == "") { unparsed = 1; exit 3 }
+			print value
+		}
+		END { if (column == 0 || unparsed) exit 3 }'
+}
+
+# The trees a target writes, one name per line. The ESX image library and the
+# VKr mirror are single-tree commands: every lcm.esx.* path in the tool
+# configuration sits under PROD/COMP/ESX_HOST, and targets/vkr.sh mirrors into
+# PROD/COMP/VKR. A `binaries download` run spans whatever components its
+# filter selects, so those targets ask the tool: `binaries list` with the same
+# filter prints the table the download itself prints under "Binaries to be
+# downloaded" before it starts writing. The tool's own help documents the same
+# filter group for list as for download (--automated-install, --patches-only,
+# --sku, --type, --vcf-version), so the download's filters are passed
+# unchanged. Nothing about those targets is mapped by hand.
+written_trees=""
+scope_status=""
+scope_rc=0
+trees_written_by() {
+	local label="$1"
+	shift
+	case "$label" in
+		esx-image-library) written_trees=ESX_HOST ;;
+		vkr-content-library) written_trees=VKR ;;
+		*) components_for_download "$@" ;;
+	esac
+}
+
+components_for_download() {
+	local -a listing=()
+	local argument output line rc=0
+	for argument in "$@"; do
+		case "$argument" in
+			--depot-store=*) continue ;;
+		esac
+		listing+=("$argument")
+	done
+	if [ "${listing[1]:-}" != binaries ] || [ "${listing[2]:-}" != download ]; then
+		log "ERROR: no listing exists for the command '${listing[*]}'"
+		scope_status="FAILED:UNVERIFIED"
+		scope_rc=1
+		return 1
+	fi
+	listing[2]=list
+	output="$("${listing[@]}" 2>&1)" || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		log "ERROR: the tool could not list the binaries this target would download (exit $rc)"
+		printf '%s\n' "$output" | tail -n 5 | while IFS= read -r line; do log "  tool: $line"; done
+		scope_status="FAILED:$rc"
+		scope_rc=$rc
+		return 1
+	fi
+	if ! written_trees="$(printf '%s\n' "$output" | components_from_listing | LC_ALL=C sort -u)"; then
+		log "ERROR: the tool listing has no component table, so the trees this target would write cannot be verified"
+		printf '%s\n' "$output" | tail -n 5 | while IFS= read -r line; do log "  tool: $line"; done
+		scope_status="FAILED:UNVERIFIED"
+		scope_rc=1
+		return 1
+	fi
+}
+
+# A protected tree is fingerprinted by the type, mode, owner, size, mtime,
+# link count, inode, path and link target of every entry below it. No bytes
+# are read: any entry that is added, removed, replaced, renamed, resized,
+# re-timed, re-linked or re-permissioned changes a line. The lines are
+# streamed to a temporary file rather than held in the shell, and compared
+# with streaming tools, so memory stays bounded however large the tree is.
+# An entry find cannot read is logged as a warning naming its path and its
+# error line stays in the fingerprint, so it compares equal before and after
+# the run; only a fingerprint that cannot be written fails the snapshot.
+fingerprint_dir=""
+fingerprint_workspace() {
+	[ -z "$fingerprint_dir" ] || return 0
+	fingerprint_dir="$(mktemp -d "${TMPDIR:-/tmp}/vcf-services-fingerprint.XXXXXX")"
+}
+
+tree_fingerprint() {
+	local tree="$comp_root/$1" output="$2" report="${3:-}"
+	local entries="$2.entries" errors="$2.errors" count line
+	if [ -e "$tree" ] || [ -L "$tree" ]; then
+		find "$tree" -printf '%y %m %U %G %s %T@ %n %i %p -> %l\n' > "$entries" 2> "$errors"
+		if ! LC_ALL=C sort "$entries" "$errors" > "$output"; then
+			rm -f "$entries" "$errors"
+			return 1
+		fi
+		if [ -n "$report" ] && [ -s "$errors" ]; then
+			count="$(grep -c . "$errors")"
+			log "WARNING: find could not read some entries under protected tree PROD/COMP/$1 ($count); the sync runs as the same user, so it cannot write inside them either"
+			head -n 5 "$errors" | while IFS= read -r line; do log "  $line"; done
+		fi
+		rm -f "$entries" "$errors"
+	else
+		printf 'absent\n' > "$output" || return 1
+	fi
+}
+
+snapshot_protected() {
+	local name
+	fingerprint_workspace || return 1
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		tree_fingerprint "$name" "$fingerprint_dir/$name.before" report || return 1
+	done <<< "$1"
+}
+
+verify_protected_unchanged() {
+	local trees="$1" label="$2"
+	local name line changed=0 unverifiable=0 count before after
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		before="$fingerprint_dir/$name.before"
+		after="$fingerprint_dir/$name.after"
+		if ! tree_fingerprint "$name" "$after"; then
+			unverifiable=1
+			log "ERROR: could not take the after-run fingerprint of PROD/COMP/$name after $label ran, so the protected tree could not be verified"
+			rm -f "$before" "$after"
+			continue
+		fi
+		if cmp -s "$before" "$after"; then
+			rm -f "$before" "$after"
+			continue
+		fi
+		changed=1
+		count="$(LC_ALL=C comm -3 "$before" "$after" | wc -l)"
+		log "ERROR: protected tree PROD/COMP/$name changed while $label ran ($count entries differ); review it before the next run"
+		LC_ALL=C comm -3 "$before" "$after" | head -n 5 | sed $'s/^\t/> /; t; s/^/< /' \
+			| while IFS= read -r line; do log "  $line"; done
+		rm -f "$before" "$after"
+	done <<< "$trees"
+	[ "$changed" -eq 0 ] || return 1
+	[ "$unverifiable" -eq 0 ] || return 2
+	return 0
 }
 
 record_tree_if_absent() {
@@ -344,6 +500,7 @@ write_state '. + {running:true, armed:true, currentTarget:null, startedAt:$t, ta
 
 finish_state() {
 	write_state '. + {running:false, currentTarget:null, finishedAt:$t}' --arg t "$(now)"
+	[ -z "$fingerprint_dir" ] || rm -rf -- "$fingerprint_dir"
 	diag_lock_release
 	stop_log_publisher
 }
@@ -361,28 +518,79 @@ run_target() {
 	local label="$1"
 	shift
 	log ">>> $label"
-	local protected name
-	if ! protected="$(protected_trees_for_target "$label")"; then
+	local protected conflicts name count names
+	if ! protected="$(protected_trees)"; then
 		log "ERROR: could not read depot ownership; refusing sync"
 		exit 1
 	fi
 	if [ -n "$protected" ]; then
-		while IFS= read -r name; do
-			log "PROD/COMP/$name is protected, skipping the target without changing it"
-		done <<< "$protected"
-		last_status="SKIPPED:PROTECTED"
-		log "<<< $label $last_status"
-		return
+		if ! trees_written_by "$label" "$@"; then
+			log "protected trees exist and what $label would write is not proven, so the target is not run"
+			last_status="$scope_status"
+			overall_rc=$scope_rc
+			log "<<< $label $last_status, continuing"
+			return
+		fi
+		conflicts="$(LC_ALL=C comm -12 <(printf '%s\n' "$protected") <(printf '%s\n' "$written_trees"))"
+		if [ -n "$conflicts" ]; then
+			while IFS= read -r name; do
+				log "PROD/COMP/$name is protected and $label writes it, skipping the target without changing it"
+			done <<< "$conflicts"
+			last_status="SKIPPED:PROTECTED"
+			log "<<< $label $last_status"
+			return
+		fi
+		if [ -n "$written_trees" ]; then
+			count="$(printf '%s\n' "$written_trees" | grep -c .)"
+			names="$(printf '%s\n' "$written_trees" | paste -sd, | sed 's/,/, /g')"
+			log "$label writes $count trees under PROD/COMP ($names); none of them is protected"
+		else
+			log "$label lists nothing to download for its filter, so it writes no PROD/COMP tree"
+		fi
+		if ! snapshot_protected "$protected"; then
+			log "ERROR: could not record the protected trees before running $label, so the target is not run"
+			last_status="FAILED:UNVERIFIED"
+			overall_rc=1
+			log "<<< $label $last_status, continuing"
+			return
+		fi
 	fi
-	if "$@"; then
-		log "<<< $label OK"
+	local target_rc=0
+	"$@" || target_rc=$?
+	if [ "$target_rc" -eq 0 ]; then
 		last_status=OK
 	else
-		local target_rc=$?
 		overall_rc=$target_rc
 		last_status="FAILED:$target_rc"
-		log "<<< $label FAILED rc=$target_rc, continuing"
 	fi
+	local verify_rc=0
+	if [ -n "$protected" ]; then
+		verify_protected_unchanged "$protected" "$label" || verify_rc=$?
+	fi
+	case "$verify_rc" in
+		1)
+			[ "$target_rc" -ne 0 ] || overall_rc=1
+			last_status="FAILED:PROTECTED-CHANGED"
+			;;
+		2)
+			if [ "$target_rc" -eq 0 ]; then
+				overall_rc=1
+				last_status="FAILED:UNVERIFIED"
+			fi
+			;;
+	esac
+	case "$last_status" in
+		OK) log "<<< $label OK" ;;
+		FAILED:UNVERIFIED) log "<<< $label $last_status, continuing" ;;
+		FAILED:PROTECTED-CHANGED)
+			if [ "$target_rc" -ne 0 ]; then
+				log "<<< $label $last_status (tool rc=$target_rc), continuing"
+			else
+				log "<<< $label $last_status, continuing"
+			fi
+			;;
+		*) log "<<< $label FAILED rc=$target_rc, continuing" ;;
+	esac
 }
 
 for target in $SYNC_TARGETS; do

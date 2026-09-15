@@ -3,9 +3,11 @@
 # own jq, against a stub tool and a representative depot-ownership manifest.
 # Debian bookworm ships jq 1.6, which reserves "label" as a keyword and refused
 # to compile the ownership query that the host's jq 1.7 accepts, so the
-# host-side shell tests could not see that failure. The protected tree must be
-# left alone, the run must finish, and once the operator unprotects the tree
-# the target must run.
+# host-side shell tests could not see that failure; its awk is mawk, which
+# reads the tool's component table here. The protected tree must be left
+# alone, targets that do not write it must still run, targets that the tool
+# says would write it must skip, and once the operator unprotects the tree
+# those targets must run.
 set -euo pipefail
 
 image="${1:?usage: test_sync_image.sh IMAGE}"
@@ -55,26 +57,43 @@ run_shipped_sync() {
 	grep -q 'sync finished overall rc=0' "$log"
 }
 
-# A protected operator tree keeps every tool-backed target away from the depot.
-run_shipped_sync "$work_dir/protected.log" esx install
-grep -q 'PROD/COMP/ESX_HOST is protected, skipping the target without changing it' "$work_dir/protected.log"
+# With ESX_HOST protected, the ESX image library skips, install runs because
+# the tool's listing for it names no ESX_HOST, and patches skips because that
+# listing does. The protected tree is metadata identical afterwards by its
+# fingerprint, and the operator file's bytes are compared directly.
+before="$(find "$work_dir/depot/PROD/COMP/ESX_HOST" -printf '%y %m %s %T@ %i %p -> %l\n' | sort)"
+run_shipped_sync "$work_dir/protected.log" esx install patches
+grep -q 'PROD/COMP/ESX_HOST is protected and esx-image-library writes it, skipping the target without changing it' "$work_dir/protected.log"
 grep -q '<<< esx-image-library SKIPPED:PROTECTED' "$work_dir/protected.log"
-grep -q '<<< vcf-install SKIPPED:PROTECTED' "$work_dir/protected.log"
+grep -q 'vcf-install writes 3 trees under PROD/COMP (NSX_T_MANAGER, SDDC_MANAGER_VCF, VCENTER); none of them is protected' "$work_dir/protected.log"
+grep -q '<<< vcf-install OK' "$work_dir/protected.log"
+grep -q 'PROD/COMP/ESX_HOST is protected and vcf-patches writes it, skipping the target without changing it' "$work_dir/protected.log"
+grep -q '<<< vcf-patches SKIPPED:PROTECTED' "$work_dir/protected.log"
+absent 'UNVERIFIED' "$work_dir/protected.log"
 grep -qx 'operator content' "$work_dir/depot/PROD/COMP/ESX_HOST/operator.bin"
-[ ! -e "$work_dir/depot/STUB" ]
-jq -e '.version == 1 and .trees.ESX_HOST == {ownership:"operator-provided", protected:true}' \
+after="$(find "$work_dir/depot/PROD/COMP/ESX_HOST" -printf '%y %m %s %T@ %i %p -> %l\n' | sort)"
+[ "$before" = "$after" ]
+test -f "$work_dir/depot/STUB/install/20000000.bin"
+test -f "$work_dir/depot/PROD/COMP/VCENTER/stub-install.bin"
+[ ! -e "$work_dir/depot/STUB/esx" ]
+[ ! -e "$work_dir/depot/STUB/patches" ]
+jq -e '.version == 1 and .trees.ESX_HOST == {ownership:"operator-provided", protected:true}
+  and .trees.VCENTER == {ownership:"product-managed", protected:false}' \
 	"$work_dir/state/depot-ownership.json" >/dev/null
 jq -e '.running == false and .lastRun.esx.status == "SKIPPED:PROTECTED"
-  and .lastRun.install.status == "SKIPPED:PROTECTED"' "$work_dir/state/state.json" >/dev/null
+  and .lastRun.install.status == "OK"
+  and .lastRun.patches.status == "SKIPPED:PROTECTED"' "$work_dir/state/state.json" >/dev/null
 
-# Once the operator unprotects the tree, the same query lets the target run.
+# Once the operator unprotects the tree, the same targets run.
 printf '%s\n' '{"version":1,"trees":{"ESX_HOST":{"ownership":"operator-provided","protected":false}}}' \
 	> "$work_dir/state/depot-ownership.json"
-run_shipped_sync "$work_dir/unprotected.log" install
-grep -q '<<< vcf-install OK' "$work_dir/unprotected.log"
-test -f "$work_dir/depot/STUB/install/20000000.bin"
+run_shipped_sync "$work_dir/unprotected.log" esx patches
+grep -q '<<< esx-image-library OK' "$work_dir/unprotected.log"
+grep -q '<<< vcf-patches OK' "$work_dir/unprotected.log"
+test -f "$work_dir/depot/STUB/patches/20000000.bin"
+test -f "$work_dir/depot/PROD/COMP/ESX_HOST/stub-patches.bin"
 grep -qx 'operator content' "$work_dir/depot/PROD/COMP/ESX_HOST/operator.bin"
 jq -e '.trees.ESX_HOST == {ownership:"operator-provided", protected:false}' \
 	"$work_dir/state/depot-ownership.json" >/dev/null
-jq -e '.lastRun.install.status == "OK"' "$work_dir/state/state.json" >/dev/null
+jq -e '.lastRun.esx.status == "OK" and .lastRun.patches.status == "OK"' "$work_dir/state/state.json" >/dev/null
 echo "sync image ownership tests passed on $image ($image_jq)"
