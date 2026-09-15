@@ -42,9 +42,8 @@ descriptor to it, so the scheduler's own housekeeping can never take the lock
 ahead of a run it just launched. The persistent `flock` inside `sync.sh`
 remains the single-writer control: a request that arrives while another run
 holds the lock exits with "another sync already holds the depot lock, skipping
-this trigger". A lock that cannot be
-opened or taken at all is reported as an `ERROR` and the run refuses to
-continue.
+this trigger". A lock that cannot be opened or taken at all is reported as an
+`ERROR` and the run refuses to continue.
 
 ## Status shape (`vcf-services:sync:status`)
 
@@ -109,9 +108,14 @@ the latest attempt, with `running`, `success`, `empty`, `failed`, or
 `interrupted` status and any error. A scheduler boot reconciles an attempt
 still marked `running` to `interrupted`, keeping its original start time,
 because a scheduler that is only now starting proves no run it launched
-survives; the attempt that published the saved catalog is left alone. A failed or interrupted attempt therefore never replaces the last
-successful catalog, and an inventory that parses but lists nothing is recorded
-as `empty` without replacing a catalog that did list components. The admin console reads both files during its normal status polling,
-groups entries by the verified Component value, and sorts verified Version
-values newest first. It does not infer whether an upstream entry is already
-downloaded in the local depot.
+survives; the attempt that published the saved catalog is left alone. A failed
+or interrupted attempt therefore never replaces the last successful catalog,
+and an inventory that parses but lists nothing is recorded as `empty` without
+replacing a catalog that did list components. The admin console reads both
+files during its normal status polling, groups entries by the verified
+Component value, and sorts verified Version values newest first. It does not
+infer whether an upstream entry is already downloaded in the local depot. It
+also reports an attempt still marked `running` as interrupted once the last run
+finished strictly later than that attempt started, because a sync closes its
+attempt before it records `finishedAt`; equal timestamps are a run dispatched
+in the same whole second and stay `running`.
