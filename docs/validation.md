@@ -91,7 +91,14 @@ checked with bounded memory and no leftover scratch files, plus dispatch
 refusal and manifest preservation when ownership reads or persistence fail. It
 also proves that a depot lock which cannot be opened is reported as a locking
 failure rather than as a run in progress, and that the verbose lock
-diagnostics stay silent until the console turns them on.
+diagnostics stay silent until the console turns them on. It covers the
+per-listing scratch directory as well: a listing still succeeds when the home
+directory is not writable and keeps the run's one Software Depot ID, a failed
+listing leaves no staged manifest for the next listing to read, a scratch
+directory that cannot be cleared is reported without discarding a good
+listing, and a scratch root that cannot be created names the operator action.
+The two permission proofs skip under UID 0, which writes through the modes
+they stage.
 The same suite drives the real install, upgrade, and patch listing forms through
 the stub tool, verifies the actual table fields including a Full Name containing
 the table delimiter, and proves a tool or atomic-publish failure preserves the
@@ -112,9 +119,13 @@ claiming a run is in progress.
 `tests/test_sync_image.sh IMAGE` runs the `sync.sh` shipped inside a built
 sync image, with that image's own jq and awk, against a stub tool and a
 protected operator tree: targets that do not write the tree run, targets whose
-listing names it skip. Debian bookworm ships jq 1.6, which rejects a query the
-host's jq 1.7 accepts, and mawk rather than GNU awk, so this proof has to run
-in the image; CI runs it against the freshly built `vcf-services-sync-base:ci`.
+listing names it skip. The container runs with a read-only root filesystem and
+only the deployment's own writable paths, the Software Depot ID directory
+below `HOME` and `/tmp`, so the install, upgrade and patches listings prove
+the hardened boundary and leave no scratch behind. Debian bookworm ships
+jq 1.6, which rejects a query the host's jq 1.7 accepts, and mawk rather than
+GNU awk, so this proof has to run in the image; CI runs it against the freshly
+built `vcf-services-sync-base:ci`.
 
 `tests/make-stub-depot.sh <dir> [version ...]` builds a stub depot tree that
 models the reference depot layout for the tool itself, a flat

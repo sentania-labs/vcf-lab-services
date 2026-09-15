@@ -45,6 +45,7 @@ class Harness:
         self.activation = self.root / "activation"
         self.activation.write_text("test-activation\n")
         self.calls = self.root / "calls"
+        self.identities = self.root / "identities"
         self.manifest = self.state / "depot-ownership.json"
         self.scratch = self.root / "scratch"
         self.scratch.mkdir()
@@ -72,6 +73,7 @@ class Harness:
 
     def run(self, *targets, env=None, bash_env=None):
         self.calls.write_text("")
+        self.identities.write_text("")
         environment = {
             **os.environ,
             "HOME": str(self.root),
@@ -83,10 +85,12 @@ class Harness:
             "DEPOT_OWNERSHIP_FILE": str(self.manifest),
             "DEPOT_OWNERSHIP_LOCK": str(self.state / "depot-ownership.lock"),
             "STUB_CALL_LOG": str(self.calls),
+            "STUB_IDENTITY_LOG": str(self.identities),
         }
         for key in ("STUB_LIST_COMPONENTS", "STUB_FAIL_TARGET", "STUB_FAIL_CATALOG_MODE",
                     "STUB_LIST_NO_TABLE", "STUB_LIST_RAW_ROWS", "STUB_WRITE_TREES",
-                    "STUB_RETARGET_LINKS"):
+                    "STUB_RETARGET_LINKS", "STUB_LEAVE_LISTING_STAGE",
+                    "STUB_LOCK_LISTING_STAGE"):
             environment.pop(key, None)
         environment.update(env or {})
         if bash_env:
@@ -101,6 +105,10 @@ class Harness:
 
     def called(self):
         return self.calls.read_text().splitlines()
+
+    def depot_identities(self):
+        """The Software Depot ID every tool invocation of the run resolved."""
+        return self.identities.read_text().splitlines()
 
 
 # Every admitted run queries the three inventories in this order after its
@@ -336,6 +344,96 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(harness.called(), ["binaries list patch"] + CATALOG)
         self.assertIn("PROD/COMP/VKR is protected and vcf-patches writes it", result.stdout)
         self.assertNotIn("SUPERVISOR is protected", result.stdout)
+
+    def test_listing_uses_scratch_when_home_is_not_writable(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes through a read-only home, so the case cannot be staged")
+        harness = self.harness
+        harness.content_library("VKR")
+        harness.protect("VKR")
+        home = harness.root / "read-only-home"
+        (home / ".local" / "share" / "vmware" / "vdt").mkdir(parents=True)
+        os.chmod(home, 0o555)
+        self.addCleanup(os.chmod, home, 0o755)
+
+        result = harness.run(
+            "install", "upgrade", "patches",
+            env={"HOME": str(home), "STUB_LEAVE_LISTING_STAGE": "1"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(),
+                         {"install": "OK", "upgrade": "OK", "patches": "OK"})
+        self.assertEqual(harness.called(), [
+            "binaries list install", "binaries download",
+            "binaries list upgrade", "binaries download",
+            "binaries list patch", "binaries download",
+        ] + CATALOG)
+        self.assertEqual(list(harness.scratch.iterdir()), [])
+        identities = set(harness.depot_identities())
+        self.assertEqual(len(identities), 1, harness.depot_identities())
+        self.assertEqual(
+            identities,
+            {(home / ".local" / "share" / "vmware" / "vdt" / "machine_id").read_text().strip()},
+        )
+
+    def test_a_failed_listing_leaves_no_evidence_for_the_next_listing(self):
+        harness = self.harness
+        harness.content_library("ESX_HOST")
+        harness.protect("ESX_HOST")
+        before = fingerprint(harness.comp / "ESX_HOST")
+
+        result = harness.run(
+            "install", "upgrade", "patches",
+            env={"STUB_FAIL_CATALOG_MODE": "install", "STUB_LEAVE_LISTING_STAGE": "1"},
+        )
+
+        self.assertEqual(harness.statuses(), {
+            "install": "FAILED:23",
+            "upgrade": "SKIPPED:PROTECTED",
+            "patches": "SKIPPED:PROTECTED",
+        })
+        self.assertIn("PROD/COMP/ESX_HOST is protected and vcf-upgrade writes it", result.stdout)
+        self.assertEqual(fingerprint(harness.comp / "ESX_HOST"), before)
+        self.assertEqual(list(harness.scratch.iterdir()), [])
+
+    def test_a_scratch_that_cannot_be_cleared_keeps_a_good_listing(self):
+        if os.geteuid() == 0:
+            self.skipTest("root clears a directory it has no write bit on, so the case cannot be staged")
+        harness = self.harness
+        harness.content_library("VKR")
+        harness.protect("VKR")
+
+        def unlock_scratch():
+            for entry in harness.scratch.iterdir():
+                if entry.is_dir():
+                    os.chmod(entry, 0o755)
+        self.addCleanup(unlock_scratch)
+
+        result = harness.run("install", env={"STUB_LOCK_LISTING_STAGE": "1"})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(harness.statuses(), {"install": "OK"})
+        self.assertEqual(harness.called(), ["binaries list install", "binaries download"] + CATALOG)
+        self.assertIn("could not be cleared", result.stdout)
+        self.assertEqual(json.loads((harness.state / "catalog-attempt.json").read_text())["status"],
+                         "success")
+
+    def test_unwritable_listing_scratch_has_an_operator_action(self):
+        harness = self.harness
+        harness.content_library("VKR")
+        harness.protect("VKR")
+        not_a_directory = harness.root / "not-a-directory"
+        not_a_directory.write_text("blocks scratch creation\n")
+
+        result = harness.run("install", env={"TMPDIR": str(not_a_directory)})
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            f"listing scratch root {not_a_directory} is not writable; "
+            "ensure the container scratch mount is writable",
+            result.stdout,
+        )
 
     def test_without_protected_trees_the_tool_is_not_asked_first(self):
         harness = self.harness

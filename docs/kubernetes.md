@@ -99,6 +99,12 @@ non-root bootstrap, recursively corrects only the small config and secret
 trees, and sets the roots of the other application-owned volumes to UID:GID
 `1000:1000`. It does not mount or change `backup-store`.
 
+Each of those read-only containers keeps a small `emptyDir` at `/tmp`. Sync
+needs its own: the licensed tool stages catalog metadata below its home when
+asked to list binaries, and the sync redirects only that staging root to
+`/tmp`, so a deployment that drops the `sync-tmp` mount fails the catalog
+refresh and every target that has to list before it downloads.
+
 The SFTP supervisor is the sole owner of backup-volume permissions. It retains
 its existing root runtime because it applies the GUI-selected UID:GID and
 updates the container account before sshd drops each session to that identity.

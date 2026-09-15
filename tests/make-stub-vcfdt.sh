@@ -18,11 +18,29 @@ tool_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 printf '%s\n' 'written' \
 	> "$tool_root/conf/telemetry/telemetry.flag"
 
-state_dir="${HOME}/.local/share/vmware/vdt"
+# Java system properties arrive through JAVA_TOOL_OPTIONS. Durable identity
+# and every other home-relative path resolve from user.home; only the listing
+# stage resolves from lcm.bundle.download.root.dir, which the shipped tool
+# configuration defaults to ${user.home}.
+java_home="$HOME"
+listing_root=""
+for option in ${JAVA_TOOL_OPTIONS:-}; do
+	case "$option" in
+		-Duser.home=*) java_home="${option#*=}" ;;
+		-Dlcm.bundle.download.root.dir=*) listing_root="${option#*=}" ;;
+	esac
+done
+: "${listing_root:=$java_home}"
+
+state_dir="$java_home/.local/share/vmware/vdt"
 mkdir -p "$state_dir"
 if [ ! -s "$state_dir/machine_id" ]; then
 	cat /proc/sys/kernel/random/uuid > "$state_dir/machine_id"
 fi
+# A tool that cannot see the Software Depot ID it registered with mints a new,
+# unregistered one. Tests that check every invocation kept the same identity
+# name a file in STUB_IDENTITY_LOG.
+[ -z "${STUB_IDENTITY_LOG:-}" ] || cat "$state_dir/machine_id" >> "$STUB_IDENTITY_LOG"
 
 # The filter arguments name the inventory a listing asks for, both for the
 # scope check a download target runs first and for the catalog refresh.
@@ -80,6 +98,21 @@ components_for_filter() {
 }
 
 if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
+	# The licensed tool stages listing metadata below its download root even
+	# though the list command does not accept --depot-store. Model that
+	# behavior so image tests exercise the hardened container's real boundary,
+	# and model a manifest an earlier listing left staged there being read as
+	# it stands, which is what makes a shared stage stale evidence.
+	listing_manifest="$listing_root/tmpRootDir/PROD/metadata/manifest/v1/vcfManifest.json"
+	if [ -s "$listing_manifest" ]; then
+		staged_components="$(cat "$listing_manifest")"
+	elif mkdir -p "$(dirname "$listing_manifest")" 2>/dev/null \
+		&& components_for_filter "$@" > "$listing_manifest" 2>/dev/null; then
+		staged_components="$(cat "$listing_manifest")"
+	else
+		echo "Could not list the binaries." >&2
+		exit 23
+	fi
 	query_mode="$(catalog_mode "$@")"
 	[ -z "${STUB_FAIL_CATALOG_MODE:-}" ] \
 		|| [ "${STUB_FAIL_CATALOG_MODE}" != "$query_mode" ] || exit 23
@@ -90,8 +123,8 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 		echo "No binaries matched the given filter."
 		exit 0
 	fi
-	# shellcheck disable=SC2046
-	set -- $(components_for_filter "$@")
+	# shellcheck disable=SC2086
+	set -- $staged_components
 	case "$query_mode" in
 		install) row_type=INSTALL ;;
 		patch) row_type=PATCH ;;
@@ -107,6 +140,13 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	done
 	[ -z "${STUB_LIST_RAW_ROWS:-}" ] || printf '%s\n' "$STUB_LIST_RAW_ROWS"
 	printf -- '-----\n%s elements\n' "$#"
+	# A vendor process can leave its stage behind, and STUB_LOCK_LISTING_STAGE
+	# leaves it behind without write permission, so the caller's cleanup fails.
+	if [ "${STUB_LOCK_LISTING_STAGE:-0}" = 1 ]; then
+		chmod 0555 "$listing_root"
+	elif [ "${STUB_LEAVE_LISTING_STAGE:-0}" != 1 ]; then
+		rm -rf -- "$listing_root/tmpRootDir"
+	fi
 	exit 0
 fi
 
