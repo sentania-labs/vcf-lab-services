@@ -225,6 +225,28 @@ reconcile_catalog_attempt() {
 	fi
 }
 
+# Catalog workspaces are temporary, but they live on the durable state volume
+# so an unclean stop cannot make the published catalog disappear with them.
+# Only reap them while no sync owns the depot lock, which leaves a live run's
+# workspace untouched if initialization overlaps an independently started run.
+reap_catalog_workspaces() {
+	local lock_state=0 workspace
+	take_depot_lock catalog-reap || lock_state=$?
+	if [ "$lock_state" -eq 1 ]; then
+		return 0
+	elif [ "$lock_state" -ne 0 ]; then
+		echo "[scheduler] WARNING: could not reap stale catalog workspaces: $depot_lock_error"
+		return 0
+	fi
+	while IFS= read -r -d '' workspace; do
+		if ! rm -rf -- "$workspace"; then
+			echo "[scheduler] WARNING: could not remove stale catalog workspace $workspace"
+		fi
+	done < <(find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d \
+		-name 'catalog-build.*' -print0)
+	release_depot_lock catalog-reap
+}
+
 init_state() {
 	mkdir -p "$STATE_DIR"
 	# The admin console opens this lock read only to tell whether a run already
@@ -232,6 +254,7 @@ init_state() {
 	[ -e "$STATE_DIR/settings-snapshot.lock" ] || : > "$STATE_DIR/settings-snapshot.lock"
 	local armed=false tmp_state
 	if [ -s "$AUTH_FILE" ]; then armed=true; fi
+	reap_catalog_workspaces
 	reconcile_catalog_attempt
 	tmp_state="$(mktemp "$STATE_DIR/state.json.XXXXXX")"
 	if ! jq --argjson armed "$armed" '. + {running:false, armed:$armed, currentTarget:null}' \

@@ -45,11 +45,14 @@ STATE_DIR="$work_dir/state-catalog"
 AUTH_FILE="$work_dir/no-auth"
 mkdir -p "$STATE_DIR"
 printf '%s' '{"running":false,"armed":false,"lastRun":{}}' > "$STATE_DIR/state.json"
+mkdir -p "$STATE_DIR/catalog-build.orphaned"
+printf 'raw inventory\n' > "$STATE_DIR/catalog-build.orphaned/install.out"
 open_attempt='{"version":1,"attemptId":"catalog-open","status":"running","startedAt":"2026-09-21T03:00:05Z"}'
 printf '%s' "$open_attempt" > "$STATE_DIR/catalog-attempt.json"
 printf '%s' '{"version":1,"attemptId":"catalog-older","updatedAt":"2026-09-14T03:10:00Z","items":[]}' \
 	> "$STATE_DIR/catalog.json"
 init_state >/dev/null
+[ ! -e "$STATE_DIR/catalog-build.orphaned" ]
 jq -e '.status == "interrupted" and .attemptId == "catalog-open"
   and .startedAt == "2026-09-21T03:00:05Z" and (.error | length) > 0
   and (.finishedAt | length) > 0' "$STATE_DIR/catalog-attempt.json" >/dev/null
@@ -70,7 +73,17 @@ jq -e '.status == "success" and .finishedAt == "2026-09-21T03:04:00Z"' \
 rm -f "$STATE_DIR/catalog-attempt.json" "$STATE_DIR/catalog.json"
 init_state >/dev/null
 [ ! -e "$STATE_DIR/catalog-attempt.json" ]
-echo "catalog attempt boot reconciliation tests passed"
+mkdir -p "$STATE_DIR/catalog-build.live"
+printf 'in use\n' > "$STATE_DIR/catalog-build.live/install.out"
+exec 7>"$STATE_DIR/sync.lock"
+flock 7
+init_state >/dev/null
+[ -e "$STATE_DIR/catalog-build.live/install.out" ]
+flock -u 7
+exec 7>&-
+init_state >/dev/null
+[ ! -e "$STATE_DIR/catalog-build.live" ]
+echo "catalog attempt and workspace boot reconciliation tests passed"
 
 STATE_DIR="$work_dir/state-lock"
 AUTH_FILE="$work_dir/activation-code.txt"
