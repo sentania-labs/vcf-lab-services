@@ -65,6 +65,7 @@ their always-pull behavior, and their override variables,
 first-boot state initialization, internal TLS, the platform-provided storage
 boundary, protected Redis, fixed mount contracts, version mismatch safe-stop
 wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
+catalog attempt and build-workspace reconciliation at scheduler boot,
 single-writer sync behavior, sync safe-stop on a version mismatch, log
 retention, tool-version run state, post-success release promotion, retention
 after a successful VKR-only run with non-tool provenance, lifecycle

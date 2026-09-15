@@ -108,11 +108,14 @@ the latest attempt, with `running`, `success`, `empty`, `failed`, or
 `interrupted` status and any error. A scheduler boot reconciles an attempt
 still marked `running` to `interrupted`, keeping its original start time,
 because a scheduler that is only now starting proves no run it launched
-survives; the attempt that published the saved catalog is left alone. A failed
-or interrupted attempt therefore never replaces the last successful catalog,
-and an inventory that parses but lists nothing is recorded as `empty` without
-replacing a catalog that did list components. The admin console reads both
-files during its normal status polling, groups entries by the verified
+survives; the attempt that published the saved catalog is left alone. Each
+attempt builds in its own `catalog-build.*` directory on that same volume, so
+an unclean stop can strand one; the same boot removes any it finds, and only
+while no sync holds the depot lock, so a live run's workspace is left
+untouched. A failed or interrupted attempt never replaces the last successful
+catalog, and an inventory that parses but lists nothing is recorded as `empty`
+without replacing a catalog that did list components. The admin console reads
+both files during its normal status polling, groups entries by the verified
 Component value, and sorts verified Version values newest first. It does not
 infer whether an upstream entry is already downloaded in the local depot. It
 also reports an attempt still marked `running` as interrupted once the last run
