@@ -31,6 +31,7 @@ const context = vm.createContext({
     if (path === 'api/login' && input.login) {
       return new Promise(resolve => { releaseLogin = () => resolve(respond(input.login)); });
     }
+    if (path === 'api/claim' && input.claim) return respond(input.claim.response);
     if (replies[path]) return respond(replies[path]);
     if (path === 'api/bootstrap') return new Promise(() => {});
     return {ok: true, json: async () => path === 'api/status' ? input.status : {}};
@@ -44,16 +45,44 @@ for (const match of input.html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g))
 vm.runInContext('Date.now = () => __clock.now', context);
 calls = {};
 
+// Enter in a password field and a click on the submit button both raise the
+// form's submit event, so the console is driven the way the browser drives it.
+// A handler that does not cancel the default would navigate the page.
+function submitAuthForm() {
+  let defaultPrevented = false;
+  const done = getElementById('auth-form').onsubmit({preventDefault() { defaultPrevented = true; }});
+  if (!defaultPrevented) throw new Error('the submit handler let the page navigate');
+  return done;
+}
+
 async function signIn() {
   getElementById('confirm-wrap').hidden = true;
   const button = getElementById('auth-submit');
   const flash = getElementById('auth-flash');
   button.textContent = 'Sign in';
-  const done = button.onclick();
+  const done = submitAuthForm();
   const pending = {disabled: button.disabled, label: button.textContent, flash: flash.textContent};
   releaseLogin();
   await done;
   return {pending, finished: {disabled: button.disabled, label: button.textContent, flash: flash.textContent}};
+}
+
+// The first-run claim runs through the same form submit as signing in, with
+// the confirm field shown. Both cases stop before the console loads: a
+// mismatch never reaches the endpoint, and a refused claim comes back as a
+// message on the form.
+async function claimFlow() {
+  context.showAuth(false);
+  getElementById('auth-password').value = input.claim.password;
+  getElementById('auth-confirm').value = input.claim.confirm;
+  await submitAuthForm();
+  return {
+    claimCalls: calls['api/claim'] || 0,
+    flash: getElementById('auth-flash').textContent,
+    label: getElementById('auth-submit').textContent,
+    disabled: Boolean(getElementById('auth-submit').disabled),
+    confirmDisabled: Boolean(getElementById('auth-confirm').disabled),
+  };
 }
 
 async function pollSequence() {
@@ -86,6 +115,6 @@ async function statusSummary() {
   };
 }
 
-(input.login ? signIn() : input.polls ? pollSequence() : statusSummary()).then(result => {
+(input.login ? signIn() : input.claim ? claimFlow() : input.polls ? pollSequence() : statusSummary()).then(result => {
   process.stdout.write(JSON.stringify(result));
 }).catch(error => { console.error(error); process.exitCode = 1; });

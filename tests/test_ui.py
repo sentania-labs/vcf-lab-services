@@ -93,6 +93,35 @@ def parse_element_attributes(markup):
     return parser.elements
 
 
+class FormMembershipParser(HTMLParser):
+    """Record the form, if any, each id'd element sits inside."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms = []
+        self.membership = {}
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if attributes.get("id"):
+            self.membership[attributes["id"]] = self.forms[-1] if self.forms else None
+        if tag == "form":
+            self.forms.append(attributes.get("id"))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "form" and self.forms:
+            self.forms.pop()
+
+
+def parse_form_membership(markup):
+    parser = FormMembershipParser()
+    parser.feed(markup)
+    return parser.membership
+
+
 class UiApiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1265,6 +1294,40 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
             {"disabled": False, "label": "Sign in", "flash": "the username or password is incorrect"},
         )
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_console_claim_runs_through_the_same_form_submit(self):
+        # The first interaction with a new appliance is the claim, on the same
+        # form. A mismatch is caught in the page and never reaches the endpoint.
+        mismatch = self.run_console({
+            "claim": {
+                "password": "a strong test password",
+                "confirm": "a different password",
+                "response": {"status": 201, "body": {}},
+            },
+        })
+        self.assertEqual(mismatch["claimCalls"], 0)
+        self.assertEqual(mismatch["flash"], "Passwords do not match")
+        self.assertEqual(mismatch["label"], "Claim and continue")
+        self.assertFalse(mismatch["disabled"])
+        # The confirm field is live for the claim, so the pair is what the
+        # browser's password manager sees on the first-run page.
+        self.assertFalse(mismatch["confirmDisabled"])
+
+        refused = self.run_console({
+            "claim": {
+                "password": "short",
+                "confirm": "short",
+                "response": {
+                    "status": 400,
+                    "body": {"error": "the password must be at least 12 characters"},
+                },
+            },
+        })
+        self.assertEqual(refused["claimCalls"], 1)
+        self.assertEqual(refused["flash"], "the password must be at least 12 characters")
+        self.assertEqual(refused["label"], "Claim and continue")
+        self.assertFalse(refused["disabled"])
+
     def test_startup_verification_retries_a_failed_probe_and_pending_adoption(self):
         self.claim()
         self.write_state()
@@ -2305,6 +2368,34 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertNotIn("uidGid", mixed["pendingFields"])
         self.assertNotIn("backupEnabled", mixed["pendingFields"])
         self.assertIn('SFTP_UID_GID="1004:1005"', self.settings.read_text())
+
+    def test_login_controls_sit_in_a_form_that_handles_submission(self):
+        # Enter in a password field submits the enclosing form. Without one the
+        # keypress is discarded and the console can only be entered by clicking,
+        # which reads as a broken credential rather than a broken page. The
+        # page is served the same before and after the claim, so both the
+        # first-run and the sign-in flow use these controls; which one runs is
+        # decided in the browser and covered by the console JavaScript tests.
+        page = self.get("/")
+        self.assertEqual(page.status_code, 200)
+        markup = page.get_data(as_text=True)
+        membership = parse_form_membership(markup)
+        for control in ("auth-user", "auth-password", "auth-confirm", "auth-submit"):
+            self.assertEqual(membership.get(control), "auth-form")
+        attributes = parse_element_attributes(markup)
+        self.assertEqual(attributes["auth-submit"].get("type"), "submit")
+        # A submission that bypasses the handler must not be able to carry the
+        # credential: with no name attributes there is nothing to put in the
+        # URL, and the form is not pointed anywhere else.
+        for field in ("auth-user", "auth-password", "auth-confirm"):
+            self.assertNotIn("name", attributes[field])
+        self.assertNotIn("action", attributes["auth-form"])
+        self.assertNotIn("method", attributes["auth-form"])
+        # The work hangs off the form's submit, not the button's click, so
+        # implicit submission and a click run the same path.
+        self.assertIn("$('auth-form').onsubmit=", markup)
+        self.assertNotIn("auth-submit').onclick", markup)
+        self.assertNotIn("auth-submit').addEventListener", markup)
 
     def test_console_tabs_render_every_control(self):
         self.claim()

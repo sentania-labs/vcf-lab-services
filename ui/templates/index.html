@@ -98,13 +98,19 @@
     <div class="eyebrow" id="auth-eyebrow">First run</div>
     <h2 id="auth-title">Claim this appliance</h2>
     <p id="auth-copy" class="muted">The first person to set the owner password controls the console and depot credentials.</p>
-    <div class="formgrid" style="margin-top:18px">
-      <div class="field"><label for="auth-user">Username</label><input id="auth-user" value="vcf" readonly></div>
-      <div class="field"><label for="auth-password">Password</label><input id="auth-password" type="password" autocomplete="current-password"></div>
-      <div class="field full" id="confirm-wrap"><label for="auth-confirm">Confirm password</label><input id="auth-confirm" type="password" autocomplete="new-password"></div>
-    </div>
-    <p class="help" id="claim-risk">Trust on first use: claim the appliance from a trusted network before exposing it more broadly.</p>
-    <div class="row" style="margin-top:14px"><button id="auth-submit">Claim and continue</button><span id="auth-flash" class="error" role="status" aria-live="polite"></span></div>
+    <!-- The fields carry no name attributes on purpose. The handler builds the
+         request from their values, so a submission that somehow bypasses it
+         (a manager calling form.submit(), Enter before this page's script has
+         run) reloads the page and cannot put the credential in the URL. -->
+    <form id="auth-form" aria-labelledby="auth-title">
+      <div class="formgrid" style="margin-top:18px">
+        <div class="field"><label for="auth-user">Username</label><input id="auth-user" value="vcf" autocomplete="username" readonly></div>
+        <div class="field"><label for="auth-password">Password</label><input id="auth-password" type="password" autocomplete="current-password"></div>
+        <div class="field full" id="confirm-wrap"><label for="auth-confirm">Confirm password</label><input id="auth-confirm" type="password" autocomplete="new-password"></div>
+      </div>
+      <p class="help" id="claim-risk">Trust on first use: claim the appliance from a trusted network before exposing it more broadly.</p>
+      <div class="row" style="margin-top:14px"><button id="auth-submit" type="submit">Claim and continue</button><span id="auth-flash" class="error" role="status" aria-live="polite"></span></div>
+    </form>
   </section>
 </main>
 
@@ -394,7 +400,7 @@ function showAuth(claimed) {
   $('auth-eyebrow').textContent=claimed ? 'Owner access' : 'First run';
   $('auth-title').textContent=claimed ? 'Sign in' : 'Claim this appliance';
   $('auth-copy').textContent=claimed ? 'Use the shared VCF Services credential.' : 'The first person to set the owner password controls the console and depot credentials.';
-  $('confirm-wrap').hidden=claimed; $('claim-risk').hidden=claimed;
+  $('confirm-wrap').hidden=claimed; $('claim-risk').hidden=claimed; $('auth-confirm').disabled=claimed;
   $('auth-submit').textContent=claimed ? 'Sign in' : 'Claim and continue';
   $('auth-password').autocomplete=claimed ? 'current-password' : 'new-password';
 }
@@ -656,7 +662,11 @@ async function boot() {
   } catch (error) { showAuth(false); $('auth-flash').className='error'; $('auth-flash').textContent=error.message; }
 }
 
-$('auth-submit').onclick=async()=>{
+// The handler sits on the form, not the button, so the browser's own implicit
+// submission (Enter in either password field) runs the same path as a click
+// and the fields keep a form boundary for password managers.
+$('auth-form').onsubmit=async event=>{
+  event.preventDefault();
   const button=$('auth-submit'); const flash=$('auth-flash');
   flash.className='error'; flash.textContent='';
   const claimed=$('confirm-wrap').hidden;
