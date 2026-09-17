@@ -21,9 +21,12 @@ full tag history.
   being issued a new one.
 - Tool install, upgrade, and rollback from the console, including installing
   straight from an archive the sync already mirrored into the depot.
-- Depot ownership tracking: hand-placed content (such as VKR or SUPERVISOR
-  trees) is recorded and protected by default, and the console's file
-  explorer (browse, upload, delete) respects that protection.
+- Depot ownership tracking: a hand-placed tree holding both `items.json` and
+  `lib.json` is detected as a content library and protected automatically, as
+  is a tree uploaded through the console. Any other pre-existing tree is
+  recorded as unknown and is not protected until protection is enabled in the
+  Depot tab. The console's file explorer (browse, upload, delete) respects
+  that protection.
 - A fix so protecting one hand-placed tree no longer stops the download tool
   from running its other targets. Earlier, protecting any tree silently
   skipped every install, upgrade, and patch download.
@@ -39,12 +42,13 @@ full tag history.
 
 ## What is next, in priority order
 
-1. **Confirm and close issue #44** (the flock self-conflict report). The
-   fix described above (handing the lock to the launched run instead of
-   re-taking it) already addresses the mechanism the issue reported, and a
-   dedicated test (`tests/test_scheduler_lock.sh`) now guards it. The issue
-   is still open on GitHub. This is a bookkeeping step, not new work: confirm
-   the fix behaves correctly under a live sync and close the issue.
+1. **Confirm issue #44's fix on the appliance** (the flock self-conflict
+   report). The fix described above (handing the lock to the launched run
+   instead of re-taking it) addresses the mechanism the issue reported, a
+   dedicated test (`tests/test_scheduler_lock.sh`) guards it, and the issue
+   was closed on 17 September 2026 against the v0.2.8 release. What remains
+   is bookkeeping, not new work: watch a live sync on the deployed appliance
+   and confirm the behaviour there.
 2. **VKR content tree adoption into the sync target.** The appliance already
    inventories and protects an existing VKR content-library tree, but does
    not yet adopt it as the live sync target the way it does for other
@@ -81,8 +85,8 @@ next in line, not scheduled.
 ## Where this traces from
 
 Everything above traces to the repository itself (README "Prototype
-boundaries" section, commit history, and `docs/`), to GitHub issue #44 (open)
-and #47 (closed, fixed by PR #48), or to background diagnostic work already
+boundaries" section, commit history, and `docs/`), to GitHub issue #44 (closed,
+fixed by PR #46) and #47 (closed, fixed by PR #48), or to background diagnostic work already
 folded into the shipped fixes (the login-latency and lock-race
 investigations). Where earlier background notes described problems that the
 repository has since fixed, this roadmap reflects the fix, not the older
