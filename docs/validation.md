@@ -55,7 +55,9 @@ blocked, a save that lands under the run's settings snapshot lock before the
 run publishes its state still being flagged for the next run, the live backup
 service settings being reported as applied now instead of deferred, the tabbed
 console rendering every control including the daily, weekly, and custom cron
-schedule picker with its next-run readout, durable catalog grouping newest
+schedule picker with its next-run readout, the claim and sign-in controls
+sitting inside a form whose submit handler carries the work, so Enter in a
+password field enters the console, durable catalog grouping newest
 versions first after a UI worker restart while retaining and displaying a later
 attempt failure, advisory tool probes as described in
 [release validation](releasing.md), forward config migration with an
