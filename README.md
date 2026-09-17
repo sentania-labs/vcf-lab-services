@@ -358,5 +358,7 @@ captain's licensed archive and lab before they can be claimed as working:
 - A completed sync serving real depot content to VCF consumers.
 - Consumer trust of the first-boot CA, and live VCF component SFTP behavior.
 
-See [docs/validation.md](docs/validation.md) for the runnable checks and
-[docs/releasing.md](docs/releasing.md) for packaging.
+See [docs/validation.md](docs/validation.md) for the runnable checks,
+[docs/releasing.md](docs/releasing.md) for packaging, and
+[docs/roadmap.md](docs/roadmap.md) for what is built, what is next, and what
+is deliberately deferred.
