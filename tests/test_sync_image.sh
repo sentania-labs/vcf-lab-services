@@ -119,8 +119,9 @@ grep -qx 'operator vkr content' "$work_dir/depot/PROD/COMP/VKR/operator.bin"
 jq -e '.lastRun.install.status == "OK" and .lastRun.upgrade.status == "OK"
   and .lastRun.patches.status == "OK"' "$work_dir/state/state.json" >/dev/null
 # Artifacts use the image's mawk parser and the same unwritable HOME boundary.
-run_shipped_sync "$work_dir/artifacts-list.log" supervisor vks
-jq -e '.lastRun.supervisor.status == "LISTED" and .lastRun.vks.status == "LISTED"' "$work_dir/state/state.json" >/dev/null
+run_shipped_sync "$work_dir/artifacts-list.log" vkr supervisor vks
+jq -e '.lastRun.vkr.status == "LISTED" and .lastRun.supervisor.status == "LISTED" and .lastRun.vks.status == "LISTED"' "$work_dir/state/state.json" >/dev/null
+grep -qx 'operator vkr content' "$work_dir/depot/PROD/COMP/VKR/operator.bin"
 SUPERVISOR_MATCH=9.1.1.0.25712839 VKS_MATCH=3.7.2+v1.36 \
     run_shipped_sync "$work_dir/artifacts-download.log" supervisor vks
 jq -e '.lastRun.supervisor.status == "OK" and .lastRun.vks.status == "OK"' "$work_dir/state/state.json" >/dev/null

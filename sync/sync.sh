@@ -129,6 +129,10 @@ scope_rc=0
 trees_written_by() {
 	local label="$1"
 	shift
+	if [ "${1:-}" = download_artifacts ] && [ -z "${3:-}" ]; then
+		written_trees=""
+		return 0
+	fi
 	case "$label" in
 		esx-image-library) written_trees=ESX_HOST ;;
 		vkr-content-library) written_trees=VKR ;;

@@ -132,6 +132,21 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(len(set(h.depot_identities())), 1)
         self.assertEqual(list(h.scratch.iterdir()), [])
 
+    def test_artifacts_discovery_preserves_protected_libraries(self):
+        h = self.harness
+        names = ["VKR", "SUPERVISOR", "SUPERVISOR_SERVICE_VKS"]
+        trees = [h.content_library(name) for name in names]
+        h.protect(*names)
+        before = [fingerprint(tree) for tree in trees]
+        ownership = json.loads(h.manifest.read_text())
+        result = h.run("vkr", "supervisor", "vks")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(h.statuses(), {"vkr": "LISTED", "supervisor": "LISTED", "vks": "LISTED"})
+        self.assertFalse(any(call.startswith("artifacts download") for call in h.called()))
+        self.assertEqual([fingerprint(tree) for tree in trees], before)
+        self.assertEqual(json.loads(h.manifest.read_text()), ownership)
+        self.assertEqual(list(h.scratch.iterdir()), [])
+
     def test_artifacts_exact_pins_download_ids_and_record_tool_provenance(self):
         h = self.harness
         result = h.run("vkr", "supervisor", "vks", env={

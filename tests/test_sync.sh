@@ -181,7 +181,7 @@ mkdir -p "$work_dir/depot/PROD/COMP/VKR"
 printf 'operator content\n' > "$work_dir/depot/PROD/COMP/VKR/content.txt"
 printf '%s\n' '{"version":1,"trees":{"VKR":{"ownership":"operator-provided","protected":true}}}' \
 	> "$work_dir/state/depot-ownership.json"
-run_sync vkr > "$work_dir/protected-vkr.log"
+VKR_MATCH=1.36.2 run_sync vkr > "$work_dir/protected-vkr.log"
 grep -qx 'operator content' "$work_dir/depot/PROD/COMP/VKR/content.txt"
 grep -q 'PROD/COMP/VKR is protected and vkr-content-library writes it, skipping the target without changing it' \
 	"$work_dir/protected-vkr.log"
