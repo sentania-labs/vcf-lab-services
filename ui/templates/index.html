@@ -329,9 +329,13 @@
         </div></div>
         <div class="field"><label for="depot-endpoint">Advanced download endpoint</label><input id="depot-endpoint"></div>
         <div class="field"><label for="token-url">Token URL</label><input id="token-url"></div>
-        <div class="field"><label for="vkr-match">VKr release pins</label><input id="vkr-match" placeholder="Optional"></div>
-        <div class="field"><label for="vkr-os">VKr OS filter</label><input id="vkr-os" placeholder="Optional"></div>
+        <div class="field"><label for="vkr-match">VKR release pins</label><input id="vkr-match" placeholder="Optional"></div>
+        <div class="field"><label for="vks-match">VKS service release pins</label><input id="vks-match" placeholder="For example: 3.7.2+v1.36"></div>
+        <div class="field"><label for="artifact-token-url">Container image token URL</label><input id="artifact-token-url"></div>
+        <div class="field"><label for="artifact-registry">Container image registry</label><input id="artifact-registry"></div>
+        <div class="field"><label for="supervisor-match">Supervisor release pins</label><input id="supervisor-match" placeholder="Optional"></div>
       </div>
+      <p class="help">VKR, VKS, and Supervisor need VCFDT 9.1.1 or later. Leave release pins empty to list available versions without downloading. Enter exact versions separated by spaces to download. VKR downloads all OS variants; VKS also downloads container images.</p>
       <p class="help">The sync scheduler reloads these file-backed settings automatically. Endpoint changes also update the mounted tool, so they wait for a running sync to finish.</p>
       <div class="row" style="margin-top:12px"><button id="save-settings">Save settings</button><span id="settings-flash" class="muted"></span></div>
     </section>
@@ -639,9 +643,14 @@ function populateSetup(data) {
   $('ceip').value=settings.ceip; $('backup-enabled').checked=settings.backupEnabled;
   $('uidgid').value=settings.uidGid; $('depot-endpoint').value=settings.depotEndpoint;
   $('token-url').value=settings.tokenUrl; $('esx-mode').value=settings.esxMode;
-  $('log-retention').value=settings.logRetention; $('vkr-match').value=settings.vkrMatch;
+  $('log-retention').value=settings.logRetention;
+  $('vkr-match').value=settings.vkrMatch;
+  $('supervisor-match').value=settings.supervisorMatch;
+  $('vks-match').value=settings.vksMatch;
+  $('artifact-token-url').value=settings.artifactTokenUrl;
+  $('artifact-registry').value=settings.artifactRegistry;
   $('sync-diagnostics').checked=settings.syncDiagnostics;
-  $('vkr-os').value=settings.vkrOs; setTargets('.settings-target',settings.syncTargets);
+  setTargets('.settings-target',settings.syncTargets);
   setTargets('.run-target',settings.syncTargets);
   $('progress-tool').className=`step ${data.tool.installed ? 'done' : 'active'}`;
   $('progress-register').className=`step ${data.activationConfigured ? 'done' : data.tool.installed ? 'active' : ''}`;
@@ -698,7 +707,7 @@ $('vcfdt-depot-refresh').onclick=async()=>{ $('vcfdt-depot-flash').textContent='
 
 $('vcfdt-depot-install').onclick=async()=>{
   const path=$('vcfdt-depot-version').value; if(!path){$('vcfdt-depot-flash').textContent='Choose a depot archive';return;}
-  $('vcfdt-depot-install').disabled=true; $('vcfdt-depot-flash').textContent='Installing from the depot and validating';
+  $('vcfdt-depot-install').disabled=true; $('vcfdt-depot-flash').textContent='Validating the archive, identity, and saved depot authentication before switching';
   try {
     const result=await api('api/vcfdt/depot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
     populateSetup(await api('api/bootstrap')); await loadDepotArchives();
@@ -844,7 +853,8 @@ function settingsPayload(){ return {
   uidGid:$('uidgid').value, depotEndpoint:$('depot-endpoint').value, tokenUrl:$('token-url').value,
   esxMode:$('esx-mode').value, logRetention:$('log-retention').value,
   syncDiagnostics:$('sync-diagnostics').checked,
-  vkrMatch:$('vkr-match').value, vkrOs:$('vkr-os').value,
+  vkrMatch:$('vkr-match').value, supervisorMatch:$('supervisor-match').value, vksMatch:$('vks-match').value,
+  artifactTokenUrl:$('artifact-token-url').value, artifactRegistry:$('artifact-registry').value,
   storageConfirmed:$('storage-confirmed').checked,
   syncTargets:[...document.querySelectorAll('.settings-target:checked')].map(box=>box.value)
 }; }
@@ -881,7 +891,7 @@ async function poll(){
     const targetRuns=status.targets.filter(target=>status.lastRun[target]);
     $('vcfdt-produced').textContent=targetRuns.length ? targetRuns.map(target=>{const result=status.lastRun[target];return `${target}: tool ${result.toolVersion||'unknown'} (${result.status})`;}).join('; ') : 'No sync recorded';
     savedNextRun=status.nextRun; renderScheduleNext();
-    $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ok</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}${result?`<br>tool ${esc(result.toolVersion||'unknown')}`:''}</span></div></div>`;}).join('');
+    $('last-runs').innerHTML=status.targets.map(target=>{const result=status.lastRun[target];const pill=!result?'<span class="pill">never</span>':result.status==='OK'?'<span class="pill ok">ready</span>':result.status==='LISTED'?'<span class="pill">listed only</span>':`<span class="pill bad">${esc(result.status)}</span>`;return `<div class="stat"><div class="key">${esc(target)}</div><div class="value">${pill}<br><span class="help">${result?fmt(result.finishedAt):''}${result?`<br>tool ${esc(result.toolVersion||'unknown')}`:''}${result?.failureStage?`<br>Failed: ${esc(result.failureStage)}. Files retained for retry.`:''}</span></div></div>`;}).join('');
     showPending(status);
     renderCatalog(status.catalog||{});
     $('sync-btn').disabled=running||!armed; $('vcfdt-upload').disabled=running;

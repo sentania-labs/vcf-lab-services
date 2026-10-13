@@ -38,6 +38,8 @@ apply_settings_defaults() {
 	: "${CEIP:=DISABLE}"
 	: "${LOG_RETENTION:=20}"
 	: "${VKR_MATCH:=}"
+	: "${SUPERVISOR_MATCH:=}"
+	: "${VKS_MATCH:=}"
 	: "${VKR_OS:=}"
 	: "${SYNC_DIAGNOSTICS:=false}"
 }
@@ -119,16 +121,8 @@ components_from_listing() {
 		END { if (column == 0 || unparsed) exit 3 }'
 }
 
-# The trees a target writes, one name per line. The ESX image library and the
-# VKr mirror are single-tree commands: every lcm.esx.* path in the tool
-# configuration sits under PROD/COMP/ESX_HOST, and targets/vkr.sh mirrors into
-# PROD/COMP/VKR. A `binaries download` run spans whatever components its
-# filter selects, so those targets ask the tool: `binaries list` with the same
-# filter prints the table the download itself prints under "Binaries to be
-# downloaded" before it starts writing. The tool's own help documents the same
-# filter group for list as for download (--automated-install, --patches-only,
-# --sku, --type, --vcf-version), so the download's filters are passed
-# unchanged. Nothing about those targets is mapped by hand.
+# Single-component targets have fixed output trees. Binary download targets
+# ask the tool to list the same filter before touching any protected trees.
 written_trees=""
 scope_status=""
 scope_rc=0
@@ -138,6 +132,8 @@ trees_written_by() {
 	case "$label" in
 		esx-image-library) written_trees=ESX_HOST ;;
 		vkr-content-library) written_trees=VKR ;;
+		supervisor-content-library) written_trees=SUPERVISOR ;;
+		vks-service) written_trees=SUPERVISOR_SERVICE_VKS ;;
 		*) components_for_download "$@" ;;
 	esac
 }
@@ -293,17 +289,18 @@ verify_protected_unchanged() {
 record_tree_if_absent() {
 	local name="$1"
 	local ownership="$2"
-	local protected="$3"
+	local protected="$3" replace="${4:-false}"
 	local tmp
 	(
 		flock -x 5 || exit 1
 		tmp="$(mktemp "$STATE_DIR/depot-ownership.json.XXXXXX")" || exit 1
 		trap 'rm -f "$tmp"' EXIT
 		if [ -e "$DEPOT_OWNERSHIP_FILE" ] || [ -L "$DEPOT_OWNERSHIP_FILE" ]; then
-			jq -e --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" \
+			jq -e --arg name "$name" --arg ownership "$ownership" --argjson protected "$protected" --argjson replace "$replace" \
 				'if (.trees | type) != "object" then error("invalid ownership manifest") else . end |
 				 .version = 1 |
-				 if .trees[$name] then .
+				 if $replace and .trees[$name].protected == true then error("tree is protected")
+				 elif .trees[$name] and ($replace | not) then .
 				 else .trees[$name] = {ownership:$ownership, protected:$protected}
 				 end' "$DEPOT_OWNERSHIP_FILE" > "$tmp" || exit 1
 		else
@@ -320,6 +317,155 @@ record_tree_if_absent() {
 
 record_product_tree() {
 	record_tree_if_absent "$1" product-managed false
+}
+
+# Emit only redacted tool output to the shared run log and Redis tail.
+redact_tool_output() {
+	awk -v auth_file="$AUTH_FILE" '
+		BEGIN { getline secret < auth_file; close(auth_file) }
+		{
+			line = $0
+			if (length(secret)) {
+				out = ""
+				while ((at = index(line, secret)) > 0) {
+					out = out substr(line, 1, at - 1) "[redacted]"
+					line = substr(line, at + length(secret))
+				}
+				line = out line
+			}
+			gsub(/eyJ[A-Za-z0-9_.=-]+/, "[redacted]", line)
+			print line
+		}'
+}
+
+# Read IDs from the selected component's table. Full Name may contain pipes;
+# the version is four columns from the end in the licensed artifacts table.
+artifact_rows() {
+	awk -F'|' -v component="$1" '
+		function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
+		trim($1) == "ID" && trim($2) == "Component" { header = 1; next }
+		!header || !index($0, "|") { next }
+		{
+			id = trim($1); version = trim($(NF-3))
+			if (NF < 7 || trim($2) != component || id !~ /^[a-fA-F0-9-]+$/ || length(id) != 36 || version == "") { bad = 1; exit 3 }
+			print id " " version
+		}
+		END { if (!header || bad) exit 3 }'
+}
+
+# A successful filtered vendor download may still advertise undownloaded
+# items. Refuse readiness or adoption until every local reference is present.
+validate_artifact_library() {
+	local tree="$DEPOT_DIR/PROD/COMP/$1" references path size resolved root
+	artifact_stage=metadata
+	artifact_status=FAILED:INCOMPLETE-MANIFEST
+	jq -e '.id | type == "string" and length > 0' "$tree/lib.json" >/dev/null 2>&1 || {
+		log "ERROR: $1 library identity is missing or invalid"
+		return 2
+	}
+	references="$(jq -er '
+		.items | if type != "array" or length == 0 then error("no items") else .[] end |
+		if (.selfHref | type) != "string" or (.files | type) != "array" or (.files | length) == 0
+		then error("invalid item") else . end |
+		([.selfHref, -1], (.files[] |
+		if (.hrefs | type) != "array" or (.hrefs | length) != 1 or (.hrefs[0] | type) != "string"
+		   or (.size | type) != "number" or .size < 0
+		then error("invalid file") else [.hrefs[0], .size] end)) | @tsv' "$tree/items.json" 2>/dev/null)" || {
+		log "ERROR: $1 items.json is missing or invalid"
+		return 2
+	}
+	root="$(realpath -e "$tree")" || return 2
+	local missing=0
+	while IFS=$'\t' read -r path size; do
+		resolved="$(realpath -e "$tree/$path" 2>/dev/null || true)"
+		if [[ "$path" = /* || "$path" = *://* || "$path" = *%* || "$resolved" != "$root/"* ]] || [ ! -f "$resolved" ]; then
+			log "ERROR: $1 items.json references a missing or unsafe file: $path"
+			missing=1
+		elif [ "$size" != -1 ] && [ "$(stat -c %s "$resolved")" != "$size" ]; then
+			log "ERROR: $1 items.json size does not match the local file: $path"
+			missing=1
+		fi
+	done <<< "$references"
+	[ "$missing" -eq 0 ] || return 2
+	artifact_stage=""
+	artifact_status=""
+}
+
+# run_target provides the same ownership and after-failure protection checks
+# used for other downloads. No pins means discovery only, never promotion.
+download_artifacts() {
+	local component="$1" pins="$2" version major minor patch output rows ids="" pin selected rc=0
+	artifact_stage=metadata
+	artifact_downloaded=false
+	version="$(cat "$TOOL_ROOT/conf/tool-version.txt" 2>/dev/null || true)"
+	if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.|$) ]]; then
+		artifact_status=FAILED:TOOL-TOO-OLD
+		log "ERROR: cannot verify artifacts support; install VCF Download Tool 9.1.1 or later"
+		return 2
+	fi
+	major=$((10#${BASH_REMATCH[1]})); minor=$((10#${BASH_REMATCH[2]})); patch=$((10#${BASH_REMATCH[3]}))
+	if (( major < 9 || (major == 9 && minor < 1) || (major == 9 && minor == 1 && patch < 1) )); then
+		artifact_status=FAILED:TOOL-TOO-OLD
+		log "ERROR: artifacts need VCF Download Tool 9.1.1 or later (active: $version)"
+		return 2
+	fi
+	if [ "$component" = VKR ] && [ -n "$VKR_OS" ]; then
+		log "WARNING: legacy VKR_OS is ignored; artifacts downloads all OS variants for each pinned release."
+	fi
+	open_listing_scratch || return 1
+	output="$(run_tool_listing "$tool" artifacts list "$ceip_opt" "$auth_opt" \
+		"--vcf-version=$VCF_VERSION" "--sku=$SKU" "--component=$component" 2>&1 | redact_tool_output)" || rc=$?
+	close_listing_scratch
+	printf '%s\n' "$output"
+	if [ "$rc" -ne 0 ]; then
+		log "ERROR: $component metadata listing failed; no binaries were downloaded"
+		return "$rc"
+	fi
+	rows="$(printf '%s\n' "$output" | artifact_rows "$component")" || {
+		log "ERROR: could not parse $component metadata; no binaries were downloaded"
+		return 2
+	}
+	if [ -z "$pins" ]; then
+		log "$component discovery only: set exact release pins to download content"
+		artifact_stage=""
+		return 0
+	fi
+	local -a versions
+	read -r -a versions <<< "$pins"
+	for pin in "${versions[@]}"; do
+		selected="$(printf '%s\n' "$rows" | awk -v pin="$pin" '$2 == pin {print $1}' | sort -u | paste -sd,)"
+		if [ -z "$selected" ]; then
+			artifact_status=FAILED:UNKNOWN-VERSION
+			log "ERROR: requested $component release '$pin' is not in the metadata; no binaries were downloaded"
+			return 2
+		fi
+		ids="${ids:+$ids,}$selected"
+	done
+	local capture
+	capture="$(mktemp "$STATE_DIR/artifacts-output.XXXXXX")" || return 1
+	artifact_stage=binaries
+	"$tool" artifacts download "$ceip_opt" "$auth_opt" "--depot-store=$DEPOT_DIR" \
+		"--id=$ids" 2>&1 | redact_tool_output | tee "$capture"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		if grep -Eqi 'OCI|imgpkg|Failed to pull image' "$capture"; then
+			artifact_stage=container-images
+		fi
+		if grep -Eqi 'checksum|mismatched SHA|binary.*invalid|binaries.*failed' "$capture"; then
+			artifact_stage=binaries
+		fi
+		log "ERROR: $component $artifact_stage failed (exit $rc). Content is not ready; downloaded files are retained for retry. See tool diagnostics above."
+	else
+		if [ "$component" = VKR ] || [ "$component" = SUPERVISOR ]; then
+			validate_artifact_library "$component" || rc=$?
+		fi
+		if [ "$rc" -eq 0 ]; then
+			artifact_downloaded=true
+			artifact_stage=""
+		fi
+	fi
+	rm -f "$capture"
+	return "$rc"
 }
 
 declare -A known_depot_trees=()
@@ -795,9 +941,12 @@ run_target() {
 	"$@" || target_rc=$?
 	if [ "$target_rc" -eq 0 ]; then
 		last_status=OK
+		if [ "$1" = download_artifacts ] && [ "$artifact_downloaded" = false ]; then
+			last_status=LISTED
+		fi
 	else
 		overall_rc=$target_rc
-		last_status="FAILED:$target_rc"
+		last_status="${artifact_status:-FAILED:$target_rc}"
 	fi
 	local verify_rc=0
 	if [ -n "$protected" ]; then
@@ -816,7 +965,7 @@ run_target() {
 			;;
 	esac
 	case "$last_status" in
-		OK) log "<<< $label OK" ;;
+		OK|LISTED) log "<<< $label $last_status" ;;
 		FAILED:UNVERIFIED) log "<<< $label $last_status, continuing" ;;
 		FAILED:PROTECTED-CHANGED)
 			if [ "$target_rc" -ne 0 ]; then
@@ -833,6 +982,9 @@ for target in $SYNC_TARGETS; do
 	write_state '.currentTarget=$target' --arg target "$target"
 	last_status=unknown
 	tool_backed_target=false
+	artifact_stage=""
+	artifact_status=""
+	artifact_downloaded=false
 	case "$target" in
 		esx)
 			tool_backed_target=true
@@ -857,9 +1009,22 @@ for target in $SYNC_TARGETS; do
 				"--depot-store=$DEPOT_DIR" "$auth_opt" "--vcf-version=$VCF_VERSION" \
 				"--sku=$SKU" --patches-only
 			;;
-		vkr)
-			run_target vkr-content-library /usr/local/lib/vcf-services/targets/vkr.sh \
-				"$DEPOT_DIR" "$VKR_MATCH" "$VKR_OS"
+		vkr|supervisor|vks)
+			tool_backed_target=true
+			case "$target" in
+				vkr) component=VKR; pins="$VKR_MATCH"; label=vkr-content-library ;;
+				supervisor) component=SUPERVISOR; pins="$SUPERVISOR_MATCH"; label=supervisor-content-library ;;
+				vks) component=SUPERVISOR_SERVICE_VKS; pins="$VKS_MATCH"; label=vks-service ;;
+			esac
+			run_target "$label" download_artifacts "$component" "$pins"
+			if [ "$last_status" = OK ]; then
+				if record_tree_if_absent "$component" product-managed false true; then
+					log "adopted PROD/COMP/$component as product-managed"
+				else
+					last_status=FAILED:OWNERSHIP
+					overall_rc=1
+				fi
+			fi
 			;;
 		*)
 			last_status=INVALID
@@ -871,8 +1036,8 @@ for target in $SYNC_TARGETS; do
 	if [ "$tool_backed_target" = true ] && [ "$last_status" = OK ]; then
 		successful_tool_sync=true
 	fi
-	write_state '.lastRun[$target]={status:$status, finishedAt:$finished, toolVersion:(if $toolBacked then $toolVersion else "not applicable" end), toolReleaseId:(if $toolBacked then $toolReleaseId else "not applicable" end)}' \
-		--arg target "$target" --arg status "$last_status" --arg finished "$(now)" \
+	write_state '.lastRun[$target]={status:$status, failureStage:$failureStage, finishedAt:$finished, toolVersion:(if $toolBacked then $toolVersion else "not applicable" end), toolReleaseId:(if $toolBacked then $toolReleaseId else "not applicable" end)}' \
+		--arg target "$target" --arg status "$last_status" --arg failureStage "$artifact_stage" --arg finished "$(now)" \
 		--arg toolVersion "$tool_version" --arg toolReleaseId "$tool_release_id" \
 		--argjson toolBacked "$tool_backed_target"
 done

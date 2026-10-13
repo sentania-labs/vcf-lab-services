@@ -4,7 +4,7 @@ set -euo pipefail
 # STUB_VERSION lets a stub report a chosen version so a stub depot tree can
 # carry several distinguishable tool archives (see make-stub-depot.sh).
 output="${1:-vcf-download-tool-0.0.0-stub.tar.gz}"
-stub_version="${STUB_VERSION:-0.0.0.0.20000000}"
+stub_version="${STUB_VERSION:-9.1.1}"
 work_dir="$(mktemp -d /tmp/vcf-services-stub.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
 mkdir -p "$work_dir/vcf-download-tool-stub/bin" \
@@ -57,6 +57,10 @@ catalog_mode() {
 if [ -n "${STUB_CALL_LOG:-}" ]; then
 	if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 		printf 'binaries list %s\n' "$(catalog_mode "$@")" >> "$STUB_CALL_LOG"
+	elif [ "${1:-}" = artifacts ] && [ "${2:-}" = list ]; then
+		printf '%s\n' "artifacts list $*" >> "$STUB_CALL_LOG"
+	elif [ "${1:-}" = artifacts ] && [ "${2:-}" = download ]; then
+		printf '%s\n' "artifacts download $*" >> "$STUB_CALL_LOG"
 	else
 		printf '%s %s\n' "${1:-}" "${2:-}" >> "$STUB_CALL_LOG"
 	fi
@@ -72,6 +76,10 @@ Version: 0.0.0.0.20000000
 Log file: /opt/vmware/vcfdt/log/vdt.log
 VERSION
 	exit 0
+fi
+if [ "${1:-}" = releases ] && [ "${2:-}" = list ]; then
+    echo 'Depot credentials are valid.'
+    exit 0
 fi
 if [ "${1:-}" = configuration ] && [ "${2:-}" = get ] && [ "${3:-}" = --machineId ]; then
 	cat "$state_dir/machine_id"
@@ -96,6 +104,73 @@ components_for_filter() {
 		*) echo "SDDC_MANAGER_VCF" ;;
 	esac
 }
+
+if [ "${1:-}" = artifacts ]; then
+	operation="$2"; component=""; ids=""; depot=""
+	shift 2
+	for argument in "$@"; do
+		case "$argument" in
+			--component=*) component="${argument#*=}" ;;
+			--id=*) ids="${argument#*=}" ;;
+			--depot-store=*) depot="${argument#*=}" ;;
+			--vcf-version=*|--sku=*|--ceip=*|--depot-download-activation-code-file=*) ;;
+			*) echo "Unsupported artifacts argument: $argument"; exit 2 ;;
+		esac
+	done
+	if [ "$operation" = list ]; then
+		[ -z "$depot" ] && [ -z "$ids" ] || exit 2
+		mkdir -p "$listing_root/tmpRootDir" || exit 23
+		[ "${STUB_FAIL_TARGET:-}" != list ] || exit 23
+		[ "${STUB_LIST_NO_TABLE:-0}" != 1 ] || { echo 'No artifacts table'; exit 0; }
+		printf 'ID | Component | Component Full Name | Version | Size | Release Date | Type\n'
+		case "$component" in
+			VKR) n=3; versions='1.34 1.36.2' ;;
+			SUPERVISOR) n=1; versions='9.1.0.0.20000000 9.1.1.0.25712839' ;;
+			SUPERVISOR_SERVICE_VKS) n=5; versions='3.7.1+v1.36 3.7.2+v1.36' ;;
+			*) exit 2 ;;
+		esac
+		for version in $versions; do
+			printf '%08d-0000-4000-8000-%012d | %s | VMware | artifact | %s | 12 GiB | 05/11/2026 | INSTALL\n' "$n" "$n" "$component" "$version"
+			n=$((n+1))
+		done
+		[ -z "${STUB_ARTIFACT_ROWS:-}" ] || printf '%s\n' "$STUB_ARTIFACT_ROWS"
+		exit 0
+	fi
+	[ "$operation" = download ] && [ -n "$ids" ] && [ -n "$depot" ] && [ -z "$component" ] || exit 2
+	IFS=, read -r -a selected <<< "$ids"
+	for id in "${selected[@]}"; do
+		case "$id" in
+			00000001-*) component=SUPERVISOR; version=9.1.0.0.20000000 ;;
+			00000002-*) component=SUPERVISOR; version=9.1.1.0.25712839 ;;
+			00000003-*) component=VKR; version=1.34 ;;
+			00000004-*) component=VKR; version=1.36.2 ;;
+			00000005-*) component=SUPERVISOR_SERVICE_VKS; version=3.7.1+v1.36 ;;
+			00000006-*) component=SUPERVISOR_SERVICE_VKS; version=3.7.2+v1.36 ;;
+			*) exit 2 ;;
+		esac
+		tree="$depot/PROD/COMP/$component"
+		mkdir -p "$tree/$version"
+		printf 'stub %s %s\n' "$component" "$version" > "$tree/$version/payload.bin"
+		printf '{"id":"urn:uuid:stub-library"}\n' > "$tree/lib.json"
+		printf '{}\n' > "$tree/$version/item.json"
+		payload_size="$(stat -c %s "$tree/$version/payload.bin")"
+		printf '{"items":[{"selfHref":"%s/item.json","files":[{"hrefs":["%s/payload.bin"],"size":%s}]}]}\n' "$version" "$version" "$payload_size" > "$tree/items.json"
+		if [ "${STUB_INCOMPLETE_MANIFEST:-0}" = 1 ]; then
+			printf '{"items":[{"selfHref":"missing/item.json","files":[{"hrefs":["missing/image.vmdk"],"size":10}]}]}\n' > "$tree/items.json"
+		fi
+	done
+	for name in ${STUB_WRITE_TREES:-}; do
+		mkdir -p "$depot/PROD/COMP/$name"
+		printf 'unexpected write\n' > "$depot/PROD/COMP/$name/unexpected.bin"
+	done
+	if [ "${STUB_FAIL_TARGET:-}" = artifacts ]; then
+		printf '%s\n' "${STUB_ARTIFACT_ERROR:-ERROR: binaries checksum validation failed}"
+		exit 23
+	fi
+	[ "${STUB_SLEEP:-0}" = 0 ] || sleep "$STUB_SLEEP"
+	echo 'Successfully downloaded artifacts binaries and OCI images.'
+	exit 0
+fi
 
 if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	# The licensed tool stages listing metadata below its download root even
@@ -208,5 +283,6 @@ cat > "$work_dir/vcf-download-tool-stub/conf/application-prodv2.properties" <<'P
 lcm.depot.adapter.host=dl.broadcom.com
 lcm.access_token.broadcom.authorization.server.url=https://eapi.broadcom.com/vcf/generateToken
 PROPERTIES
+printf '%s\n' "$stub_version" > "$work_dir/vcf-download-tool-stub/conf/tool-version.txt"
 tar -czf "$output" -C "$work_dir" vcf-download-tool-stub
 echo "$output"

@@ -39,7 +39,10 @@ DEFAULT_SETTINGS = {
     "TZ": "UTC",
     "VCF_VERSION": "9.1.0",
     "VKR_MATCH": "",
-    "VKR_OS": "",
+    "SUPERVISOR_MATCH": "",
+    "VKS_MATCH": "",
+    "ARTIFACT_TOKEN_URL": "https://eapi.broadcom.com/downloads/generateArtifactToken",
+    "ARTIFACT_REGISTRY": "vcf.packages.broadcom.com",
 }
 
 

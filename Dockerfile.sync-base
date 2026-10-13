@@ -20,9 +20,7 @@ RUN apt-get update \
 
 COPY sync/sync.sh /usr/local/bin/sync.sh
 COPY sync/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY sync/targets/ /usr/local/lib/vcf-services/targets/
-RUN chmod 0755 /usr/local/bin/sync.sh /usr/local/bin/entrypoint.sh \
-    /usr/local/lib/vcf-services/targets/*.sh
+RUN chmod 0755 /usr/local/bin/sync.sh /usr/local/bin/entrypoint.sh
 
 WORKDIR /opt/vcfdt
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
