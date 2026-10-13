@@ -70,7 +70,7 @@ wiring, and the absence of a Docker socket. Shell tests cover scheduler timing,
 catalog attempt and build-workspace reconciliation at scheduler boot,
 single-writer sync behavior, sync safe-stop on a version mismatch, log
 retention, tool-version run state, post-success release promotion, retention
-after a successful VKR-only run with non-tool provenance, lifecycle
+after a discovery-only artifacts run, lifecycle
 script behavior through a stub Compose command, SFTP identity and host keys,
 Range serving, packaging, the release
 tag gate (well formed tags on main pass, malformed or unmerged tags are
@@ -217,3 +217,11 @@ The stub cannot verify these claims:
 - NSX, vCenter, and SDDC Manager backup uploads against the live SFTP service.
 
 Those remain captain UAT items and must be named in the PR and release notes.
+
+Artifact regression tests cover exact version pins resolved to IDs, discovery
+without promotion, the 9.1.1 version gate, protected libraries on both success
+and failure, partial-file retention, and activation-code redaction. Upgrade
+tests cover omitted OAuth keys, separate container endpoints, failed identity
+and authentication preflight without a release swap, and successful activated
+upgrades retaining the previous release. Live staging downloads remain subject
+to vendor metadata integrity and container-token availability.

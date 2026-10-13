@@ -108,7 +108,7 @@ STATUS_KEY = "vcf-services:sync:status"
 LOG_KEY = "vcf-services:sync:log"
 CATALOG_FILE = STATE / "catalog.json"
 CATALOG_ATTEMPT_FILE = STATE / "catalog-attempt.json"
-VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr"]
+VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr", "supervisor", "vks"]
 # settings.env keys the console owns, paired with their JSON field names.
 SETTING_ENV_FIELDS = {
     "BACKUP_ENABLED": "backupEnabled",
@@ -126,12 +126,15 @@ SETTING_ENV_FIELDS = {
     "TZ": "timezone",
     "VCF_VERSION": "vcfVersion",
     "VKR_MATCH": "vkrMatch",
-    "VKR_OS": "vkrOs",
+    "SUPERVISOR_MATCH": "supervisorMatch",
+    "VKS_MATCH": "vksMatch",
+    "ARTIFACT_TOKEN_URL": "artifactTokenUrl",
+    "ARTIFACT_REGISTRY": "artifactRegistry",
 }
 # The download tool re-reads its own properties file while a run is in flight,
-# so these two are the only settings a running sync can still observe. Every
+# so these are the only settings a running sync can still observe. Every
 # other setting is snapshotted by sync.sh when the run starts.
-LIVE_TOOL_FIELDS = {"depotEndpoint", "tokenUrl"}
+LIVE_TOOL_FIELDS = {"depotEndpoint", "tokenUrl", "artifactTokenUrl", "artifactRegistry"}
 # The SFTP backup service re-reads these every few seconds, so a save takes
 # effect at once and must never be reported as waiting for the next run.
 LIVE_SERVICE_FIELDS = {"backupEnabled", "uidGid"}
@@ -789,6 +792,12 @@ def _patch_tool_endpoints(tool_root, settings=None):
             "TOKEN_URL", "https://eapi.broadcom.com/vcf/generateToken"
         ),
     }
+    replacements.update({
+        "lcm.access_token.packages.broadcom.authorization.server.url": settings.get(
+            "ARTIFACT_TOKEN_URL", "https://eapi.broadcom.com/downloads/generateArtifactToken"
+        ),
+        "lcm.artifacts.vcf.registry": settings.get("ARTIFACT_REGISTRY", "vcf.packages.broadcom.com"),
+    })
     found_any = False
     changed = []
     conf_dir = tool_root / "conf"
@@ -803,17 +812,23 @@ def _patch_tool_endpoints(tool_root, settings=None):
         for properties in candidates:
             original = properties.read_text()
             updated = []
+            seen = set()
             found_here = False
             for line in original.splitlines():
                 key = line.split("=", 1)[0].strip()
                 if key in replacements:
-                    updated.append(f"{key}={replacements[key]}")
+                    if key not in seen:
+                        updated.append(f"{key}={replacements[key]}")
+                    seen.add(key)
                     found_here = True
                     found_any = True
                 else:
                     updated.append(line)
             if not found_here:
                 continue
+            # Recent bundles omit OAuth settings and rely on production
+            # defaults compiled into the tool. Always supply our overrides.
+            updated.extend(f"{key}={value}" for key, value in replacements.items() if key not in seen)
             updated_text = "\n".join(updated) + "\n"
             if updated_text == original:
                 continue
@@ -882,7 +897,7 @@ def _probe_tool_version(tool_root):
             cwd=tool_root,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=90,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -904,26 +919,48 @@ def _probe_tool_version(tool_root):
 
 def _probe_machine_id(tool_root):
     tool = tool_root / "bin" / "vcf-download-tool"
-    try:
-        result = subprocess.run(
-            [tool, "configuration", "get", "--machineId"],
-            cwd=tool_root,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ToolArchiveError(
-            "bin/vcf-download-tool could not read a Software Depot ID"
-        ) from exc
-    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-    match = SOFTWARE_DEPOT_ID_RE.search(output)
-    if result.returncode != 0 or match is None:
-        raise ToolArchiveError(
-            "bin/vcf-download-tool did not return a recognizable Software Depot ID"
-        )
-    return match.group(0)
+    for option in ("--machineId", "--software-depot-id"):
+        try:
+            result = subprocess.run(
+                [tool, "configuration", "get", option], cwd=tool_root,
+                capture_output=True, text=True, timeout=90, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ToolArchiveError("bin/vcf-download-tool could not read a Software Depot ID") from exc
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        match = SOFTWARE_DEPOT_ID_RE.search(output)
+        if result.returncode == 0 and match is not None:
+            return match.group(0)
+    raise ToolArchiveError("bin/vcf-download-tool did not return a recognizable Software Depot ID")
+
+
+def _validate_tool_auth(tool_root):
+    """Read-only depot query using the existing identity and activation file.
+
+    Tool output can echo the activation code. It never enters the API response
+    or the application log. Listing scratch must not use the served depot.
+    """
+    with tempfile.TemporaryDirectory(prefix="vcfdt-upgrade-check-") as scratch:
+        env = dict(os.environ)
+        env["JAVA_TOOL_OPTIONS"] = (
+            env.get("JAVA_TOOL_OPTIONS", "") + f" -Dlcm.bundle.download.root.dir={scratch}"
+        ).strip()
+        try:
+            result = subprocess.run(
+                [tool_root / "bin/vcf-download-tool", "releases", "list",
+                 f"--vcf-version={_settings().get('VCF_VERSION', '9.1.0')}",
+                 f"--depot-download-activation-code-file={ACTIVATION_CODE_FILE}",
+                 f"--ceip={_settings().get('CEIP', 'DISABLE')}"],
+                cwd=tool_root, env=env, capture_output=True, text=True,
+                timeout=90, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ToolArchiveError("Upgrade validation could not finish. The current tool and registration were retained.") from exc
+        if result.returncode != 0 or "Depot credentials are valid." not in result.stdout:
+            raise ToolArchiveError(
+                "Upgrade depot validation failed. Check the depot and OAuth endpoints and depot availability. "
+                "The current tool and registration were retained."
+            )
 
 
 def _release_tool_info(link_name):
@@ -1060,11 +1097,16 @@ def _install_tool_archive(archive_path, filename, source):
     releases = VCFDT_STORE / "releases"
     release_path = releases / release_id
     next_link = VCFDT_STORE / f".current-{release_id}"
-    incoming.mkdir(parents=True)
+    incoming.mkdir(parents=True, mode=0o700)
     extracted.mkdir()
     releases.mkdir(exist_ok=True)
     old_target = None
     swapped = False
+    registered = _activation_configured()
+    state_backup = incoming / "registration-state"
+    identity_before = VCFDT_MACHINE_ID_FILE.read_bytes() if VCFDT_MACHINE_ID_FILE.exists() else None
+    if registered and VCFDT_STATE_DIR.exists():
+        shutil.copytree(VCFDT_STATE_DIR, state_backup)
     try:
         if archive_path.stat().st_size == 0:
             raise ToolArchiveError("the archive is empty")
@@ -1089,6 +1131,15 @@ def _install_tool_archive(archive_path, filename, source):
             machine_id = _probe_machine_id(tool_root)
         except ToolArchiveError:
             machine_id = None
+        if registered:
+            if (not identity_before or not machine_id
+                    or machine_id.lower() != identity_before.decode().strip().lower()
+                    or VCFDT_MACHINE_ID_FILE.read_bytes() != identity_before):
+                raise ToolArchiveError("Upgrade identity validation failed. The current tool and registration were retained.")
+            _validate_tool_auth(tool_root)
+            if VCFDT_MACHINE_ID_FILE.read_bytes() != identity_before:
+                raise ToolArchiveError("Upgrade changed the Software Depot ID. The current tool and registration were retained.")
+        metadata["authVerified"] = registered
         metadata.update(_identity_record(machine_id))
         (tool_root / ".vcf-services.json").write_text(json.dumps(metadata) + "\n")
         os.replace(tool_root, release_path)
@@ -1101,6 +1152,20 @@ def _install_tool_archive(archive_path, filename, source):
         return metadata, old_target, machine_id
     finally:
         if not swapped:
+            if registered and state_backup.exists():
+                # The state directory itself is a mounted volume. Keep its
+                # root in place and restore saved files before pruning extras.
+                # If restore fails, leave incoming (and its backup) for recovery.
+                shutil.copytree(state_backup, VCFDT_STATE_DIR, dirs_exist_ok=True)
+                for directory, dirs, files in os.walk(VCFDT_STATE_DIR, topdown=False):
+                    for name in dirs + files:
+                        entry = Path(directory) / name
+                        saved = state_backup / entry.relative_to(VCFDT_STATE_DIR)
+                        if not saved.exists():
+                            if entry.is_dir() and not entry.is_symlink():
+                                shutil.rmtree(entry)
+                            else:
+                                entry.unlink()
             shutil.rmtree(release_path, ignore_errors=True)
         next_link.unlink(missing_ok=True)
         shutil.rmtree(incoming, ignore_errors=True)
@@ -1450,7 +1515,10 @@ def _settings_doc(settings=None):
         "vcfVersion": settings.get("VCF_VERSION", "9.1.0"),
         "uidGid": settings.get("SFTP_UID_GID", "1003:1003"),
         "vkrMatch": settings.get("VKR_MATCH", ""),
-        "vkrOs": settings.get("VKR_OS", ""),
+        "supervisorMatch": settings.get("SUPERVISOR_MATCH", ""),
+        "vksMatch": settings.get("VKS_MATCH", ""),
+        "artifactTokenUrl": settings.get("ARTIFACT_TOKEN_URL", "https://eapi.broadcom.com/downloads/generateArtifactToken"),
+        "artifactRegistry": settings.get("ARTIFACT_REGISTRY", "vcf.packages.broadcom.com"),
     }
 
 
@@ -2790,13 +2858,17 @@ def update_settings():
     if not 1 <= log_retention <= 1000:
         return jsonify({"error": "log retention must be from 1 through 1000"}), 400
     vkr_match = str(body["vkrMatch"]).strip()
-    vkr_os = str(body["vkrOs"]).strip()
-    if (
-        len(vkr_match) > 200
-        or len(vkr_os) > 100
-        or any("\n" in value or "\r" in value for value in (vkr_match, vkr_os))
-    ):
-        return jsonify({"error": "VKr filters must be short single-line values"}), 400
+    supervisor_match = str(body["supervisorMatch"]).strip()
+    vks_match = str(body["vksMatch"]).strip()
+    if any(len(value) > 500 or not re.fullmatch(r"[0-9A-Za-z.+_ -]*", value)
+           for value in (vkr_match, supervisor_match, vks_match)):
+        return jsonify({"error": "Release pins must be exact versions separated by spaces"}), 400
+    artifact_token_url = str(body["artifactTokenUrl"]).strip()
+    if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~/-]+", artifact_token_url):
+        return jsonify({"error": "the container token URL must be an HTTPS URL without credentials"}), 400
+    artifact_registry = str(body["artifactRegistry"]).strip().lower()
+    if not re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]+)?", artifact_registry) or ".." in artifact_registry:
+        return jsonify({"error": "the container registry hostname is invalid"}), 400
     updates = {
         "BACKUP_ENABLED": str(backup_enabled).lower(),
         "CEIP": ceip,
@@ -2813,7 +2885,10 @@ def update_settings():
         "TZ": timezone_name,
         "VCF_VERSION": vcf_version,
         "VKR_MATCH": vkr_match,
-        "VKR_OS": vkr_os,
+        "SUPERVISOR_MATCH": supervisor_match,
+        "VKS_MATCH": vks_match,
+        "ARTIFACT_TOKEN_URL": artifact_token_url,
+        "ARTIFACT_REGISTRY": artifact_registry,
     }
     stored = _settings()
     before = _settings_doc(stored)

@@ -32,7 +32,7 @@ Each queue entry is one JSON object:
 - `kind`: `sync` dispatches a run of the listed targets. Unknown kinds are
   ignored.
 - `targets`: required for `sync`. The publisher must validate entries against
-  `esx`, `install`, `upgrade`, `patches`, `vkr`; the scheduler drops anything
+  `esx`, `install`, `upgrade`, `patches`, `vkr`, `supervisor`, `vks`; the scheduler drops anything
   else and ignores a request with no valid target.
 - `requestedAt`: ISO 8601 UTC timestamp, informational.
 
@@ -67,10 +67,12 @@ when the key is absent, because the bus is not persistent.
 
 `lastRun` is the source of tool provenance, recorded separately for each target
 after its attempt, including failures. For tool-backed targets (`esx`,
-`install`, `upgrade`, and `patches`), `toolVersion` and `toolReleaseId` come
+`install`, `upgrade`, `patches`, `vkr`, `supervisor`, and `vks`), `toolVersion` and `toolReleaseId` come
 from the active extracted release's metadata, with `unknown` when unavailable.
-For non-tool targets such as `vkr`, both fields are `not applicable` because
-the target uses a separate helper.
+Artifact discovery without release pins records `LISTED`, does not claim ready
+content, and does not promote the tool. Artifact errors also carry
+`failureStage` (`metadata`, `binaries`, or `container-images`). Incomplete
+content-library references record `FAILED:INCOMPLETE-MANIFEST`.
 Targets skipped for depot protection receive `status: "SKIPPED:PROTECTED"`
 and the current provenance fields even though the target was not invoked.
 A target whose download ran but whose run changed a protected tree receives

@@ -122,6 +122,107 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.harness = Harness(self.temporary.name)
 
+    def test_artifacts_discovery_has_no_download_or_content_claim(self):
+        h = self.harness
+        result = h.run("vkr", "supervisor", "vks")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(h.statuses(), {"vkr": "LISTED", "supervisor": "LISTED", "vks": "LISTED"})
+        self.assertFalse(any(call.startswith("artifacts download") for call in h.called()))
+        self.assertFalse((h.comp / "VKR").exists())
+        self.assertEqual(len(set(h.depot_identities())), 1)
+        self.assertEqual(list(h.scratch.iterdir()), [])
+
+    def test_artifacts_discovery_preserves_protected_libraries(self):
+        h = self.harness
+        names = ["VKR", "SUPERVISOR", "SUPERVISOR_SERVICE_VKS"]
+        trees = [h.content_library(name) for name in names]
+        h.protect(*names)
+        before = [fingerprint(tree) for tree in trees]
+        ownership = json.loads(h.manifest.read_text())
+        result = h.run("vkr", "supervisor", "vks")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(h.statuses(), {"vkr": "LISTED", "supervisor": "LISTED", "vks": "LISTED"})
+        self.assertFalse(any(call.startswith("artifacts download") for call in h.called()))
+        self.assertEqual([fingerprint(tree) for tree in trees], before)
+        self.assertEqual(json.loads(h.manifest.read_text()), ownership)
+        self.assertEqual(list(h.scratch.iterdir()), [])
+
+    def test_artifacts_exact_pins_download_ids_and_record_tool_provenance(self):
+        h = self.harness
+        result = h.run("vkr", "supervisor", "vks", env={
+            "VKR_MATCH": "1.36.2", "SUPERVISOR_MATCH": "9.1.1.0.25712839",
+            "VKS_MATCH": "3.7.2+v1.36"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(h.statuses(), {"vkr": "OK", "supervisor": "OK", "vks": "OK"})
+        for tree in ["VKR", "SUPERVISOR", "SUPERVISOR_SERVICE_VKS"]:
+            self.assertTrue(list((h.comp / tree).rglob("payload.bin")))
+        calls = [c for c in h.called() if c.startswith("artifacts download")]
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all("--id=" in c and "--component=" not in c for c in calls))
+
+    def test_artifacts_incomplete_library_fails_without_adoption(self):
+        h = self.harness
+        h.content_library("VKR")
+        h.protect(unprotected=("VKR",))
+        result = h.run("vkr", env={"VKR_MATCH": "1.36.2", "STUB_INCOMPLETE_MANIFEST": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(h.statuses()["vkr"], "FAILED:INCOMPLETE-MANIFEST")
+        self.assertIn("missing/image.vmdk", result.stdout)
+        self.assertEqual(json.loads(h.manifest.read_text())["trees"]["VKR"]["ownership"], "operator-provided")
+        self.assertTrue((h.comp / "VKR/1.36.2/payload.bin").exists())
+        result = h.run("vkr", env={"VKR_MATCH": "1.36.2"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(h.manifest.read_text())["trees"]["VKR"],
+                         {"ownership": "product-managed", "protected": False})
+
+    def test_artifacts_bad_pin_or_old_tool_fails_without_download(self):
+        h = self.harness
+        for version, pin in [("9.1.0", "1.36.2"), ("garbage", "1.36.2"), ("9.1.1", "missing")]:
+            with self.subTest(version=version, pin=pin):
+                (h.tool / "conf/tool-version.txt").write_text(version)
+                result = h.run("vkr", "patches", env={"VKR_MATCH": pin})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(h.statuses()["vkr"].startswith("FAILED:"))
+                self.assertEqual(h.statuses()["patches"], "OK")
+                self.assertFalse(any(c.startswith("artifacts download") for c in h.called()))
+
+    def test_artifacts_protection_is_checked_on_failed_download_too(self):
+        h = self.harness
+        h.content_library("SUPERVISOR")
+        h.protect("SUPERVISOR")
+        result = h.run("vkr", env={"VKR_MATCH": "1.36.2", "STUB_FAIL_TARGET": "artifacts",
+                                  "STUB_WRITE_TREES": "SUPERVISOR"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(h.statuses()["vkr"], "FAILED:PROTECTED-CHANGED")
+
+    def test_artifacts_failure_retains_bytes_and_redacts_activation(self):
+        h = self.harness
+        for stage, message in [("binaries", "ERROR: binaries checksum mismatch"),
+                               ("container-images", "ERROR: OCI images failed to download")]:
+            with self.subTest(stage=stage):
+                result = h.run("vks", env={"VKS_MATCH": "3.7.2+v1.36",
+                    "STUB_FAIL_TARGET": "artifacts", "STUB_ARTIFACT_ERROR": message + " test-activation eyJsecret.value"})
+                self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+                entry = json.loads((h.state / "state.json").read_text())["lastRun"]["vks"]
+                self.assertEqual(entry["failureStage"], stage)
+                self.assertEqual(entry["status"], "FAILED:23")
+                self.assertTrue(list((h.comp / "SUPERVISOR_SERVICE_VKS").rglob("payload.bin")))
+                self.assertNotIn("test-activation", result.stdout)
+                self.assertNotIn("eyJsecret.value", (h.state / "latest.log").read_text())
+
+    def test_protected_artifact_targets_never_invoke_downloads(self):
+        h = self.harness
+        names = ["VKR", "SUPERVISOR", "SUPERVISOR_SERVICE_VKS"]
+        trees = [h.content_library(name) for name in names]
+        before = [fingerprint(tree) for tree in trees]
+        h.protect(*names)
+        result = h.run("vkr", "supervisor", "vks", env={"VKR_MATCH": "1.36.2",
+            "SUPERVISOR_MATCH": "9.1.1.0.25712839", "VKS_MATCH": "3.7.2+v1.36"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(all(s == "SKIPPED:PROTECTED" for s in h.statuses().values()))
+        self.assertEqual([fingerprint(tree) for tree in trees], before)
+        self.assertEqual(h.called(), CATALOG)
+
     def test_sync_builds_durable_catalog_from_all_supported_inventories(self):
         harness = self.harness
         extra = (
@@ -650,14 +751,9 @@ class SyncProtectionScopeTests(unittest.TestCase):
         vkr = harness.content_library("VKR")
         supervisor = harness.content_library("SUPERVISOR")
         harness.protect("VKR", "SUPERVISOR")
-        mirror = harness.root / "vkr.bash"
-        mirror.write_text(
-            'function /usr/local/lib/vcf-services/targets/vkr.sh() {\n'
-            '  printf "mirrored\\n" > "$1/PROD/COMP/VKR/content.txt"\n}\n'
-        )
         before = fingerprint(vkr)
 
-        result = harness.run("vkr", bash_env=mirror)
+        result = harness.run("vkr", env={"VKR_MATCH": "1.36.2"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"vkr": "SKIPPED:PROTECTED"})
         self.assertIn("PROD/COMP/VKR is protected and vkr-content-library writes it", result.stdout)
@@ -665,10 +761,10 @@ class SyncProtectionScopeTests(unittest.TestCase):
 
         harness.protect("SUPERVISOR", unprotected=("VKR",))
         before_supervisor = fingerprint(supervisor)
-        result = harness.run("vkr", bash_env=mirror)
+        result = harness.run("vkr", env={"VKR_MATCH": "1.36.2"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(harness.statuses(), {"vkr": "OK"})
-        self.assertEqual((vkr / "content.txt").read_text(), "mirrored\n")
+        self.assertTrue((vkr / "1.36.2/payload.bin").is_file())
         self.assertEqual(fingerprint(supervisor), before_supervisor)
 
 

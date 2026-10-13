@@ -43,6 +43,7 @@ run_shipped_sync() {
 	local rc=0
 	docker run --rm --read-only --user "$(id -u):$(id -g)" -e HOME=/home/vcf \
 		-e SETTINGS_FILE=/nonexistent/settings.env \
+		-e "VKR_MATCH=${VKR_MATCH:-}" -e "SUPERVISOR_MATCH=${SUPERVISOR_MATCH:-}" -e "VKS_MATCH=${VKS_MATCH:-}" \
 		-v "$work_dir/tool:/opt/vcfdt" \
 		-v "$work_dir/depot:/depot" \
 		-v "$work_dir/state:/state" \
@@ -117,4 +118,13 @@ grep -q '<<< vcf-patches OK' "$work_dir/listing-scratch.log"
 grep -qx 'operator vkr content' "$work_dir/depot/PROD/COMP/VKR/operator.bin"
 jq -e '.lastRun.install.status == "OK" and .lastRun.upgrade.status == "OK"
   and .lastRun.patches.status == "OK"' "$work_dir/state/state.json" >/dev/null
+# Artifacts use the image's mawk parser and the same unwritable HOME boundary.
+run_shipped_sync "$work_dir/artifacts-list.log" vkr supervisor vks
+jq -e '.lastRun.vkr.status == "LISTED" and .lastRun.supervisor.status == "LISTED" and .lastRun.vks.status == "LISTED"' "$work_dir/state/state.json" >/dev/null
+grep -qx 'operator vkr content' "$work_dir/depot/PROD/COMP/VKR/operator.bin"
+SUPERVISOR_MATCH=9.1.1.0.25712839 VKS_MATCH=3.7.2+v1.36 \
+    run_shipped_sync "$work_dir/artifacts-download.log" supervisor vks
+jq -e '.lastRun.supervisor.status == "OK" and .lastRun.vks.status == "OK"' "$work_dir/state/state.json" >/dev/null
+test -f "$work_dir/depot/PROD/COMP/SUPERVISOR/9.1.1.0.25712839/payload.bin"
+test -f "$work_dir/depot/PROD/COMP/SUPERVISOR_SERVICE_VKS/3.7.2+v1.36/payload.bin"
 echo "sync image ownership tests passed on $image ($image_jq)"

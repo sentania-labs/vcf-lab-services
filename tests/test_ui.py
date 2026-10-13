@@ -273,6 +273,7 @@ class UiApiTests(unittest.TestCase):
         machine_id_file=None,
         version_output=None,
         profiles=None,
+        auth_exit=0,
     ):
         if version_output is None:
             version_output = f"Version: {version}\n{version}"
@@ -295,6 +296,9 @@ class UiApiTests(unittest.TestCase):
             "#!/bin/sh\n"
             'if [ "${1:-}" = configuration ]; then\n'
             f"{machine_id_command}"
+            'elif [ "${1:-}" = releases ]; then\n'
+            '  echo "Depot credentials are valid."\n'
+            f'  exit {auth_exit}\n'
             "else\n"
             "  cat <<'VCFDT_VERSION_OUTPUT'\n"
             f"{version_output.rstrip()}\n"
@@ -371,8 +375,8 @@ class UiApiTests(unittest.TestCase):
             "tokenUrl": "https://auth.example.test/token",
             "uidGid": "1004:1005",
             "vcfVersion": "9.1.0",
-            "vkrMatch": "9.1.*",
-            "vkrOs": "photon",
+            "vkrMatch": "1.36.2+vmware.2-vkr.3",
+            "supervisorMatch": "",
         }
 
     def test_first_person_claims_appliance_and_second_claim_is_refused(self):
@@ -470,6 +474,95 @@ class UiApiTests(unittest.TestCase):
             self.tool_store / "current" / "conf" / "application-prodv2.properties"
         ).read_text()
         self.assertIn("lcm.depot.adapter.host=dl.broadcom.com", properties)
+
+    def test_upgrade_inserts_missing_oauth_settings(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.module._write_settings({
+            "DEPOT_ENDPOINT": "dl-vcfstg.broadcom.com",
+            "TOKEN_URL": "https://eapi-gcpstg.broadcom.com/vcf/generateToken",
+            "ARTIFACT_TOKEN_URL": "https://registry-auth.example.test/token",
+        })
+        archive = self.tar_tool(profiles={
+            "application-prodv2.properties": "lcm.depot.adapter.host=dl.broadcom.com\n",
+        })
+        response = self.post("/api/vcfdt", data={"archive": (archive, "new.tar.gz")},
+                             content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 201, response.get_json())
+        properties = (self.tool_store / "current/conf/application-prodv2.properties").read_text()
+        self.assertIn("lcm.access_token.broadcom.authorization.server.url=https://eapi-gcpstg.broadcom.com/vcf/generateToken", properties)
+        self.assertIn("lcm.access_token.packages.broadcom.authorization.server.url=https://registry-auth.example.test/token", properties)
+
+    def test_activated_upgrade_failure_keeps_release_and_identity(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.module._write_secret(self.module.ACTIVATION_CODE_FILE, "private-test-code\n")
+        original = (self.tool_store / "current").resolve()
+        identity = (self.vcfdt_state / "machine_id").read_bytes()
+        archive = self.tar_tool(machine_id="22222222-2222-4222-8222-222222222222")
+        response = self.post("/api/vcfdt", data={"archive": (archive, "changed-id.tar.gz")},
+                             content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertEqual((self.tool_store / "current").resolve(), original)
+        self.assertEqual((self.vcfdt_state / "machine_id").read_bytes(), identity)
+        self.assertEqual(self.module.ACTIVATION_CODE_FILE.read_text(), "private-test-code\n")
+        self.assertNotIn("private-test-code", response.get_data(as_text=True))
+
+    def test_upgrade_failure_restores_registration_without_removing_volume_root(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.module._write_secret(self.module.ACTIVATION_CODE_FILE, "private-test-code\n")
+        identity = (self.vcfdt_state / "machine_id").read_bytes()
+        rmtree = shutil.rmtree
+        def mounted_rmtree(path, *args, **kwargs):
+            if Path(path) == self.vcfdt_state:
+                raise OSError(16, "Device or resource busy")
+            return rmtree(path, *args, **kwargs)
+        with mock.patch.object(self.module.shutil, "rmtree", side_effect=mounted_rmtree):
+            archive = self.tar_tool(machine_id="22222222-2222-4222-8222-222222222222")
+            response = self.post("/api/vcfdt", data={"archive": (archive, "bad-id.tar.gz")},
+                                 content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertEqual((self.vcfdt_state / "machine_id").read_bytes(), identity)
+
+    def test_activated_upgrade_checks_auth_before_switch_and_preserves_previous(self):
+        self.claim()
+        self.write_state()
+        self.assertEqual(self.upload_tool().status_code, 201)
+        self.module._write_secret(self.module.ACTIVATION_CODE_FILE, "private-test-code\n")
+        original = (self.tool_store / "current").resolve()
+        identity = (self.vcfdt_state / "machine_id").read_bytes()
+        for source in ("upload", "depot"):
+            with self.subTest(source=source):
+                archive = self.tar_tool(version="9.1.3", auth_exit=23)
+                if source == "upload":
+                    response = self.post("/api/vcfdt", data={"archive": (archive, "new.tar.gz")},
+                                         content_type="multipart/form-data")
+                else:
+                    path = self.seed_depot_tool("9.1.3")
+                    path.write_bytes(archive.getvalue())
+                    response = self.install_from_depot(path.name)
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertIn("depot validation failed", response.get_json()["error"])
+                self.assertEqual((self.tool_store / "current").resolve(), original)
+                self.assertEqual((self.vcfdt_state / "machine_id").read_bytes(), identity)
+        response = self.upload_tool()
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertTrue(response.get_json()["authVerified"])
+        self.assertEqual((self.tool_store / "previous").resolve(), original)
+        self.assertEqual((self.vcfdt_state / "machine_id").read_bytes(), identity)
+
+    def test_container_endpoint_changes_are_blocked_during_sync(self):
+        self.claim()
+        self.write_state(running=True)
+        for field, value in [("artifactRegistry", "registry.example.test"),
+                             ("artifactTokenUrl", "https://auth.example.test/token")]:
+            with self.subTest(field=field):
+                response = self.post("/api/settings", json={field: value})
+                self.assertEqual(response.status_code, 409, response.get_json())
 
     def test_tool_upload_rejects_archive_without_endpoint_keys(self):
         self.claim()
@@ -2238,7 +2331,8 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertEqual(saved["cronSchedule"], "0 2 * * 6")
         settings_text = self.settings.read_text()
         self.assertIn('CRON_SCHEDULE="0 2 * * 6"', settings_text)
-        self.assertIn('VKR_OS="photon"', settings_text)
+        self.assertIn('VKR_MATCH="1.36.2+vmware.2-vkr.3"', settings_text)
+        self.assertIn('SUPERVISOR_MATCH=""', settings_text)
         properties = (
             self.tool_store / "current" / "conf" / "application-prodv2.properties"
         ).read_text()
@@ -2462,7 +2556,10 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "depot-endpoint",
                 "token-url",
                 "vkr-match",
-                "vkr-os",
+                "supervisor-match",
+                "vks-match",
+                "artifact-token-url",
+                "artifact-registry",
                 "save-settings",
             },
             "tab-backup": {"backup-enabled", "uidgid", "save-backup"},

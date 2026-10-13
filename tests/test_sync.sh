@@ -181,12 +181,7 @@ mkdir -p "$work_dir/depot/PROD/COMP/VKR"
 printf 'operator content\n' > "$work_dir/depot/PROD/COMP/VKR/content.txt"
 printf '%s\n' '{"version":1,"trees":{"VKR":{"ownership":"operator-provided","protected":true}}}' \
 	> "$work_dir/state/depot-ownership.json"
-cat > "$work_dir/protected-vkr-stub.bash" <<'STUB'
-function /usr/local/lib/vcf-services/targets/vkr.sh() {
-	printf 'replaced\n' > "$1/PROD/COMP/VKR/content.txt"
-}
-STUB
-BASH_ENV="$work_dir/protected-vkr-stub.bash" run_sync vkr > "$work_dir/protected-vkr.log"
+VKR_MATCH=1.36.2 run_sync vkr > "$work_dir/protected-vkr.log"
 grep -qx 'operator content' "$work_dir/depot/PROD/COMP/VKR/content.txt"
 grep -q 'PROD/COMP/VKR is protected and vkr-content-library writes it, skipping the target without changing it' \
 	"$work_dir/protected-vkr.log"
@@ -228,21 +223,13 @@ set -e
 test -L "$tool_store/previous"
 test -d "$tool_store/releases/previous-release"
 
-cat > "$work_dir/vkr-stub.bash" <<'STUB'
-function /usr/local/lib/vcf-services/targets/vkr.sh() {
-	mkdir -p "$1/PROD/COMP/VKR"
-	printf 'stub VKR content\n' > "$1/PROD/COMP/VKR/content.txt"
-}
-STUB
-BASH_ENV="$work_dir/vkr-stub.bash" run_promoted_sync vkr > "$work_dir/promotion-vkr.log"
+# Discovery does not promote a replacement or claim downloaded content.
+run_promoted_sync vkr > "$work_dir/promotion-vkr.log"
 test -L "$tool_store/previous"
 test -d "$tool_store/releases/previous-release"
-grep -qx 'stub VKR content' "$work_dir/depot/PROD/COMP/VKR/content.txt"
-jq -e '.trees.VKR == {ownership:"product-managed", protected:false}' \
-	"$work_dir/promotion-state/depot-ownership.json" >/dev/null
-jq -e '.lastRun.vkr.status == "OK"
-  and .lastRun.vkr.toolVersion == "not applicable"
-  and .lastRun.vkr.toolReleaseId == "not applicable"' \
+jq -e '.lastRun.vkr.status == "LISTED"
+  and .lastRun.vkr.toolVersion == "0.0.1-stub"
+  and .lastRun.vkr.toolReleaseId == "current-release"' \
 	"$work_dir/promotion-state/state.json" >/dev/null
 
 run_promoted_sync patches > "$work_dir/promotion-success.log"

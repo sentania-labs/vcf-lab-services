@@ -255,3 +255,23 @@ docker exec "$sync_container" grep -qx written \
 
 "${compose[@]}" ps --all
 echo "Compose boot test passed: services started and the mounted tool wrote its telemetry flag during sync"
+
+# Exercise a rejected activated upgrade with the registration directory itself
+# mounted, as it is in Compose and Kubernetes. Removing that root would erase
+# its contents before failing with EBUSY.
+docker run --rm -i --tmpfs /registration \
+    -v "$project_dir:/work:ro" -w /work "$VCF_SERVICES_UI_IMAGE" python - <<'PYTEST'
+import sys
+from pathlib import Path
+sys.path.insert(0, "/work/tests")
+import test_ui
+test_ui.APP_PATH = Path("/app/app.py")
+test = test_ui.UiApiTests()
+test.setUp()
+test.vcfdt_state = Path("/registration")
+test.module.VCFDT_STATE_DIR = test.vcfdt_state
+test.module.VCFDT_MACHINE_ID_FILE = test.vcfdt_state / "machine_id"
+test.test_activated_upgrade_failure_keeps_release_and_identity()
+assert test.module.VCFDT_MACHINE_ID_FILE.is_file()
+print("Mounted registration rollback passed: original identity retained")
+PYTEST

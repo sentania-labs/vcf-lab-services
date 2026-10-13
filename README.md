@@ -106,10 +106,15 @@ Tool installation (from the depot or by upload) and starting a sync keep
 their existing running-sync guards. Replacing the tool retains the prior
 extracted release and exposes a rollback button on Setup. The retained release
 is removed only after a fully successful sync that includes at least one
-successful tool-backed target (`esx`, `install`, `upgrade`, or `patches`). A
-VKR-only run keeps the retained release because it uses a separate helper. If a
+successful download target, including VKR, VKS, or Supervisor. Discovery-only
+artifact runs are recorded as `LISTED` and keep the retained release. If a
 replacement has not synced successfully, installing another release keeps only
-the current and immediately previous releases. To roll back, wait for any sync
+the current and immediately previous releases. With activation configured, a
+candidate must preserve the Software Depot ID and pass a depot authentication
+query before it becomes current. A failed check restores registration state
+and leaves the current release in place. Endpoint settings are inserted even
+when a vendor archive omits them and relies on compiled production defaults.
+To roll back, wait for any sync
 to finish, open Setup, and select **Roll back to previous**. This swaps the two
 tool releases without restoring depot content. The same retention rule applies
 after rollback; a failed sync keeps the retained release.
@@ -187,8 +192,28 @@ change. When the listing cannot be obtained the target is not run and is
 recorded as failed. Protection remains until an operator turns it off in the
 Depot tab.
 
-Adopting an existing VKR content tree as the VKR sync target is a follow-up.
-This release inventories and protects that tree but does not adopt it.
+VKR, Supervisor, and VKS sync use VCFDT 9.1.1 or later. The `vkr` and
+`supervisor` targets select their matching component; `vks` selects
+`SUPERVISOR_SERVICE_VKS`, including its OCI container images. In Settings,
+leave release pins empty to discover available versions without downloading.
+Enter exact versions separated by spaces to select downloads. Every pin must
+match the current listing before any download starts. VKR includes all OS
+variants; the obsolete `VKR_OS` setting is ignored with a run-log warning.
+
+The targets respect protected trees, including on failed downloads. To permit
+updates to an existing library, unprotect that tree in Depot. Discovery does
+not claim content is ready or promote the tool. Download, checksum, or OCI
+failures keep partial files for retry and mark the target failed. The tool's
+validation is never bypassed. A successful validated download adopts an unprotected tree as product-managed.
+Libraries that advertise missing files fail with `FAILED:INCOMPLETE-MANIFEST`
+and retain their existing ownership.
+
+Container image authentication has its own token URL and registry settings.
+These are editable separately from the binary depot OAuth URL and are locked
+while sync runs. Production defaults remain the default; a staging depot does
+not imply that its container-token service is available. Real staging tests
+found a VKR `items.json` catalog/checksum mismatch and a VKS OAuth failure.
+These upstream failures remain visible and cannot be treated as ready content.
 
 The Depot tab also browses `/depot` and provides authenticated file uploads,
 folder uploads from `.tar.gz`, `.tgz`, or `.zip` archives, and explicit
