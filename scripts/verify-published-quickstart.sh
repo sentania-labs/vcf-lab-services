@@ -89,7 +89,7 @@ done
 password="release quickstart proof"
 cookie_jar="$(mktemp)"
 stub_archive="$(mktemp --suffix=.tar.gz)"
-"$project_dir/tests/make-stub-vcfdt.sh" "$stub_archive" >/dev/null
+STUB_VERSION=0.0.0.0.20000000 "$project_dir/tests/make-stub-vcfdt.sh" "$stub_archive" >/dev/null
 
 claim="$(curl --fail --silent --show-error --insecure -c "$cookie_jar" \
 	-H 'Content-Type: application/json' \
