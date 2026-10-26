@@ -200,6 +200,18 @@ Enter exact versions separated by spaces to select downloads. Every pin must
 match the current listing before any download starts. VKR includes all OS
 variants; the obsolete `VKR_OS` setting is ignored with a run-log warning.
 
+The opt-in `avi` target downloads the Avi Load Balancer (`NSX_ALB`) bundles
+into `PROD/COMP/NSX_ALB`. The `install` target runs the tool with
+`--automated-install`, which trims the listing to the VCF Installer set and
+leaves Avi out, and the tool cannot filter `binaries list` by `NSX_ALB`. The
+`avi` target therefore lists the plain `INSTALL` binaries for the configured
+VCF version, picks the `NSX_ALB` rows, and downloads them by ID. It needs
+VCFDT 9.1.1 or later and is not in the default targets; tick it in Settings
+to use it. Unlike the artifact targets, leaving **Avi releases** (`AVI_MATCH`)
+empty downloads every `NSX_ALB` release in the listing; enter exact versions
+separated by spaces (such as `32.1.3.25665611`) to narrow it. The target
+follows the same protected-tree and ownership rules.
+
 The targets respect protected trees, including on failed downloads. To permit
 updates to an existing library, unprotect that tree in Depot. Discovery does
 not claim content is ready or promote the tool. Download, checksum, or OCI

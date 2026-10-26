@@ -108,7 +108,7 @@ STATUS_KEY = "vcf-services:sync:status"
 LOG_KEY = "vcf-services:sync:log"
 CATALOG_FILE = STATE / "catalog.json"
 CATALOG_ATTEMPT_FILE = STATE / "catalog-attempt.json"
-VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr", "supervisor", "vks"]
+VALID_TARGETS = ["esx", "install", "upgrade", "patches", "vkr", "supervisor", "vks", "avi"]
 # settings.env keys the console owns, paired with their JSON field names.
 SETTING_ENV_FIELDS = {
     "BACKUP_ENABLED": "backupEnabled",
@@ -128,6 +128,7 @@ SETTING_ENV_FIELDS = {
     "VKR_MATCH": "vkrMatch",
     "SUPERVISOR_MATCH": "supervisorMatch",
     "VKS_MATCH": "vksMatch",
+    "AVI_MATCH": "aviMatch",
     "ARTIFACT_TOKEN_URL": "artifactTokenUrl",
     "ARTIFACT_REGISTRY": "artifactRegistry",
 }
@@ -1517,6 +1518,7 @@ def _settings_doc(settings=None):
         "vkrMatch": settings.get("VKR_MATCH", ""),
         "supervisorMatch": settings.get("SUPERVISOR_MATCH", ""),
         "vksMatch": settings.get("VKS_MATCH", ""),
+        "aviMatch": settings.get("AVI_MATCH", ""),
         "artifactTokenUrl": settings.get("ARTIFACT_TOKEN_URL", "https://eapi.broadcom.com/downloads/generateArtifactToken"),
         "artifactRegistry": settings.get("ARTIFACT_REGISTRY", "vcf.packages.broadcom.com"),
     }
@@ -2860,8 +2862,9 @@ def update_settings():
     vkr_match = str(body["vkrMatch"]).strip()
     supervisor_match = str(body["supervisorMatch"]).strip()
     vks_match = str(body["vksMatch"]).strip()
+    avi_match = str(body["aviMatch"]).strip()
     if any(len(value) > 500 or not re.fullmatch(r"[0-9A-Za-z.+_ -]*", value)
-           for value in (vkr_match, supervisor_match, vks_match)):
+           for value in (vkr_match, supervisor_match, vks_match, avi_match)):
         return jsonify({"error": "Release pins must be exact versions separated by spaces"}), 400
     artifact_token_url = str(body["artifactTokenUrl"]).strip()
     if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~/-]+", artifact_token_url):
@@ -2887,6 +2890,7 @@ def update_settings():
         "VKR_MATCH": vkr_match,
         "SUPERVISOR_MATCH": supervisor_match,
         "VKS_MATCH": vks_match,
+        "AVI_MATCH": avi_match,
         "ARTIFACT_TOKEN_URL": artifact_token_url,
         "ARTIFACT_REGISTRY": artifact_registry,
     }

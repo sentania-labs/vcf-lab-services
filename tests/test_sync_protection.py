@@ -160,6 +160,112 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertTrue(all("--id=" in c and "--component=" not in c for c in calls))
 
+    AVI_IDS = ["f262ef73-23fb-5620-b0ff-f1195e081c40", "b2e580e1-455b-57bb-b2b3-27e1fa512d6c"]
+
+    def avi_downloads(self):
+        return [c for c in self.harness.called() if c.startswith("binaries download-by-id")]
+
+    def test_avi_blank_pins_download_every_listed_nsx_alb_bundle_by_id(self):
+        h = self.harness
+        result = h.run("avi")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(h.statuses(), {"avi": "OK"})
+        # The plain INSTALL listing, never the trimmed installer one, then one download by ID.
+        self.assertEqual(h.called()[0], "binaries list install-all")
+        calls = self.avi_downloads()
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("--automated-install", calls[0])
+        self.assertIn("--id=" + ",".join(sorted(self.AVI_IDS)), calls[0])
+        self.assertEqual(sorted(p.name for p in (h.comp / "NSX_ALB").glob("*.bin")),
+                         sorted(i + ".bin" for i in self.AVI_IDS))
+        # Only the NSX_ALB rows are requested, not the other INSTALL components.
+        self.assertFalse((h.comp / "VCENTER").exists())
+        self.assertEqual(json.loads(h.manifest.read_text())["trees"]["NSX_ALB"],
+                         {"ownership": "product-managed", "protected": False})
+        entry = json.loads((h.state / "state.json").read_text())["lastRun"]["avi"]
+        self.assertNotEqual(entry["toolVersion"], "not applicable")
+        self.assertEqual(list(h.scratch.iterdir()), [])
+
+    def test_avi_pins_select_releases_by_exact_version(self):
+        h = self.harness
+        result = h.run("avi", env={"AVI_MATCH": "32.1.3.25665611"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + self.AVI_IDS[1]))
+        result = h.run("avi", env={"AVI_MATCH": "32.1.1.25377988 32.1.3.25665611"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + ",".join(self.AVI_IDS)))
+
+    def test_avi_unknown_pin_or_old_tool_or_missing_bundle_downloads_nothing(self):
+        h = self.harness
+        for version, pin, extra, status in [
+                ("9.1.1", "32.1.3", {}, "FAILED:UNKNOWN-VERSION"),
+                ("9.1.0", "", {}, "FAILED:TOOL-TOO-OLD"),
+                ("9.1.1", "", {"STUB_LIST_COMPONENTS": "VCENTER"}, "FAILED:NO-BUNDLES"),
+                ("9.1.1", "", {"STUB_LIST_NO_TABLE": "1"}, "FAILED:2")]:
+            with self.subTest(version=version, pin=pin, extra=extra):
+                (h.tool / "conf/tool-version.txt").write_text(version)
+                result = h.run("avi", "patches", env={"AVI_MATCH": pin, **extra})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(h.statuses()["avi"], status)
+                self.assertEqual(h.statuses()["patches"], "OK")
+                self.assertFalse(any("--id=" in c for c in h.called()))
+                self.assertFalse((h.comp / "NSX_ALB").exists())
+
+    def test_avi_download_failure_is_recorded_and_checked_for_protected_changes(self):
+        h = self.harness
+        result = h.run("avi", env={"STUB_FAIL_TARGET": "avi"})
+        self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+        self.assertEqual(h.statuses()["avi"], "FAILED:23")
+        h.content_library("VKR")
+        h.protect("VKR")
+        result = h.run("avi", env={"STUB_FAIL_TARGET": "avi", "STUB_WRITE_TREES": "VKR"})
+        self.assertEqual(h.statuses()["avi"], "FAILED:PROTECTED-CHANGED")
+
+    def test_protected_nsx_alb_tree_skips_avi_without_downloading(self):
+        h = self.harness
+        tree = h.content_library("NSX_ALB")
+        h.protect("NSX_ALB")
+        before = fingerprint(tree)
+        result = h.run("avi")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(h.statuses(), {"avi": "SKIPPED:PROTECTED"})
+        self.assertEqual(fingerprint(tree), before)
+        self.assertEqual(h.called(), CATALOG)
+
+    def test_avi_is_not_run_by_the_default_targets(self):
+        h = self.harness
+        result = h.run(env={})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("avi", h.statuses())
+        self.assertFalse((h.comp / "NSX_ALB").exists())
+
+    def test_avi_parser_reads_the_binaries_table_not_the_artifacts_layout(self):
+        table = """ID | Component | Component Full Name | Version | Release Date | Size | Type
+-----
+00000001-0000-4000-8000-000000000001 | VCENTER | vCenter | 9.1.0.0.1 | 2026-01-01 | 1 GiB | INSTALL
+f262ef73-23fb-5620-b0ff-f1195e081c40 | NSX_ALB | Avi | Load Balancer | 32.1.1.25377988 | 2026-01-01 | 3.8 GiB | INSTALL
+b2e580e1-455b-57bb-b2b3-27e1fa512d6c | NSX_ALB | Avi | 32.1.3.25665611 | 2026-01-01 | 3.9 GiB | INSTALL
+-----
+3 elements
+"""
+        def rows(text, component="NSX_ALB"):
+            return subprocess.run(
+                ["bash", "-c", 'source <(sed -n "/^binary_rows() {/,/^}/p" "$1"); binary_rows "$2"',
+                 "_", str(SCRIPT), component],
+                input=text, capture_output=True, text=True)
+        result = rows(table)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "f262ef73-23fb-5620-b0ff-f1195e081c40 32.1.1.25377988",
+            "b2e580e1-455b-57bb-b2b3-27e1fa512d6c 32.1.3.25665611"])
+        self.assertEqual(rows(table, "NSX_T").returncode, 0)
+        self.assertEqual(rows(table, "NSX_T").stdout, "")
+        self.assertEqual(rows("no table here\n").returncode, 3)
+        # A listing without the Component column is not a table this reads.
+        self.assertEqual(rows(table.replace("| Component |", "| Kind |", 1)).returncode, 3)
+        truncated = table.replace("| 2026-01-01 | 3.8 GiB | INSTALL", "", 1)
+        self.assertEqual(rows(truncated).returncode, 3)
+
     def test_artifacts_incomplete_library_fails_without_adoption(self):
         h = self.harness
         h.content_library("VKR")

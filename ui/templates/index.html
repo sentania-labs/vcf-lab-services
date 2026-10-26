@@ -334,8 +334,9 @@
         <div class="field"><label for="artifact-token-url">Container image token URL</label><input id="artifact-token-url"></div>
         <div class="field"><label for="artifact-registry">Container image registry</label><input id="artifact-registry"></div>
         <div class="field"><label for="supervisor-match">Supervisor release pins</label><input id="supervisor-match" placeholder="Optional"></div>
+        <div class="field"><label for="avi-match">Avi releases</label><input id="avi-match" placeholder="Blank downloads every release"></div>
       </div>
-      <p class="help">VKR, VKS, and Supervisor need VCFDT 9.1.1 or later. Leave release pins empty to list available versions without downloading. Enter exact versions separated by spaces to download. VKR downloads all OS variants; VKS also downloads container images.</p>
+      <p class="help">VKR, VKS, and Supervisor need VCFDT 9.1.1 or later. Leave release pins empty to list available versions without downloading. Enter exact versions separated by spaces to download. VKR downloads all OS variants; VKS also downloads container images. The opt-in avi target downloads Avi Load Balancer (NSX_ALB) bundles; leave Avi releases empty to download every release the 9.1 INSTALL listing offers.</p>
       <p class="help">The sync scheduler reloads these file-backed settings automatically. Endpoint changes also update the mounted tool, so they wait for a running sync to finish.</p>
       <div class="row" style="margin-top:12px"><button id="save-settings">Save settings</button><span id="settings-flash" class="muted"></span></div>
     </section>
@@ -647,6 +648,7 @@ function populateSetup(data) {
   $('vkr-match').value=settings.vkrMatch;
   $('supervisor-match').value=settings.supervisorMatch;
   $('vks-match').value=settings.vksMatch;
+  $('avi-match').value=settings.aviMatch;
   $('artifact-token-url').value=settings.artifactTokenUrl;
   $('artifact-registry').value=settings.artifactRegistry;
   $('sync-diagnostics').checked=settings.syncDiagnostics;
@@ -853,7 +855,7 @@ function settingsPayload(){ return {
   uidGid:$('uidgid').value, depotEndpoint:$('depot-endpoint').value, tokenUrl:$('token-url').value,
   esxMode:$('esx-mode').value, logRetention:$('log-retention').value,
   syncDiagnostics:$('sync-diagnostics').checked,
-  vkrMatch:$('vkr-match').value, supervisorMatch:$('supervisor-match').value, vksMatch:$('vks-match').value,
+  vkrMatch:$('vkr-match').value, supervisorMatch:$('supervisor-match').value, vksMatch:$('vks-match').value, aviMatch:$('avi-match').value,
   artifactTokenUrl:$('artifact-token-url').value, artifactRegistry:$('artifact-registry').value,
   storageConfirmed:$('storage-confirmed').checked,
   syncTargets:[...document.querySelectorAll('.settings-target:checked')].map(box=>box.value)

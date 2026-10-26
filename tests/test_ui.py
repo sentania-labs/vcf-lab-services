@@ -2333,6 +2333,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
         self.assertIn('CRON_SCHEDULE="0 2 * * 6"', settings_text)
         self.assertIn('VKR_MATCH="1.36.2+vmware.2-vkr.3"', settings_text)
         self.assertIn('SUPERVISOR_MATCH=""', settings_text)
+        self.assertIn('AVI_MATCH=""', settings_text)
         properties = (
             self.tool_store / "current" / "conf" / "application-prodv2.properties"
         ).read_text()
@@ -2558,6 +2559,7 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "vkr-match",
                 "supervisor-match",
                 "vks-match",
+                "avi-match",
                 "artifact-token-url",
                 "artifact-registry",
                 "save-settings",

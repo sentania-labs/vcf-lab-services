@@ -41,6 +41,7 @@ DEFAULT_SETTINGS = {
     "VKR_MATCH": "",
     "SUPERVISOR_MATCH": "",
     "VKS_MATCH": "",
+    "AVI_MATCH": "",
     "ARTIFACT_TOKEN_URL": "https://eapi.broadcom.com/downloads/generateArtifactToken",
     "ARTIFACT_REGISTRY": "vcf.packages.broadcom.com",
 }

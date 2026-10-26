@@ -185,7 +185,7 @@ handle_request() {
 		sync)
 			local -a targets=()
 			mapfile -t targets < <(jq -r '.targets[]?' <<< "$payload" 2>/dev/null \
-				| grep -Ex 'esx|install|upgrade|patches|vkr|supervisor|vks' || true)
+				| grep -Ex 'esx|install|upgrade|patches|vkr|supervisor|vks|avi' || true)
 			if [ "${#targets[@]}" -gt 0 ]; then
 				echo "[scheduler] bus dispatch: ${targets[*]}"
 				dispatch_sync "${targets[@]}"
