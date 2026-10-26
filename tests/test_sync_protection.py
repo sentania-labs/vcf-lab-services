@@ -186,24 +186,19 @@ class SyncProtectionScopeTests(unittest.TestCase):
         self.assertNotEqual(entry["toolVersion"], "not applicable")
         self.assertEqual(list(h.scratch.iterdir()), [])
 
-    def test_avi_pins_select_releases_by_full_or_dotted_prefix_version(self):
+    def test_avi_pins_select_releases_by_exact_version(self):
         h = self.harness
-        for pin in ("32.1.3.25665611", "32.1.3"):
-            with self.subTest(pin=pin):
-                result = h.run("avi", env={"AVI_MATCH": pin})
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + self.AVI_IDS[1]))
-        for pins, expected in (("32.1.1 32.1.3", sorted(self.AVI_IDS)),
-                               ("32.1.3 32.1.3.25665611", [self.AVI_IDS[1]])):
-            with self.subTest(pins=pins):
-                result = h.run("avi", env={"AVI_MATCH": pins})
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + ",".join(expected)))
+        result = h.run("avi", env={"AVI_MATCH": "32.1.3.25665611"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + self.AVI_IDS[1]))
+        result = h.run("avi", env={"AVI_MATCH": "32.1.1.25377988 32.1.3.25665611"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + ",".join(self.AVI_IDS)))
 
     def test_avi_unknown_pin_or_old_tool_or_missing_bundle_downloads_nothing(self):
         h = self.harness
         for version, pin, extra, status in [
-                ("9.1.1", "32.2", {}, "FAILED:UNKNOWN-VERSION"),
+                ("9.1.1", "32.1.3", {}, "FAILED:UNKNOWN-VERSION"),
                 ("9.1.0", "", {}, "FAILED:TOOL-TOO-OLD"),
                 ("9.1.1", "", {"STUB_LIST_COMPONENTS": "VCENTER"}, "FAILED:NO-BUNDLES"),
                 ("9.1.1", "", {"STUB_LIST_NO_TABLE": "1"}, "FAILED:2")]:

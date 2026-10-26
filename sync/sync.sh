@@ -543,7 +543,7 @@ download_avi() {
 		local -a versions
 		read -r -a versions <<< "$pins"
 		for pin in "${versions[@]}"; do
-			selected="$(printf '%s\n' "$rows" | awk -v pin="$pin" '$2 == pin || index($2, pin ".") == 1 {print $1}' | sort -u | paste -sd,)"
+			selected="$(printf '%s\n' "$rows" | awk -v pin="$pin" '$2 == pin {print $1}' | sort -u | paste -sd,)"
 			if [ -z "$selected" ]; then
 				artifact_status=FAILED:UNKNOWN-VERSION
 				log "ERROR: requested NSX_ALB release '$pin' is not in the listing; no binaries were downloaded"
@@ -551,7 +551,6 @@ download_avi() {
 			fi
 			ids="${ids:+$ids,}$selected"
 		done
-		ids="$(printf '%s\n' "$ids" | tr , '\n' | sort -u | paste -sd,)"
 	fi
 	artifact_stage=binaries
 	"$tool" binaries download "$ceip_opt" "$auth_opt" "--depot-store=$DEPOT_DIR" \
