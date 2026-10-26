@@ -10,10 +10,12 @@ talks to the Docker daemon.
 
 import fcntl
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tarfile
@@ -25,12 +27,30 @@ import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import bcrypt
 import redis as redis_lib
+import requests
+from authlib.common.errors import AuthlibBaseError
+from authlib.integrations.requests_client import OAuth2Session
+from authlib.oidc.core import CodeIDToken
 from croniter import croniter
-from flask import Flask, jsonify, render_template, request, send_file, session
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+)
+from itsdangerous import BadData, URLSafeTimedSerializer
+from joserfc import jwt
+from joserfc.errors import InvalidKeyIdError, JoseError
+from joserfc.jwk import KeySet
+from joserfc.jws import JWSRegistry
 
 DEPOT = Path(os.environ.get("DEPOT_DIR", "/depot"))
 BACKUP = Path(os.environ.get("BACKUP_DIR", "/mnt/backup"))
@@ -94,6 +114,9 @@ SFTP_PASSWORD_FILE = Path(
 )
 FLASK_SECRET_FILE = Path(
     os.environ.get("FLASK_SECRET_FILE", f"{SECRETS_ROOT}/flask-secret")
+)
+OIDC_CLIENT_SECRET_FILE = Path(
+    os.environ.get("OIDC_CLIENT_SECRET_FILE", f"{SECRETS_ROOT}/oidc-client-secret")
 )
 CADDY_CA_FILE = Path(
     os.environ.get("CADDY_CA_FILE", "/caddy-data/caddy/pki/authorities/local/root.crt")
@@ -540,8 +563,7 @@ def _auth_doc():
 
 
 def _is_authenticated():
-    auth = _auth_doc()
-    return bool(auth and session.get("owner") == auth.get("username"))
+    return _current_user() is not None
 
 
 _verified_cache = {"stamp": None, "entries": {}}
@@ -632,6 +654,357 @@ def _replace_shared_credentials(auth_doc, password):
         raise
 
 
+# OpenID Connect sign-in for the console. Only the browser console uses it:
+# the depot, the SFTP account and the patch store never see a token, and the
+# owner login keeps working whether or not a provider is configured.
+OIDC_TIMEOUT = 5
+OIDC_METADATA_TTL = 600
+OIDC_LOGIN_WINDOW = 600
+OIDC_SESSION_MAX_AGE = 12 * 3600
+OIDC_TXN_COOKIE = "vcf_oidc"
+OIDC_SIGNING_ALGORITHMS = [
+    "RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
+    "ES256", "ES384", "ES512", "EdDSA",
+]
+OIDC_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+class OidcError(Exception):
+    """A sign-in failed. The code picks the message the console shows; the
+    detail is for the log only."""
+
+    def __init__(self, code, detail):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+_oidc_cache = {"issuer": None, "metadata": None, "jwks": None, "fetchedAt": 0.0}
+_oidc_cache_lock = threading.Lock()
+_oidc_reported = {"problem": None}
+
+
+def _audit(event, **fields):
+    detail = " ".join(f"{key}={json.dumps(value)}" for key, value in fields.items())
+    print(f"[audit] {event} {detail}".rstrip(), flush=True)
+
+
+def _oidc_url_allowed(value):
+    parts = urlsplit(value or "")
+    if parts.scheme == "https" and parts.hostname:
+        return True
+    return parts.scheme == "http" and parts.hostname in OIDC_LOOPBACK_HOSTS
+
+
+def _oidc_config():
+    """The provider settings, or None when sign-in through a provider is off."""
+    settings = _settings()
+    keys = (
+        "OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_REDIRECT_URI", "OIDC_OWNER_GROUPS",
+    )
+    if not any(settings.get(key, "").strip() for key in keys):
+        return None
+    issuer = settings.get("OIDC_ISSUER", "").strip()
+    client_id = settings.get("OIDC_CLIENT_ID", "").strip()
+    redirect_uri = settings.get("OIDC_REDIRECT_URI", "").strip()
+    owner_groups = [
+        group.strip()
+        for group in settings.get("OIDC_OWNER_GROUPS", "").split(",")
+        if group.strip()
+    ]
+    client_secret = _oidc_client_secret()
+    problem = None
+    if not _oidc_url_allowed(issuer):
+        problem = "OIDC_ISSUER must be an https URL"
+    elif not client_id:
+        problem = "OIDC_CLIENT_ID is not set"
+    elif not _oidc_url_allowed(redirect_uri):
+        problem = "OIDC_REDIRECT_URI must be an https URL"
+    elif not owner_groups:
+        problem = "OIDC_OWNER_GROUPS names no group, so nobody could sign in"
+    elif not client_secret:
+        problem = f"the client secret file {str(OIDC_CLIENT_SECRET_FILE)!r} is missing or empty"
+    if problem:
+        if _oidc_reported["problem"] != problem:
+            _oidc_reported["problem"] = problem
+            print(f"[oidc] sign-in through a provider is off: {problem}", flush=True)
+        return None
+    _oidc_reported["problem"] = None
+    scopes = settings.get("OIDC_SCOPES", "").replace(",", " ").split()
+    scopes = ["openid"] + [
+        scope for scope in dict.fromkeys(scopes or ["profile", "email"]) if scope != "openid"
+    ]
+    return {
+        "issuer": issuer,
+        "clientId": client_id,
+        "clientSecret": client_secret,
+        "redirectUri": redirect_uri,
+        "scopes": scopes,
+        "groupsClaim": settings.get("OIDC_GROUPS_CLAIM", "").strip() or "groups",
+        "ownerGroups": owner_groups,
+    }
+
+
+def _oidc_public():
+    config = _oidc_config()
+    if config is None:
+        return {"enabled": False}
+    return {"enabled": True}
+
+
+def _oidc_client_secret():
+    try:
+        return OIDC_CLIENT_SECRET_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _oidc_get_json(url):
+    if not _oidc_url_allowed(url):
+        raise OidcError("failed", f"the provider advertised an insecure URL: {url}")
+    try:
+        response = requests.get(
+            url, timeout=OIDC_TIMEOUT, headers={"Accept": "application/json"}
+        )
+        response.raise_for_status()
+        document = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise OidcError("unavailable", f"{url} could not be read: {exc}") from exc
+    if not isinstance(document, dict):
+        raise OidcError("unavailable", f"{url} did not return a JSON object")
+    return document
+
+
+def _oidc_metadata(config, refresh=False):
+    with _oidc_cache_lock:
+        fresh = (
+            _oidc_cache["issuer"] == config["issuer"]
+            and _oidc_cache["metadata"] is not None
+            and time.monotonic() - _oidc_cache["fetchedAt"] < OIDC_METADATA_TTL
+        )
+        if fresh and not refresh:
+            return _oidc_cache["metadata"]
+    url = config["issuer"].rstrip("/") + "/.well-known/openid-configuration"
+    metadata = _oidc_get_json(url)
+    if str(metadata.get("issuer", "")).rstrip("/") != config["issuer"].rstrip("/"):
+        raise OidcError(
+            "failed",
+            f"the provider reports issuer {metadata.get('issuer')!r}, "
+            f"not the configured {config['issuer']!r}",
+        )
+    for field in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+        if not _oidc_url_allowed(str(metadata.get(field, ""))):
+            raise OidcError("failed", f"the provider metadata has no usable {field}")
+    methods = metadata.get("code_challenge_methods_supported")
+    if methods is not None and "S256" not in methods:
+        raise OidcError("failed", "the provider does not support PKCE with S256")
+    with _oidc_cache_lock:
+        _oidc_cache.update(
+            issuer=config["issuer"],
+            metadata=metadata,
+            jwks=None,
+            fetchedAt=time.monotonic(),
+        )
+    return metadata
+
+
+def _oidc_jwks(metadata, refresh=False):
+    with _oidc_cache_lock:
+        cached = _oidc_cache["jwks"]
+    if cached is not None and not refresh:
+        return cached
+    jwks = _oidc_get_json(metadata["jwks_uri"])
+    with _oidc_cache_lock:
+        _oidc_cache["jwks"] = jwks
+    return jwks
+
+
+def _oidc_client(config, metadata):
+    supported = metadata.get("token_endpoint_auth_methods_supported") or [
+        "client_secret_basic"
+    ]
+    if "client_secret_basic" in supported:
+        method = "client_secret_basic"
+    elif "client_secret_post" in supported:
+        method = "client_secret_post"
+    else:
+        raise OidcError("failed", "the provider accepts no client secret method")
+    return OAuth2Session(
+        client_id=config["clientId"],
+        client_secret=config["clientSecret"],
+        token_endpoint_auth_method=method,
+        scope=" ".join(config["scopes"]),
+        redirect_uri=config["redirectUri"],
+        code_challenge_method="S256",
+        default_timeout=OIDC_TIMEOUT,
+    )
+
+
+def _oidc_id_token_claims(config, metadata, token, nonce):
+    id_token = token.get("id_token")
+    if not isinstance(id_token, str) or not id_token:
+        raise OidcError("failed", "the token response carried no ID token")
+    advertised = metadata.get("id_token_signing_alg_values_supported")
+    algorithms = [
+        algorithm
+        for algorithm in OIDC_SIGNING_ALGORITHMS
+        if not isinstance(advertised, list) or algorithm in advertised
+    ]
+    registry = JWSRegistry(algorithms=algorithms, strict_check_header=False)
+    try:
+        try:
+            decoded = jwt.decode(
+                id_token, KeySet.import_key_set(_oidc_jwks(metadata)), registry=registry
+            )
+        except InvalidKeyIdError:
+            decoded = jwt.decode(
+                id_token,
+                KeySet.import_key_set(_oidc_jwks(metadata, refresh=True)),
+                registry=registry,
+            )
+        claims = CodeIDToken(
+            decoded.claims,
+            decoded.header,
+            {
+                "iss": {"essential": True, "value": metadata["issuer"]},
+                "aud": {"essential": True, "value": config["clientId"]},
+                "sub": {"essential": True},
+            },
+            {
+                "nonce": nonce,
+                "client_id": config["clientId"],
+                "access_token": token.get("access_token"),
+            },
+        )
+        claims.validate(leeway=60)
+    except (JoseError, ValueError, KeyError, TypeError) as exc:
+        raise OidcError("failed", f"the ID token was rejected: {exc!r}") from exc
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject:
+        raise OidcError("failed", "the ID token has no subject")
+    return dict(claims)
+
+
+def _oidc_groups(claims, name):
+    value = claims.get(name)
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [group for group in value if isinstance(group, str)]
+    return []
+
+
+def _oidc_userinfo(metadata, token, subject):
+    endpoint = str(metadata.get("userinfo_endpoint", ""))
+    access_token = token.get("access_token")
+    if not endpoint or not access_token:
+        return {}
+    if not _oidc_url_allowed(endpoint):
+        raise OidcError("failed", f"the provider advertised an insecure URL: {endpoint}")
+    try:
+        response = requests.get(
+            endpoint,
+            timeout=OIDC_TIMEOUT,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        response.raise_for_status()
+        document = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise OidcError("unavailable", f"userinfo could not be read: {exc}") from exc
+    if not isinstance(document, dict) or document.get("sub") != subject:
+        raise OidcError("failed", "userinfo does not describe the signed-in subject")
+    return document
+
+
+def _oidc_complete(config, transaction, code):
+    metadata = _oidc_metadata(config)
+    client = _oidc_client(config, metadata)
+    try:
+        token = client.fetch_token(
+            metadata["token_endpoint"],
+            code=code,
+            code_verifier=transaction["verifier"],
+            grant_type="authorization_code",
+        )
+    except requests.RequestException as exc:
+        raise OidcError("unavailable", f"the token endpoint failed: {exc}") from exc
+    except (AuthlibBaseError, ValueError) as exc:
+        raise OidcError("failed", f"the token request was rejected: {exc!r}") from exc
+    finally:
+        client.close()
+    claims = _oidc_id_token_claims(config, metadata, token, transaction["nonce"])
+    if claims.get(config["groupsClaim"]) is None:
+        # A null claim in the ID token is as good as absent: it must not
+        # shadow the value the provider's userinfo supplies.
+        claims = {
+            **_oidc_userinfo(metadata, token, claims["sub"]),
+            **{key: value for key, value in claims.items() if value is not None},
+        }
+    groups = _oidc_groups(claims, config["groupsClaim"])
+    name = next(
+        (
+            claims[key]
+            for key in ("preferred_username", "name", "email")
+            if isinstance(claims.get(key), str) and claims[key].strip()
+        ),
+        claims["sub"],
+    )
+    return {
+        "iss": metadata["issuer"],
+        "sub": claims["sub"],
+        "name": name.strip()[:120],
+        "groups": groups,
+    }
+
+
+def _oidc_roles(config, groups):
+    return ["owner"] if set(groups) & set(config["ownerGroups"]) else []
+
+
+def _oidc_transactions():
+    return URLSafeTimedSerializer(app.secret_key, salt="vcf-services-oidc-login")
+
+
+def _oidc_return(code=None):
+    # Relative to /api/oidc/*, which the proxy serves below the console prefix.
+    response = redirect("../../" + (f"?sso_error={code}" if code else ""), code=303)
+    response.delete_cookie(OIDC_TXN_COOKIE, secure=True, httponly=True, samesite="Lax")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _sso_session():
+    identity = session.get("sso")
+    if not isinstance(identity, dict):
+        return None
+    issued = identity.get("at")
+    if not isinstance(issued, (int, float)) or time.time() - issued > OIDC_SESSION_MAX_AGE:
+        return None
+    if not all(isinstance(identity.get(key), str) and identity[key] for key in ("iss", "sub")):
+        return None
+    if identity.get("role") != "owner":
+        return None
+    config = _oidc_config()
+    if config is None or identity["iss"].rstrip("/") != config["issuer"].rstrip("/"):
+        return None
+    return identity
+
+
+def _current_user():
+    """Who the signed-in session belongs to, for display and the audit log."""
+    auth = _auth_doc()
+    if auth and session.get("owner") == auth.get("username"):
+        return {"kind": "owner", "name": auth["username"], "subject": None}
+    identity = _sso_session() if auth else None
+    if identity:
+        return {
+            "kind": "sso",
+            "name": identity.get("name") or identity["sub"],
+            "subject": f"{identity['iss']}#{identity['sub']}",
+        }
+    return None
+
+
 @app.before_request
 def require_console_owner():
     public_paths = {
@@ -643,6 +1016,8 @@ def require_console_owner():
         "/api/claim",
         "/api/bootstrap",
         "/api/login",
+        "/api/oidc/login",
+        "/api/oidc/callback",
     }
     version_problem = _version_problem()
     if request.path in public_paths:
@@ -2022,14 +2397,32 @@ def auth_check():
     )
 
 
+@app.after_request
+def audit_console_changes(response):
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        user = _current_user()
+        if user:
+            _audit(
+                "change",
+                user=user["name"],
+                kind=user["kind"],
+                subject=user["subject"],
+                request=f"{request.method} {request.path}",
+                status=response.status_code,
+            )
+    return response
+
+
 @app.get("/api/session")
 def session_status():
     auth = _auth_doc()
+    user = _current_user()
     return jsonify(
         {
             "claimed": auth is not None,
-            "authenticated": _is_authenticated(),
-            "username": auth.get("username") if auth and _is_authenticated() else None,
+            "authenticated": user is not None,
+            "username": user["name"] if user else None,
+            "sso": _oidc_public(),
         }
     )
 
@@ -2081,8 +2474,136 @@ def login():
 
 @app.post("/api/logout")
 def logout():
+    user = _current_user()
+    end_session = None
+    if user and user["kind"] == "sso":
+        _audit("sign-out", user=user["name"], subject=user["subject"])
+        end_session = _oidc_end_session_url()
     session.clear()
-    return jsonify({"authenticated": False})
+    return jsonify({"authenticated": False, "endSession": end_session})
+
+
+def _oidc_end_session_url():
+    config = _oidc_config()
+    if config is None:
+        return None
+    try:
+        endpoint = str(_oidc_metadata(config).get("end_session_endpoint", ""))
+    except OidcError:
+        return None
+    if not _oidc_url_allowed(endpoint):
+        return None
+    parts = urlsplit(endpoint)
+    query = parts.query + ("&" if parts.query else "")
+    query += urlencode({"client_id": config["clientId"]})
+    return urlunsplit(parts._replace(query=query))
+
+
+@app.get("/api/oidc/login")
+def oidc_login():
+    config = _oidc_config()
+    if config is None:
+        return _oidc_return("not_configured")
+    if _auth_doc() is None:
+        return _oidc_return("unclaimed")
+    try:
+        # A cached document would send the browser to a dead authorization
+        # endpoint; ask the provider first so the person gets the console's
+        # readable message instead. The callback path keeps the cache.
+        metadata = _oidc_metadata(config, refresh=True)
+        client = _oidc_client(config, metadata)
+    except OidcError as exc:
+        print(f"[oidc] sign-in could not start: {exc.detail!r}", flush=True)
+        return _oidc_return(exc.code)
+    transaction = {
+        "state": secrets.token_urlsafe(32),
+        "nonce": secrets.token_urlsafe(32),
+        "verifier": secrets.token_urlsafe(48),
+        "issuer": config["issuer"],
+    }
+    try:
+        url, _state = client.create_authorization_url(
+            metadata["authorization_endpoint"],
+            state=transaction["state"],
+            nonce=transaction["nonce"],
+            code_verifier=transaction["verifier"],
+        )
+    finally:
+        client.close()
+    response = redirect(url, code=303)
+    # The console session cookie is SameSite=Strict, so the browser leaves it
+    # out of the provider's redirect back. The login in flight rides in its own
+    # short-lived Lax cookie, which is what that return trip needs.
+    response.set_cookie(
+        OIDC_TXN_COOKIE,
+        _oidc_transactions().dumps(transaction),
+        max_age=OIDC_LOGIN_WINDOW,
+        secure=True,
+        httponly=True,
+        samesite="Lax",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/oidc/callback")
+def oidc_callback():
+    config = _oidc_config()
+    if config is None:
+        return _oidc_return("not_configured")
+    try:
+        transaction = _oidc_transactions().loads(
+            request.cookies.get(OIDC_TXN_COOKIE, ""), max_age=OIDC_LOGIN_WINDOW
+        )
+    except BadData:
+        transaction = None
+    if (
+        not isinstance(transaction, dict)
+        or transaction.get("issuer") != config["issuer"]
+        or not hmac.compare_digest(
+            str(transaction.get("state", "")).encode(),
+            request.args.get("state", "").encode(),
+        )
+    ):
+        print("[oidc] the callback did not match a sign-in in progress", flush=True)
+        return _oidc_return("expired")
+    provider_error = request.args.get("error")
+    if provider_error:
+        print(f"[oidc] the provider refused the sign-in: {provider_error!r}", flush=True)
+        return _oidc_return("denied")
+    code = request.args.get("code", "")
+    if not code:
+        return _oidc_return("failed")
+    try:
+        person = _oidc_complete(config, transaction, code)
+    except OidcError as exc:
+        print(f"[oidc] sign-in failed: {exc.detail!r}", flush=True)
+        return _oidc_return(exc.code)
+    roles = _oidc_roles(config, person["groups"])
+    session.clear()
+    if not roles:
+        _audit(
+            "sign-in refused",
+            user=person["name"],
+            subject=f"{person['iss']}#{person['sub']}",
+        )
+        return _oidc_return("refused")
+    if _auth_doc() is None:
+        return _oidc_return("unclaimed")
+    session["sso"] = {
+        "iss": person["iss"],
+        "sub": person["sub"],
+        "name": person["name"],
+        "role": roles[0],
+        "at": int(time.time()),
+    }
+    _audit(
+        "sign-in",
+        user=person["name"],
+        subject=f"{person['iss']}#{person['sub']}",
+        role=roles[0],
+    )
+    return _oidc_return()
 
 
 @app.get("/api/bootstrap")
@@ -2095,6 +2616,7 @@ def bootstrap_status():
             {
                 "claimed": True,
                 "authenticated": False,
+                "sso": _oidc_public(),
                 "setupComplete": False
                 if version_problem
                 else settings["setupComplete"],
@@ -2107,6 +2629,8 @@ def bootstrap_status():
         {
             "claimed": auth is not None,
             "authenticated": _is_authenticated(),
+            "user": _current_user(),
+            "sso": _oidc_public(),
             "setupComplete": False if version_problem else settings["setupComplete"],
             "versionProblem": version_problem,
             "migration": _migration_status(),

@@ -283,6 +283,88 @@ The SFTP account is also `vcf`, with paths under
 `/mnt/backup/<component>`. ECDSA, Ed25519, and RSA host keys are generated once
 and retained in their dedicated volume.
 
+## Single sign-on for the console
+
+The console can also sign people in through an OpenID Connect provider such as
+Authentik or Keycloak. It is optional and only for the browser console. Members
+of the groups you name get the same access the owner session has, and everyone
+else who signs in at the provider is told they are not allowed in and gets no
+session. Nothing else changes: depot basic auth, the SFTP account, the
+unauthenticated `/umds-patch-store/*` route, and the `vcf` owner login (including
+the first-use claim and the password change that updates all three places) work
+exactly as before, and the owner form stays on the sign-in page as break-glass.
+The depot and SFTP never accept a provider token. With none of the settings
+below present, the console behaves as it did without this feature.
+
+The deployer provisions the provider application and these settings. They are
+not in the console. Add them to `settings.env` in the config volume (the console
+reads the file on each request, so no restart is needed) and put the client
+secret in a file in the secrets volume:
+
+| Setting | Required | Meaning |
+|---|---|---|
+| `OIDC_ISSUER` | yes | Issuer URL. The console reads `<issuer>/.well-known/openid-configuration`. Must be `https` (plain `http` only for `localhost` and `127.0.0.1`). |
+| `OIDC_CLIENT_ID` | yes | Client ID of the provider application. |
+| `OIDC_REDIRECT_URI` | yes | `https://<host>/admin/api/oidc/callback`, registered exactly at the provider. |
+| `OIDC_OWNER_GROUPS` | yes | Comma-separated group names that get owner access. No group is built in, and with none listed the feature stays off. Names match exactly, including case. |
+| `OIDC_GROUPS_CLAIM` | no | Name of the claim that lists a person's groups. Default `groups`. When the ID token lacks the claim, the console asks the provider's userinfo endpoint. |
+| `OIDC_SCOPES` | no | Space-separated scopes. Default `profile email`; `openid` is always requested. Add a scope here if your provider releases groups only on request. |
+
+`settings.env` is also sourced by the sync service as a shell file, so write each
+value in double quotes as above, with `$`, backticks and `"` escaped by a
+backslash.
+
+The client secret is read from `oidc-client-secret` in the console's secrets
+directory (`ui/oidc-client-secret` in the secrets volume, or the path in the
+`OIDC_CLIENT_SECRET_FILE` environment variable), never from a setting or an
+environment value. The file is required: while it is missing or empty the
+feature stays off and the console log says so.
+
+Example, for a Compose install with an Authentik application:
+
+1. In Authentik, create an OAuth2/OpenID provider and application. Use a
+   confidential client, the redirect URI above as a strict match, and the
+   `openid`, `profile` and `email` scopes. Authentik's default `profile` scope
+   includes a `groups` claim with the group names. Restrict the application to
+   the groups that should administer the appliance.
+2. Note the client ID and secret, and the issuer, which for Authentik is
+   `https://<authentik>/application/o/<application-slug>/`.
+3. Provision them:
+
+   ```bash
+   printf '%s\n' 'THE-CLIENT-SECRET' | docker compose exec -T admin-ui \
+     sh -c 'umask 077 && cat > /run/vcf-services-secrets/ui/oidc-client-secret'
+   docker compose exec -T admin-ui sh -c 'cat >> /config/settings.env' <<'EOF'
+   OIDC_ISSUER="https://authentik.example.test/application/o/vcf-services/"
+   OIDC_CLIENT_ID="THE-CLIENT-ID"
+   OIDC_REDIRECT_URI="https://vcf.example.test/admin/api/oidc/callback"
+   OIDC_OWNER_GROUPS="vcf-admins"
+   EOF
+   ```
+
+   On Kubernetes see [docs/kubernetes.md](docs/kubernetes.md#single-sign-on).
+
+How it behaves:
+
+- The console uses the authorization code flow with PKCE (S256), `state` and
+  `nonce`, and checks the ID token's signature, issuer, audience, expiry and
+  nonce. A person is identified by issuer plus subject. The roles are re-read
+  from the groups at every sign-in, so a person removed from the group is
+  refused at their next sign-in. A signed-in session ends after 12 hours, or at
+  once if the settings are removed or point at another issuer.
+- Signing out clears the console session and, when the provider advertises an
+  end-session endpoint, sends the browser there.
+- If the provider cannot be reached the **Sign in with SSO** button fails with a
+  readable message. The owner login, depot downloads and SFTP do not depend on
+  the provider.
+- The console log has `[audit]` lines for sign-ins, refused sign-ins, sign-outs
+  and every change request (`POST`, `PUT`, `PATCH`, `DELETE`) with who made it:
+  the owner login as `user="vcf" kind="owner"`, a person as their provider name
+  and `subject` (issuer and subject). Tokens and the client secret are never
+  logged.
+- Not yet built: personal API tokens and service-account tokens for scripts,
+  tracked in the follow-up work on issue #57.
+
 ## Sync behavior
 
 Scheduled syncs, console-triggered syncs, and

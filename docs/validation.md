@@ -48,6 +48,11 @@ public patch-store notices for direct uploads and directory restores, and mutati
 during a running sync or tool update,
 the schedule preview endpoint computing an unsaved schedule's next run in
 the configured or supplied timezone and rejecting bad input,
+browser sign-in through a mocked OpenID Connect provider (a local issuer with
+signing keys: allowed and refused groups, forged or replayed state, wrong
+audience, nonce, issuer, signature or algorithm, an unreachable provider with
+the owner login and depot credential unaffected, role re-check at every
+sign-in, sign-out through the provider, and the audit log naming who acted),
 setup completion, shared password replacement, sync dispatch, partial settings
 merges over the stored document, settings saved during a running sync being
 persisted and flagged for the next run while the tool-backed endpoints stay

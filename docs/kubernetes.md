@@ -154,6 +154,37 @@ is Ready. If any one container fails readiness, Kubernetes removes the Pod from
 the Service endpoints and takes the whole appliance off the network, even when
 the web and console containers are individually healthy.
 
+## Single sign-on
+
+The console can sign people in through an OpenID Connect provider; the
+[README](../README.md#single-sign-on-for-the-console) lists the settings,
+the provider application to create, and how it behaves. Kubernetes needs two
+things in the Pod: the client secret file and the `OIDC_*` lines in
+`settings.env`. The supplied Deployment already points the console at
+`/etc/vcf-services/secrets/ui/oidc-client-secret`; provision the secret into the
+`secrets-state` claim and the settings into the `config-state` claim through the
+running console container, which owns both:
+
+```bash
+printf '%s\n' 'THE-CLIENT-SECRET' | kubectl --namespace vcf-services exec -i \
+  deployment/vcf-services -c admin-ui -- \
+  sh -c 'umask 077 && cat > /etc/vcf-services/secrets/ui/oidc-client-secret'
+kubectl --namespace vcf-services exec -i deployment/vcf-services -c admin-ui -- \
+  sh -c 'cat >> /config/settings.env' <<'EOF'
+OIDC_ISSUER="https://authentik.example.test/application/o/vcf-services/"
+OIDC_CLIENT_ID="THE-CLIENT-ID"
+OIDC_REDIRECT_URI="https://vcf-services.example.test/admin/api/oidc/callback"
+OIDC_OWNER_GROUPS="vcf-admins"
+EOF
+```
+
+The redirect URI is the ingress hostname with the `/admin/` prefix the proxy
+strips. The settings are read on each request, so the Pod does not restart. The
+bootstrap init container corrects the secret file to mode `0600` on every start
+like the other private files. Both claims are preserved across upgrades, so the
+settings and the secret survive them. The ingress must keep passing the
+`/admin/api/oidc/callback` query string and `Set-Cookie` headers unchanged.
+
 ## Reverse proxy upload limits
 
 The licensed VCF Download Tool upload is roughly 490 MB. Installing the tool
@@ -176,9 +207,10 @@ reverse proxy.
 
 ## Operations and recovery
 
-All product settings remain in the admin console. Kubernetes manifest edits
-are limited to platform concerns such as storage classes, claim sizes,
-hostnames, and external Service integration.
+All product settings remain in the admin console, except the optional
+[single sign-on](#single-sign-on) provider settings, which the deployer
+provisions. Kubernetes manifest edits are limited to platform concerns such as
+storage classes, claim sizes, hostnames, and external Service integration.
 
 The Deployment uses `Recreate`, so an upgrade stops the old Pod before the new
 Pod attaches its RWO claims. Preserve every PVC during updates. Deleting the

@@ -257,6 +257,7 @@ def main():
         "ui/.credentials.lock",
         "ui/auth.json",
         "ui/flask-secret",
+        "ui/oidc-client-secret",
         "ui/redis-password",
     ):
         secret = SECRETS_DIR / relative
