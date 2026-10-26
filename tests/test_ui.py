@@ -3832,6 +3832,13 @@ class OidcSignInTests(unittest.TestCase):
         self.idp.userinfo = {"sub": "someone-else", "groups": ["ops-admins"]}
         self.assertRefused(self.sign_in(claims={"groups": None}), "failed")
 
+    def test_an_insecure_userinfo_endpoint_is_refused_without_sending_the_token(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.userinfo = {"sub": "user-1", "groups": ["ops-admins"]}
+        self.idp.metadata_overrides = {"userinfo_endpoint": "http://idp.example.test/userinfo"}
+        self.assertRefused(self.sign_in(claims={"groups": None}), "failed")
+
     def test_the_group_claim_name_is_configurable(self):
         self.claim()
         self.post("/api/logout")

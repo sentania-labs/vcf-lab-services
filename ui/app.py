@@ -899,6 +899,8 @@ def _oidc_userinfo(metadata, token, subject):
     access_token = token.get("access_token")
     if not endpoint or not access_token:
         return {}
+    if not _oidc_url_allowed(endpoint):
+        raise OidcError("failed", f"the provider advertised an insecure URL: {endpoint}")
     try:
         response = requests.get(
             endpoint,
