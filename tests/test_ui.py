@@ -3845,6 +3845,9 @@ class OidcSignInTests(unittest.TestCase):
         response = self.get(f"/api/oidc/callback?code={code}&state=forged")
         self.assertRefused(response, "expired")
         self.assertEqual(self.idp.token_requests, [])
+        response = self.get(f"/api/oidc/callback?code={code}&state=%C3%A9")
+        self.assertRefused(response, "expired")
+        self.assertEqual(self.idp.token_requests, [])
 
     def test_callback_without_a_login_in_progress_is_refused(self):
         self.claim()
@@ -3887,6 +3890,20 @@ class OidcSignInTests(unittest.TestCase):
         _code, state = self.idp.authorize(self.start_login())
         response = self.get(f"/api/oidc/callback?error=access_denied&state={state}")
         self.assertRefused(response, "denied")
+
+    def test_a_provider_error_cannot_forge_a_log_line(self):
+        self.claim()
+        self.post("/api/logout")
+        _code, state = self.idp.authorize(self.start_login())
+        forged = "x%0A%5Baudit%5D%20change%20user%3D%22vcf%22"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertRefused(
+                self.get(f"/api/oidc/callback?error={forged}&state={state}"), "denied"
+            )
+        lines = output.getvalue().splitlines()
+        self.assertFalse([line for line in lines if line.startswith("[audit]")])
+        self.assertTrue([line for line in lines if "[oidc]" in line and "\\n" in line])
 
     def test_id_tokens_that_fail_validation_never_sign_anyone_in(self):
         self.claim()

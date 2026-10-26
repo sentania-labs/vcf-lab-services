@@ -2514,7 +2514,7 @@ def oidc_login():
         metadata = _oidc_metadata(config)
         client = _oidc_client(config, metadata)
     except OidcError as exc:
-        print(f"[oidc] sign-in could not start: {exc.detail}", flush=True)
+        print(f"[oidc] sign-in could not start: {exc.detail!r}", flush=True)
         return _oidc_return(exc.code)
     transaction = {
         "state": secrets.token_urlsafe(32),
@@ -2562,14 +2562,15 @@ def oidc_callback():
         not isinstance(transaction, dict)
         or transaction.get("issuer") != config["issuer"]
         or not hmac.compare_digest(
-            str(transaction.get("state", "")), request.args.get("state", "")
+            str(transaction.get("state", "")).encode(),
+            request.args.get("state", "").encode(),
         )
     ):
         print("[oidc] the callback did not match a sign-in in progress", flush=True)
         return _oidc_return("expired")
     provider_error = request.args.get("error")
     if provider_error:
-        print(f"[oidc] the provider refused the sign-in: {provider_error}", flush=True)
+        print(f"[oidc] the provider refused the sign-in: {provider_error!r}", flush=True)
         return _oidc_return("denied")
     code = request.args.get("code", "")
     if not code:
@@ -2577,7 +2578,7 @@ def oidc_callback():
     try:
         person = _oidc_complete(config, transaction, code)
     except OidcError as exc:
-        print(f"[oidc] sign-in failed: {exc.detail}", flush=True)
+        print(f"[oidc] sign-in failed: {exc.detail!r}", flush=True)
         return _oidc_return(exc.code)
     roles = _oidc_roles(config, person["groups"])
     session.clear()
