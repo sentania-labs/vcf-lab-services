@@ -2500,7 +2500,10 @@ def oidc_login():
     if _auth_doc() is None:
         return _oidc_return("unclaimed")
     try:
-        metadata = _oidc_metadata(config)
+        # A cached document would send the browser to a dead authorization
+        # endpoint; ask the provider first so the person gets the console's
+        # readable message instead. The callback path keeps the cache.
+        metadata = _oidc_metadata(config, refresh=True)
         client = _oidc_client(config, metadata)
     except OidcError as exc:
         print(f"[oidc] sign-in could not start: {exc.detail!r}", flush=True)

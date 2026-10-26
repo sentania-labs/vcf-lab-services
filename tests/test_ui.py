@@ -3545,6 +3545,7 @@ class MockIdp:
         self.metadata_overrides = {}
         self.userinfo = None
         self.jwks_requests = 0
+        self.metadata_status = 200
         idp = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -3561,7 +3562,10 @@ class MockIdp:
 
             def do_GET(self):
                 if self.path == "/.well-known/openid-configuration":
-                    self.send_json(200, idp.metadata())
+                    if idp.metadata_status != 200:
+                        self.send_json(idp.metadata_status, {})
+                    else:
+                        self.send_json(200, idp.metadata())
                 elif self.path == "/jwks":
                     idp.jwks_requests += 1
                     self.send_json(200, {"keys": [idp.key.as_dict(private=False)]})
@@ -3697,6 +3701,7 @@ class OidcSignInTests(unittest.TestCase):
         self.idp.token_requests.clear()
         self.idp.token_status = 200
         self.idp.metadata_overrides = {}
+        self.idp.metadata_status = 200
         self.idp.userinfo = None
         self.idp.jwks_requests = 0
         self.secret_file = self.secrets / "oidc-client-secret"
@@ -3991,6 +3996,13 @@ class OidcSignInTests(unittest.TestCase):
             self.get("/auth/check", headers={"Authorization": f"Basic {basic}"}).status_code,
             200,
         )
+
+    def test_a_provider_that_goes_down_with_discovery_cached_still_fails_readably(self):
+        self.claim()
+        self.post("/api/logout")
+        self.start_login()
+        self.idp.metadata_status = 503
+        self.assertRefused(self.get("/api/oidc/login"), "unavailable")
 
     def test_a_provider_that_goes_down_between_redirect_and_callback_is_reported(self):
         self.claim()
