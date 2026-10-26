@@ -432,13 +432,13 @@ require_artifacts_tool() {
 	version="$(cat "$TOOL_ROOT/conf/tool-version.txt" 2>/dev/null || true)"
 	if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.|$) ]]; then
 		artifact_status=FAILED:TOOL-TOO-OLD
-		log "ERROR: cannot verify artifacts support; install VCF Download Tool 9.1.1 or later"
+		log "ERROR: cannot verify the tool version; this target needs VCF Download Tool 9.1.1 or later"
 		return 2
 	fi
 	major=$((10#${BASH_REMATCH[1]})); minor=$((10#${BASH_REMATCH[2]})); patch=$((10#${BASH_REMATCH[3]}))
 	if (( major < 9 || (major == 9 && minor < 1) || (major == 9 && minor == 1 && patch < 1) )); then
 		artifact_status=FAILED:TOOL-TOO-OLD
-		log "ERROR: artifacts need VCF Download Tool 9.1.1 or later (active: $version)"
+		log "ERROR: this target needs VCF Download Tool 9.1.1 or later (active: $version)"
 		return 2
 	fi
 	return 0
@@ -551,6 +551,7 @@ download_avi() {
 			fi
 			ids="${ids:+$ids,}$selected"
 		done
+		ids="$(printf '%s\n' "$ids" | tr , '\n' | sort -u | paste -sd,)"
 	fi
 	artifact_stage=binaries
 	"$tool" binaries download "$ceip_opt" "$auth_opt" "--depot-store=$DEPOT_DIR" \

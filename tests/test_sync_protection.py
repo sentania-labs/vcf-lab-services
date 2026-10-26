@@ -193,9 +193,12 @@ class SyncProtectionScopeTests(unittest.TestCase):
                 result = h.run("avi", env={"AVI_MATCH": pin})
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + self.AVI_IDS[1]))
-        result = h.run("avi", env={"AVI_MATCH": "32.1.1 32.1.3"})
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + ",".join(self.AVI_IDS)))
+        for pins, expected in (("32.1.1 32.1.3", sorted(self.AVI_IDS)),
+                               ("32.1.3 32.1.3.25665611", [self.AVI_IDS[1]])):
+            with self.subTest(pins=pins):
+                result = h.run("avi", env={"AVI_MATCH": pins})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(self.avi_downloads()[-1].endswith("--id=" + ",".join(expected)))
 
     def test_avi_unknown_pin_or_old_tool_or_missing_bundle_downloads_nothing(self):
         h = self.harness
