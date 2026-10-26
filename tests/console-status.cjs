@@ -19,6 +19,7 @@ function getElementById(id) {
 }
 let replies = {};
 let calls = {};
+const page = {search: (input.sso || {}).search || '', path: '/admin/', assigned: null, reloaded: false};
 let releaseLogin = null;
 const clock = {now: 0};
 function respond(reply) {
@@ -37,6 +38,14 @@ const context = vm.createContext({
     return {ok: true, json: async () => path === 'api/status' ? input.status : {}};
   },
   setInterval: () => {},
+  URLSearchParams,
+  location: {
+    get search() { return page.search; },
+    get pathname() { return page.path; },
+    assign(url) { page.assigned = url; },
+    reload() { page.reloaded = true; },
+  },
+  history: {replaceState(_state, _title, url) { page.search = ''; page.path = url; }},
   __clock: clock,
 });
 for (const match of input.html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) {
@@ -85,6 +94,28 @@ async function claimFlow() {
   };
 }
 
+// The provider's round trip lands back on the sign-in page with a short code.
+// The page maps it to fixed text, strips it from the address bar, and shows
+// the SSO button only when the appliance is claimed and a provider is set.
+async function ssoFlow() {
+  replies = {'api/bootstrap': {status: 200, body: input.sso.bootstrap}};
+  await context.boot();
+  const shown = {
+    ssoHidden: getElementById('sso-wrap').hidden,
+    label: getElementById('sso-login').textContent,
+    flash: getElementById('auth-flash').textContent,
+    flashClass: getElementById('auth-flash').className,
+    search: page.search,
+  };
+  if (input.sso.logout) {
+    replies = {'api/logout': {status: 200, body: input.sso.logout}};
+    await getElementById('logout').onclick();
+    shown.assigned = page.assigned;
+    shown.reloaded = page.reloaded;
+  }
+  return shown;
+}
+
 async function pollSequence() {
   context.populateIdentity(input.identity);
   const snapshots = [];
@@ -115,6 +146,6 @@ async function statusSummary() {
   };
 }
 
-(input.login ? signIn() : input.claim ? claimFlow() : input.polls ? pollSequence() : statusSummary()).then(result => {
+(input.sso ? ssoFlow() : input.login ? signIn() : input.claim ? claimFlow() : input.polls ? pollSequence() : statusSummary()).then(result => {
   process.stdout.write(JSON.stringify(result));
 }).catch(error => { console.error(error); process.exitCode = 1; });

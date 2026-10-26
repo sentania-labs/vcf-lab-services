@@ -50,7 +50,7 @@ grep -q 'secrets_state:/run/vcf-services-secrets:rw' docker-compose.yml \
 ! grep -q '/run/secrets' docker-compose.yml || fail "Compose still uses the platform-reserved secrets path"
 ! grep -q '/etc/vcf-services/secrets' docker-compose.yml \
 	|| fail "Compose secrets remain nested beneath the sync config mount"
-[ "$(grep -c '/run/vcf-services-secrets' docker-compose.yml)" -eq 13 ] \
+[ "$(grep -c '/run/vcf-services-secrets' docker-compose.yml)" -eq 14 ] \
 	|| fail "not every Compose secret reference uses the non-nested mount path"
 grep -q 'requirepass' ui/bootstrap.py || fail "bootstrap does not protect Redis"
 ! grep -q 'requirepass' docker-compose.yml || fail "Redis password material appears in Compose"

@@ -1,9 +1,13 @@
+import base64
+import contextlib
 import fcntl
+import hashlib
 import importlib.util
 import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -16,10 +20,15 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
+import requests
 from jinja2 import FileSystemLoader
+from joserfc import jwt
+from joserfc.jwk import OctKey, RSAKey
 
 
 APP_PATH = Path(__file__).parents[1] / "ui" / "app.py"
@@ -3517,6 +3526,838 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                       rendered["catalogMeta"])
 
 
+class MockIdp:
+    """A local OpenID provider: discovery, a signing key, and the token and
+    userinfo endpoints. Tests play the browser by hand, taking the console's
+    redirect, getting a code for it here, and carrying the code back."""
+
+    CLIENT_ID = "vcf-console"
+    CLIENT_SECRET = "idp-client-secret"
+    REDIRECT_URI = "https://localhost/admin/api/oidc/callback"
+
+    def __init__(self):
+        self.key = RSAKey.generate_key(
+            2048, parameters={"kid": "test-key", "use": "sig"}
+        )
+        self.codes = {}
+        self.token_requests = []
+        self.token_status = 200
+        self.metadata_overrides = {}
+        self.userinfo = None
+        self.jwks_requests = 0
+        idp = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def send_json(self, status, document):
+                body = json.dumps(document).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if self.path == "/.well-known/openid-configuration":
+                    self.send_json(200, idp.metadata())
+                elif self.path == "/jwks":
+                    idp.jwks_requests += 1
+                    self.send_json(200, {"keys": [idp.key.as_dict(private=False)]})
+                elif self.path == "/userinfo" and idp.userinfo is not None:
+                    self.send_json(200, idp.userinfo)
+                else:
+                    self.send_json(404, {})
+
+            def do_POST(self):
+                if self.path != "/token":
+                    return self.send_json(404, {})
+                length = int(self.headers.get("Content-Length", "0"))
+                form = {
+                    key: values[0]
+                    for key, values in parse_qs(self.rfile.read(length).decode()).items()
+                }
+                idp.token_requests.append(
+                    {"form": form, "authorization": self.headers.get("Authorization")}
+                )
+                if idp.token_status != 200:
+                    return self.send_json(idp.token_status, {"error": "server_error"})
+                status, document = idp.token(form, self.headers.get("Authorization"))
+                self.send_json(status, document)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.issuer = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def metadata(self):
+        document = {
+            "issuer": self.issuer,
+            "authorization_endpoint": f"{self.issuer}/authorize",
+            "token_endpoint": f"{self.issuer}/token",
+            "jwks_uri": f"{self.issuer}/jwks",
+            "userinfo_endpoint": f"{self.issuer}/userinfo",
+            "code_challenge_methods_supported": ["S256"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+            "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+        }
+        document.update(self.metadata_overrides)
+        return {k: v for k, v in document.items() if v is not None}
+
+    def authorize(self, location, claims=None, header=None, key=None, **tamper):
+        """Approve the authorization request in `location` and return the code.
+        `claims` replaces or extends the ID token claims for that sign-in."""
+        query = {k: v[0] for k, v in parse_qs(urlsplit(location).query).items()}
+        code = uuid.uuid4().hex
+        self.codes[code] = {
+            "request": query,
+            "claims": claims or {},
+            "header": header,
+            "key": key,
+            "tamper": tamper,
+        }
+        return code, query["state"]
+
+    def token(self, form, authorization):
+        record = self.codes.pop(form.get("code", ""), None)
+        if record is None:
+            return 400, {"error": "invalid_grant"}
+        request = record["request"]
+        expected = "Basic " + base64.b64encode(
+            f"{self.CLIENT_ID}:{self.CLIENT_SECRET}".encode()
+        ).decode()
+        if authorization is not None and authorization != expected:
+            return 401, {"error": "invalid_client"}
+        if form.get("redirect_uri") != request["redirect_uri"]:
+            return 400, {"error": "invalid_grant"}
+        challenge = (
+            base64.urlsafe_b64encode(
+                hashlib.sha256(form.get("code_verifier", "").encode()).digest()
+            )
+            .rstrip(b"=")
+            .decode()
+        )
+        if request.get("code_challenge_method") != "S256" or challenge != request.get(
+            "code_challenge"
+        ):
+            return 400, {"error": "invalid_grant", "error_description": "PKCE"}
+        now = int(time.time())
+        claims = {
+            "iss": self.issuer,
+            "sub": "user-1",
+            "aud": request["client_id"],
+            "iat": now,
+            "exp": now + 300,
+            "nonce": request["nonce"],
+            "preferred_username": "jdoe",
+            "groups": ["ops-admins", "everyone"],
+        }
+        claims.update(record["claims"])
+        claims = {k: v for k, v in claims.items() if v is not None}
+        header = record["header"] or {"alg": "RS256", "kid": "test-key"}
+        token = jwt.encode(header, claims, record["key"] or self.key)
+        return 200, {
+            "access_token": "access-" + uuid.uuid4().hex,
+            "token_type": "Bearer",
+            "id_token": token,
+        }
+
+
+class OidcSignInTests(unittest.TestCase):
+    """Browser sign-in through a provider, against a mocked one."""
+
+    setUp_console = UiApiTests.setUp
+    load_app = UiApiTests.load_app
+    get = UiApiTests.get
+    post = UiApiTests.post
+    claim = UiApiTests.claim
+
+    PASSWORD = "a strong test password"
+
+    @classmethod
+    def setUpClass(cls):
+        # The mock provider is on loopback; no proxy from the environment is
+        # allowed to stand between the console and it.
+        cls.environment = mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1,localhost"})
+        cls.environment.start()
+        cls.idp = MockIdp()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.idp.close()
+        cls.environment.stop()
+
+    def setUp(self):
+        self.setUp_console()
+        self.idp.codes.clear()
+        self.idp.token_requests.clear()
+        self.idp.token_status = 200
+        self.idp.metadata_overrides = {}
+        self.idp.userinfo = None
+        self.idp.jwks_requests = 0
+        self.secret_file = self.secrets / "oidc-client-secret"
+        self.secret_file.write_text(MockIdp.CLIENT_SECRET + "\n")
+        self.module.OIDC_CLIENT_SECRET_FILE = self.secret_file
+        self.configure()
+
+    def configure(self, **overrides):
+        values = {
+            "OIDC_ISSUER": self.idp.issuer,
+            "OIDC_CLIENT_ID": MockIdp.CLIENT_ID,
+            "OIDC_REDIRECT_URI": MockIdp.REDIRECT_URI,
+            "OIDC_OWNER_GROUPS": "ops-admins",
+        }
+        values.update(overrides)
+        lines = [
+            line
+            for line in self.settings.read_text().splitlines()
+            if not line.startswith("OIDC_")
+        ]
+        lines += [f'{key}="{value}"' for key, value in values.items() if value is not None]
+        self.settings.write_text("\n".join(lines) + "\n")
+
+    def start_login(self):
+        response = self.get("/api/oidc/login")
+        self.assertEqual(response.status_code, 303)
+        return response.headers["Location"]
+
+    def sign_in(self, **authorize):
+        """Run the whole round trip and return the callback response."""
+        code, state = self.idp.authorize(self.start_login(), **authorize)
+        return self.get(f"/api/oidc/callback?code={code}&state={state}")
+
+    def assertSignedIn(self, response):
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["Location"], "../../")
+        self.assertTrue(self.get("/api/session").get_json()["authenticated"])
+        self.assertEqual(self.get("/api/status").status_code, 200)
+
+    def assertRefused(self, response, code):
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["Location"], f"../../?sso_error={code}")
+        self.assertFalse(self.get("/api/session").get_json()["authenticated"])
+        self.assertEqual(self.get("/api/status").status_code, 401)
+
+    def test_member_of_an_owner_group_signs_in_with_the_owner_rights(self):
+        self.claim()
+        self.post("/api/logout")
+        location = self.start_login()
+        parts = urlsplit(location)
+        query = {k: v[0] for k, v in parse_qs(parts.query).items()}
+        self.assertEqual(f"{parts.scheme}://{parts.netloc}{parts.path}", f"{self.idp.issuer}/authorize")
+        self.assertEqual(query["response_type"], "code")
+        self.assertEqual(query["client_id"], MockIdp.CLIENT_ID)
+        self.assertEqual(query["redirect_uri"], MockIdp.REDIRECT_URI)
+        self.assertEqual(query["scope"], "openid profile email")
+        self.assertEqual(query["code_challenge_method"], "S256")
+        self.assertTrue(query["code_challenge"] and query["state"] and query["nonce"])
+        code, state = self.idp.authorize(location)
+        response = self.get(f"/api/oidc/callback?code={code}&state={state}")
+        self.assertSignedIn(response)
+        # The same rights the owner session has: a mutation goes through.
+        self.assertEqual(self.post("/api/setup/complete").status_code, 409)
+        session = self.get("/api/session").get_json()
+        self.assertEqual(session["username"], "jdoe")
+        bootstrap = self.get("/api/bootstrap").get_json()
+        self.assertEqual(
+            bootstrap["user"],
+            {"kind": "sso", "name": "jdoe", "subject": f"{self.idp.issuer}#user-1"},
+        )
+        # The token exchange carried the verifier and the secret came from the file.
+        exchange = self.idp.token_requests[0]
+        self.assertEqual(exchange["form"]["grant_type"], "authorization_code")
+        self.assertTrue(exchange["form"]["code_verifier"])
+        self.assertTrue(exchange["authorization"].startswith("Basic "))
+
+    def test_the_login_in_flight_rides_a_lax_cookie_so_the_strict_session_can_stay(self):
+        self.claim()
+        self.post("/api/logout")
+        response = self.get("/api/oidc/login")
+        cookies = response.headers.getlist("Set-Cookie")
+        challenge = next(c for c in cookies if c.startswith("vcf_oidc="))
+        self.assertIn("SameSite=Lax", challenge)
+        self.assertIn("HttpOnly", challenge)
+        self.assertIn("Secure", challenge)
+        self.assertIn("Max-Age=600", challenge)
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        # The sign-in did not touch the console session cookie.
+        self.assertFalse(any(c.startswith("session=") for c in cookies))
+
+    def test_a_person_outside_every_owner_group_is_refused_and_gets_no_session(self):
+        self.claim()
+        self.post("/api/logout")
+        response = self.sign_in(claims={"groups": ["everyone"]})
+        self.assertRefused(response, "refused")
+
+    def test_a_person_with_no_groups_claim_and_no_userinfo_groups_is_refused(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.userinfo = {"sub": "user-1"}
+        response = self.sign_in(claims={"groups": None})
+        self.assertRefused(response, "refused")
+
+    def test_groups_come_from_userinfo_when_the_id_token_has_none(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.userinfo = {"sub": "user-1", "groups": ["ops-admins"]}
+        self.assertSignedIn(self.sign_in(claims={"groups": None}))
+
+    def test_userinfo_for_a_different_subject_is_not_trusted(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.userinfo = {"sub": "someone-else", "groups": ["ops-admins"]}
+        self.assertRefused(self.sign_in(claims={"groups": None}), "failed")
+
+    def test_group_claim_name_and_nested_paths_are_configurable(self):
+        self.claim()
+        self.post("/api/logout")
+        self.configure(OIDC_GROUPS_CLAIM="realm_access.roles", OIDC_OWNER_GROUPS="lab, ops-admins")
+        response = self.sign_in(
+            claims={"groups": ["everyone"], "realm_access": {"roles": ["ops-admins"]}}
+        )
+        self.assertSignedIn(response)
+        self.post("/api/logout")
+        self.configure(OIDC_GROUPS_CLAIM="memberOf", OIDC_OWNER_GROUPS="lab")
+        self.assertSignedIn(self.sign_in(claims={"memberOf": ["lab"]}))
+
+    def test_group_names_must_match_exactly(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertRefused(self.sign_in(claims={"groups": ["Ops-Admins", "ops-admins-2"]}), "refused")
+
+    def test_no_group_name_is_built_in(self):
+        self.claim()
+        self.post("/api/logout")
+        self.configure(OIDC_OWNER_GROUPS=None)
+        self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": False})
+        self.assertRefused(self.get("/api/oidc/login"), "not_configured")
+        self.configure(OIDC_OWNER_GROUPS=" , ")
+        self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": False})
+
+    def test_bad_state_is_refused_before_the_code_is_used(self):
+        self.claim()
+        self.post("/api/logout")
+        code, _state = self.idp.authorize(self.start_login())
+        response = self.get(f"/api/oidc/callback?code={code}&state=forged")
+        self.assertRefused(response, "expired")
+        self.assertEqual(self.idp.token_requests, [])
+
+    def test_callback_without_a_login_in_progress_is_refused(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertRefused(self.get("/api/oidc/callback?code=x&state=y"), "expired")
+        self.assertEqual(self.idp.token_requests, [])
+
+    def test_a_login_cannot_be_completed_in_another_browser(self):
+        self.claim()
+        self.post("/api/logout")
+        code, state = self.idp.authorize(self.start_login())
+        other = self.module.app.test_client()
+        response = other.get(
+            f"/api/oidc/callback?code={code}&state={state}", base_url="https://localhost"
+        )
+        self.assertEqual(response.headers["Location"], "../../?sso_error=expired")
+        self.assertEqual(self.idp.token_requests, [])
+
+    def test_a_login_in_flight_expires(self):
+        self.claim()
+        self.post("/api/logout")
+        code, state = self.idp.authorize(self.start_login())
+        with mock.patch.object(self.module, "OIDC_LOGIN_WINDOW", -1):
+            response = self.get(f"/api/oidc/callback?code={code}&state={state}")
+        self.assertRefused(response, "expired")
+
+    def test_a_callback_cannot_be_replayed(self):
+        self.claim()
+        self.post("/api/logout")
+        code, state = self.idp.authorize(self.start_login())
+        url = f"/api/oidc/callback?code={code}&state={state}"
+        self.assertSignedIn(self.get(url))
+        self.post("/api/logout")
+        self.assertRefused(self.get(url), "expired")
+        self.assertEqual(len(self.idp.token_requests), 1)
+
+    def test_provider_refusal_is_reported_without_a_session(self):
+        self.claim()
+        self.post("/api/logout")
+        _code, state = self.idp.authorize(self.start_login())
+        response = self.get(f"/api/oidc/callback?error=access_denied&state={state}")
+        self.assertRefused(response, "denied")
+
+    def test_id_tokens_that_fail_validation_never_sign_anyone_in(self):
+        self.claim()
+        self.post("/api/logout")
+        other_key = RSAKey.generate_key(2048, parameters={"kid": "test-key"})
+        shared = OctKey.import_key("k" * 40)
+        cases = {
+            "wrong audience": {"claims": {"aud": "some-other-client"}},
+            "wrong audience even with this client as authorized party": {
+                "claims": {"aud": "some-other-client", "azp": MockIdp.CLIENT_ID}
+            },
+            "audience list without this client": {"claims": {"aud": ["a", "b"]}},
+            "wrong nonce": {"claims": {"nonce": "replayed"}},
+            "no nonce": {"claims": {"nonce": None}},
+            "wrong issuer": {"claims": {"iss": "https://evil.example.test"}},
+            "expired": {"claims": {"exp": int(time.time()) - 3600}},
+            "no subject": {"claims": {"sub": None}},
+            "signed by another key": {"key": other_key},
+            "symmetric algorithm": {
+                "key": shared,
+                "header": {"alg": "HS256", "kid": "test-key"},
+            },
+        }
+        for label, authorize in cases.items():
+            with self.subTest(label):
+                self.assertRefused(self.sign_in(**authorize), "failed")
+
+    def test_an_unsigned_id_token_is_refused(self):
+        self.claim()
+        self.post("/api/logout")
+        original = MockIdp.token
+
+        def unsigned(idp, form, authorization):
+            status, document = original(idp, form, authorization)
+            segments = [
+                base64.urlsafe_b64encode(json.dumps(part).encode()).rstrip(b"=").decode()
+                for part in (
+                    {"alg": "none"},
+                    {"iss": idp.issuer, "sub": "user-1", "aud": MockIdp.CLIENT_ID,
+                     "exp": int(time.time()) + 300, "iat": int(time.time()),
+                     "groups": ["ops-admins"]},
+                )
+            ]
+            document["id_token"] = ".".join(segments) + "."
+            return status, document
+
+        with mock.patch.object(MockIdp, "token", unsigned):
+            self.assertRefused(self.sign_in(), "failed")
+
+    def test_a_multi_audience_token_needs_this_client_as_authorized_party(self):
+        self.claim()
+        self.post("/api/logout")
+        both = [MockIdp.CLIENT_ID, "other"]
+        self.assertRefused(self.sign_in(claims={"aud": both}), "failed")
+        self.post("/api/logout")
+        self.assertSignedIn(self.sign_in(claims={"aud": both, "azp": MockIdp.CLIENT_ID}))
+
+    def test_the_signing_key_is_refetched_once_when_the_key_id_is_new(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertSignedIn(self.sign_in())
+        fetched = self.idp.jwks_requests
+        self.post("/api/logout")
+        rotated = self.idp.key
+        self.idp.key = RSAKey.generate_key(2048, parameters={"kid": "rotated", "use": "sig"})
+        try:
+            self.assertSignedIn(
+                self.sign_in(header={"alg": "RS256", "kid": "rotated"})
+            )
+        finally:
+            self.idp.key = rotated
+        self.assertGreater(self.idp.jwks_requests, fetched)
+
+    def test_an_unreachable_provider_fails_readably_and_the_owner_still_signs_in(self):
+        self.claim()
+        self.post("/api/logout")
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        self.configure(OIDC_ISSUER=f"http://127.0.0.1:{port}")
+        self.assertRefused(self.get("/api/oidc/login"), "unavailable")
+        # The break-glass owner login, and the depot credential, are unaffected.
+        owner = self.post("/api/login", json={"username": "vcf", "password": self.PASSWORD})
+        self.assertEqual(owner.status_code, 200)
+        self.assertEqual(self.get("/api/status").status_code, 200)
+        basic = base64.b64encode(f"vcf:{self.PASSWORD}".encode()).decode()
+        self.assertEqual(
+            self.get("/auth/check", headers={"Authorization": f"Basic {basic}"}).status_code,
+            200,
+        )
+
+    def test_a_provider_that_goes_down_between_redirect_and_callback_is_reported(self):
+        self.claim()
+        self.post("/api/logout")
+        code, state = self.idp.authorize(self.start_login())
+        self.idp.token_status = 503
+        response = self.get(f"/api/oidc/callback?code={code}&state={state}")
+        self.assertRefused(response, "unavailable")
+        self.assertEqual(len(self.idp.token_requests), 1)
+
+    def test_a_token_request_the_provider_rejects_is_a_failed_sign_in(self):
+        self.claim()
+        self.post("/api/logout")
+        code, state = self.idp.authorize(self.start_login())
+        self.idp.token_status = 400
+        response = self.get(f"/api/oidc/callback?code={code}&state={state}")
+        self.assertRefused(response, "failed")
+
+    def test_a_provider_that_reports_another_issuer_is_refused(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.metadata_overrides = {"issuer": "https://elsewhere.example.test"}
+        self.assertRefused(self.get("/api/oidc/login"), "failed")
+
+    def test_a_provider_without_s256_is_refused(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.metadata_overrides = {"code_challenge_methods_supported": ["plain"]}
+        self.assertRefused(self.get("/api/oidc/login"), "failed")
+
+    def test_a_provider_pointing_its_endpoints_at_plain_http_elsewhere_is_refused(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.metadata_overrides = {"token_endpoint": "http://idp.example.test/token"}
+        self.assertRefused(self.get("/api/oidc/login"), "failed")
+
+    def test_the_issuer_may_carry_a_trailing_slash_either_way(self):
+        self.claim()
+        self.post("/api/logout")
+        self.configure(OIDC_ISSUER=self.idp.issuer + "/")
+        self.assertSignedIn(self.sign_in())
+
+    def test_a_remote_provider_must_use_https(self):
+        self.configure(OIDC_ISSUER="http://idp.example.test")
+        self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": False})
+        self.configure(OIDC_REDIRECT_URI="http://console.example.test/admin/api/oidc/callback")
+        self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": False})
+
+    def test_without_a_client_secret_file_the_client_is_public_and_uses_pkce_alone(self):
+        self.claim()
+        self.post("/api/logout")
+        self.secret_file.unlink()
+        self.assertSignedIn(self.sign_in())
+        exchange = self.idp.token_requests[0]
+        self.assertIsNone(exchange["authorization"])
+        self.assertEqual(exchange["form"]["client_id"], MockIdp.CLIENT_ID)
+        self.assertNotIn("client_secret", exchange["form"])
+
+    def test_the_client_secret_goes_post_style_when_that_is_all_the_provider_takes(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.metadata_overrides = {
+            "token_endpoint_auth_methods_supported": ["client_secret_post"]
+        }
+        self.assertSignedIn(self.sign_in())
+        form = self.idp.token_requests[0]["form"]
+        self.assertEqual(form["client_secret"], MockIdp.CLIENT_SECRET)
+
+    def test_the_client_secret_never_reaches_the_log_or_the_session(self):
+        self.claim()
+        self.post("/api/logout")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertSignedIn(self.sign_in())
+            self.post("/api/setup/complete")
+        self.assertNotIn(MockIdp.CLIENT_SECRET, output.getvalue())
+        with self.client.session_transaction() as stored:
+            self.assertNotIn(MockIdp.CLIENT_SECRET, json.dumps(dict(stored)))
+            self.assertEqual(set(stored["sso"]), {"iss", "sub", "name", "role", "at"})
+
+    def test_roles_are_checked_again_at_every_sign_in(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertSignedIn(self.sign_in())
+        # Removed from the group; the next sign-in ends the session it had.
+        response = self.sign_in(claims={"groups": ["everyone"]})
+        self.assertRefused(response, "refused")
+
+    def test_the_audit_log_names_who_signed_in_and_who_changed_what(self):
+        self.claim()
+        self.post("/api/logout")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertSignedIn(self.sign_in())
+            self.post("/api/setup/complete")
+            self.post("/api/logout")
+            self.sign_in(claims={"groups": ["everyone"], "sub": "user-2", "preferred_username": "guest"})
+        lines = [line for line in output.getvalue().splitlines() if line.startswith("[audit]")]
+        subject = json.dumps(f"{self.idp.issuer}#user-1")
+        self.assertTrue(any(
+            line.startswith("[audit] sign-in ")
+            and 'user="jdoe"' in line
+            and f"subject={subject}" in line
+            for line in lines
+        ), lines)
+        self.assertTrue(any(
+            line.startswith("[audit] change ")
+            and 'user="jdoe"' in line
+            and f"subject={subject}" in line
+            and 'request="POST /api/setup/complete"' in line
+            and "status=409" in line
+            for line in lines
+        ), lines)
+        self.assertTrue(any(
+            line.startswith("[audit] sign-out ") and subject in line for line in lines
+        ), lines)
+        self.assertTrue(any(
+            line.startswith("[audit] sign-in refused")
+            and 'user="guest"' in line
+            and "#user-2" in line
+            for line in lines
+        ), lines)
+
+    def test_the_audit_log_names_the_owner_for_owner_changes_and_stays_one_line(self):
+        self.claim()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.post("/api/setup/complete")
+        line = next(l for l in output.getvalue().splitlines() if l.startswith("[audit]"))
+        self.assertIn('user="vcf"', line)
+        self.assertIn('kind="owner"', line)
+        # A hostile display name cannot forge a second log line.
+        self.post("/api/logout")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.sign_in(claims={"preferred_username": "x\n[audit] change user=\"vcf\""})
+        self.assertEqual(
+            [l for l in output.getvalue().splitlines() if l.startswith("[audit] change")], []
+        )
+
+    def test_logout_clears_the_session_and_sends_the_browser_to_the_providers_end_session(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.metadata_overrides = {"end_session_endpoint": f"{self.idp.issuer}/logout?a=b"}
+        self.module._oidc_cache.update(issuer=None, metadata=None, jwks=None)
+        self.assertSignedIn(self.sign_in())
+        result = self.post("/api/logout").get_json()
+        target = urlsplit(result["endSession"])
+        self.assertEqual(f"{target.scheme}://{target.netloc}{target.path}", f"{self.idp.issuer}/logout")
+        self.assertEqual(
+            parse_qs(target.query), {"a": ["b"], "client_id": [MockIdp.CLIENT_ID]}
+        )
+        self.assertEqual(self.get("/api/status").status_code, 401)
+
+    def test_logout_stays_local_when_the_provider_has_no_end_session_endpoint(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertSignedIn(self.sign_in())
+        result = self.post("/api/logout").get_json()
+        self.assertEqual(result, {"authenticated": False, "endSession": None})
+        self.assertEqual(self.get("/api/status").status_code, 401)
+
+    def test_owner_logout_never_leaves_for_the_provider(self):
+        self.claim()
+        self.idp.metadata_overrides = {"end_session_endpoint": f"{self.idp.issuer}/logout"}
+        result = self.post("/api/logout").get_json()
+        self.assertIsNone(result["endSession"])
+
+    def test_logout_works_when_the_provider_is_down(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertSignedIn(self.sign_in())
+        self.module._oidc_cache.update(issuer=None, metadata=None, jwks=None)
+        with mock.patch.object(
+            self.module.requests, "get", side_effect=requests.ConnectionError("down")
+        ):
+            result = self.post("/api/logout")
+        self.assertEqual(result.status_code, 200)
+        self.assertIsNone(result.get_json()["endSession"])
+        self.assertEqual(self.get("/api/status").status_code, 401)
+
+    def test_an_sso_session_ends_when_sso_is_turned_off_or_pointed_elsewhere(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertSignedIn(self.sign_in())
+        self.configure(OIDC_OWNER_GROUPS=None)
+        self.assertEqual(self.get("/api/status").status_code, 401)
+        self.configure()
+        self.assertEqual(self.get("/api/status").status_code, 200)
+        self.configure(OIDC_ISSUER="http://127.0.0.1:9")
+        self.assertEqual(self.get("/api/status").status_code, 401)
+
+    def test_an_sso_session_expires(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertSignedIn(self.sign_in())
+        with mock.patch.object(self.module.time, "time", return_value=time.time() + 13 * 3600):
+            self.assertEqual(self.get("/api/status").status_code, 401)
+
+    def test_only_a_well_formed_signed_sso_session_is_accepted(self):
+        self.claim()
+        self.post("/api/logout")
+        identity = {
+            "iss": self.idp.issuer, "sub": "x", "name": "x",
+            "role": "owner", "at": int(time.time()),
+        }
+        with self.client.session_transaction() as stored:
+            stored["sso"] = identity
+        self.assertEqual(self.get("/api/status").status_code, 200)
+        for label, broken in {
+            "unknown role": {**identity, "role": "viewer"},
+            "no subject": {**identity, "sub": ""},
+            "no time": {key: value for key, value in identity.items() if key != "at"},
+            "not a mapping": ["owner"],
+        }.items():
+            with self.subTest(label):
+                with self.client.session_transaction() as stored:
+                    stored["sso"] = broken
+                self.assertEqual(self.get("/api/status").status_code, 401)
+        self.client.set_cookie("session", "forged.value.here", domain="localhost")
+        self.assertEqual(self.get("/api/status").status_code, 401)
+
+    def test_sso_does_not_open_the_depot_the_sftp_account_or_the_password_store(self):
+        self.claim()
+        self.post("/api/logout")
+        self.assertSignedIn(self.sign_in())
+        # The depot check still wants the shared basic credential only.
+        self.assertEqual(self.get("/auth/check").status_code, 401)
+        wrong = base64.b64encode(b"jdoe:ops-admins").decode()
+        self.assertEqual(
+            self.get("/auth/check", headers={"Authorization": f"Bearer {wrong}"}).status_code, 401
+        )
+        self.assertEqual(
+            self.get("/auth/check", headers={"Authorization": f"Basic {wrong}"}).status_code, 401
+        )
+        before = (self.secrets / "sftp-password").read_text()
+        # Changing the password still takes the current one and updates both places.
+        refused = self.post(
+            "/api/password",
+            json={"currentPassword": "not it", "newPassword": "another strong password"},
+        )
+        self.assertEqual(refused.status_code, 403)
+        self.assertEqual((self.secrets / "sftp-password").read_text(), before)
+        changed = self.post(
+            "/api/password",
+            json={"currentPassword": self.PASSWORD, "newPassword": "another strong password"},
+        )
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual((self.secrets / "sftp-password").read_text(), "another strong password\n")
+        basic = base64.b64encode(b"vcf:another strong password").decode()
+        self.assertEqual(
+            self.get("/auth/check", headers={"Authorization": f"Basic {basic}"}).status_code, 200
+        )
+
+    def test_the_owner_login_and_first_use_claim_work_with_a_provider_configured(self):
+        # Fresh appliance: SSO is offered nowhere until the owner has claimed it.
+        refused = self.get("/api/oidc/login")
+        self.assertEqual(refused.headers["Location"], "../../?sso_error=unclaimed")
+        page = self.get("/api/bootstrap").get_json()
+        self.assertFalse(page["claimed"])
+        self.assertEqual(self.claim().status_code, 201)
+        self.post("/api/logout")
+        owner = self.post("/api/login", json={"username": "vcf", "password": self.PASSWORD})
+        self.assertEqual(owner.status_code, 200)
+        self.assertEqual(self.get("/api/session").get_json()["username"], "vcf")
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["user"],
+            {"kind": "owner", "name": "vcf", "subject": None},
+        )
+
+    def test_a_sign_in_that_outlives_the_claim_is_not_accepted(self):
+        self.claim()
+        self.post("/api/logout")
+        code, state = self.idp.authorize(self.start_login())
+        (self.secrets / "auth.json").unlink()
+        response = self.get(f"/api/oidc/callback?code={code}&state={state}")
+        self.assertEqual(response.headers["Location"], "../../?sso_error=unclaimed")
+        self.assertFalse(self.get("/api/session").get_json()["authenticated"])
+
+    def test_sign_in_is_offered_only_to_a_claimed_appliance_with_a_provider(self):
+        unauthenticated = self.get("/api/bootstrap").get_json()
+        self.assertEqual(unauthenticated["sso"], {"enabled": True, "name": ""})
+        self.configure(OIDC_PROVIDER_NAME="Authentik")
+        self.assertEqual(
+            self.get("/api/session").get_json()["sso"], {"enabled": True, "name": "Authentik"}
+        )
+        self.claim()
+        self.post("/api/logout")
+        self.assertEqual(
+            self.get("/api/bootstrap").get_json()["sso"], {"enabled": True, "name": "Authentik"}
+        )
+
+    def test_without_a_provider_the_console_is_what_it_was(self):
+        self.configure(
+            OIDC_ISSUER=None, OIDC_CLIENT_ID=None, OIDC_REDIRECT_URI=None, OIDC_OWNER_GROUPS=None
+        )
+        self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": False})
+        self.claim()
+        self.post("/api/logout")
+        self.assertRefused(self.get("/api/oidc/login"), "not_configured")
+        self.assertRefused(self.get("/api/oidc/callback?code=x&state=y"), "not_configured")
+        self.assertEqual(self.get("/api/status").status_code, 401)
+        self.assertEqual(self.get("/auth/check").status_code, 401)
+        owner = self.post("/api/login", json={"username": "vcf", "password": self.PASSWORD})
+        self.assertEqual(owner.status_code, 200)
+        self.assertEqual(self.get("/api/status").status_code, 200)
+
+    def test_a_half_configured_provider_is_off_and_says_why_once(self):
+        self.configure(OIDC_CLIENT_ID=None)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            for _ in range(3):
+                self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": False})
+        self.assertEqual(output.getvalue().count("OIDC_CLIENT_ID is not set"), 1)
+
+    def test_the_scopes_are_configurable_and_always_include_openid(self):
+        self.claim()
+        self.post("/api/logout")
+        self.configure(OIDC_SCOPES="profile groups")
+        location = self.start_login()
+        query = {k: v[0] for k, v in parse_qs(urlsplit(location).query).items()}
+        self.assertEqual(query["scope"], "openid profile groups")
+
+    def test_the_sign_in_page_offers_a_relative_sso_link_outside_the_owner_form(self):
+        markup = self.get("/").get_data(as_text=True)
+        attributes = parse_element_attributes(markup)
+        self.assertEqual(attributes["sso-login"]["href"], "api/oidc/login")
+        self.assertIn("hidden", attributes["sso-wrap"])
+        membership = parse_form_membership(markup)
+        self.assertIsNone(membership.get("sso-login"))
+        # The owner controls are untouched.
+        for control in ("auth-user", "auth-password", "auth-confirm", "auth-submit"):
+            self.assertEqual(membership.get(control), "auth-form")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_the_sign_in_page_shows_the_sso_button_and_a_fixed_message_for_each_code(self):
+        run_console = UiApiTests.run_console.__get__(self)
+        unauthenticated = {
+            "claimed": True, "authenticated": False, "setupComplete": False,
+            "sso": {"enabled": True, "name": "Authentik"}, "versionProblem": None,
+        }
+        shown = run_console({"sso": {"bootstrap": unauthenticated, "search": "?sso_error=unavailable"}})
+        self.assertFalse(shown["ssoHidden"])
+        self.assertEqual(shown["label"], "Sign in with Authentik")
+        self.assertIn("could not be reached", shown["flash"])
+        self.assertIn("owner password", shown["flash"])
+        self.assertEqual(shown["flashClass"], "error")
+        self.assertEqual(shown["search"], "")
+        refused = run_console({"sso": {"bootstrap": unauthenticated, "search": "?sso_error=refused"}})
+        self.assertIn("not in a group", refused["flash"])
+        crafted = run_console({"sso": {"bootstrap": unauthenticated, "search": "?sso_error=call%20555-0100"}})
+        self.assertNotIn("555", crafted["flash"])
+        self.assertIn("SSO sign-in failed", crafted["flash"])
+        plain = run_console({"sso": {"bootstrap": unauthenticated}})
+        self.assertEqual(plain["flash"], "")
+        no_provider = run_console({"sso": {"bootstrap": {**unauthenticated, "sso": {"enabled": False}}}})
+        self.assertTrue(no_provider["ssoHidden"])
+        unclaimed = run_console({"sso": {"bootstrap": {**unauthenticated, "claimed": False}}})
+        self.assertTrue(unclaimed["ssoHidden"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required to execute console JavaScript")
+    def test_sign_out_follows_the_providers_end_session_address(self):
+        run_console = UiApiTests.run_console.__get__(self)
+        unauthenticated = {
+            "claimed": True, "authenticated": False, "setupComplete": False,
+            "sso": {"enabled": True, "name": ""}, "versionProblem": None,
+        }
+        away = run_console({"sso": {
+            "bootstrap": unauthenticated,
+            "logout": {"authenticated": False, "endSession": "https://idp.example.test/end?client_id=c"},
+        }})
+        self.assertEqual(away["assigned"], "https://idp.example.test/end?client_id=c")
+        self.assertFalse(away["reloaded"])
+        local = run_console({"sso": {
+            "bootstrap": unauthenticated, "logout": {"authenticated": False, "endSession": None},
+        }})
+        self.assertIsNone(local["assigned"])
+        self.assertTrue(local["reloaded"])
+
+
 class BootstrapVersionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -3578,6 +4419,7 @@ class BootstrapVersionTests(unittest.TestCase):
             "ui/.credentials.lock",
             "ui/auth.json",
             "ui/flask-secret",
+            "ui/oidc-client-secret",
             "ui/redis-password",
         )
         for relative in private_files:

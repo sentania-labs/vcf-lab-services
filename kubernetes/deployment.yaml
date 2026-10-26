@@ -278,6 +278,8 @@ spec:
               value: /etc/vcf-services/secrets/sftp/sftp-password
             - name: FLASK_SECRET_FILE
               value: /etc/vcf-services/secrets/ui/flask-secret
+            - name: OIDC_CLIENT_SECRET_FILE
+              value: /etc/vcf-services/secrets/ui/oidc-client-secret
             - name: HOME
               value: /home/vcf
           ports:

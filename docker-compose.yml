@@ -145,6 +145,7 @@ services:
       ACTIVATION_CODE_FILE: /run/vcf-services-secrets/sync/activation-code.txt
       SFTP_PASSWORD_FILE: /run/vcf-services-secrets/sftp/sftp-password
       FLASK_SECRET_FILE: /run/vcf-services-secrets/ui/flask-secret
+      OIDC_CLIENT_SECRET_FILE: /run/vcf-services-secrets/ui/oidc-client-secret
     volumes:
       - depot_store:/depot:rw
       - backup_store:/mnt/backup:ro

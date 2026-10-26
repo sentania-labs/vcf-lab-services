@@ -111,6 +111,10 @@
       <p class="help" id="claim-risk">Trust on first use: claim the appliance from a trusted network before exposing it more broadly.</p>
       <div class="row" style="margin-top:14px"><button id="auth-submit" type="submit">Claim and continue</button><span id="auth-flash" class="error" role="status" aria-live="polite"></span></div>
     </form>
+    <div id="sso-wrap" hidden>
+      <p class="help" style="margin-top:18px">Or sign in as yourself. Members of the administrator group get owner access; the owner password above keeps working.</p>
+      <div class="row" style="margin-top:8px"><a id="sso-login" class="button-link" href="api/oidc/login">Sign in with SSO</a></div>
+    </div>
   </section>
 </main>
 
@@ -400,8 +404,20 @@ function setTargets(selector, selected) {
   document.querySelectorAll(selector).forEach(box => { box.checked = selected.includes(box.value); });
 }
 
-function showAuth(claimed) {
+const SSO_ERRORS={
+  unavailable:'The identity provider could not be reached. Try again, or sign in with the owner password.',
+  refused:'You signed in, but your account is not in a group that may administer this appliance.',
+  denied:'The identity provider did not sign you in.',
+  expired:'That sign-in took too long or did not match this browser. Start it again.',
+  unclaimed:'Claim this appliance with the owner password before using SSO.',
+  not_configured:'SSO is not configured on this appliance.',
+  failed:'SSO sign-in failed. Try again, or sign in with the owner password. The appliance log has the detail.'
+};
+
+function showAuth(claimed, sso) {
   $('auth-shell').hidden=false; $('app-shell').hidden=true;
+  $('sso-wrap').hidden=!(claimed && sso?.enabled);
+  $('sso-login').textContent=`Sign in with ${sso?.name || 'SSO'}`;
   $('auth-eyebrow').textContent=claimed ? 'Owner access' : 'First run';
   $('auth-title').textContent=claimed ? 'Sign in' : 'Claim this appliance';
   $('auth-copy').textContent=claimed ? 'Use the shared VCF Services credential.' : 'The first person to set the owner password controls the console and depot credentials.';
@@ -623,7 +639,7 @@ function populateSetup(data) {
   bootstrap=data;
   showVersionProblem(data.versionProblem);
   const settings=data.settings;
-  $('signed-in').textContent=`Signed in as ${settings.username}`; $('logout').hidden=false;
+  $('signed-in').textContent=`Signed in as ${data.user?.name || settings.username}`; $('logout').hidden=false;
   $('setup').hidden=false; $('ready').hidden=!data.setupComplete; $('finish-setup').hidden=data.setupComplete;
   populateIdentity(data);
   $('adopt-machine-id').disabled=data.tool.installed;
@@ -662,11 +678,20 @@ function populateSetup(data) {
   updateDepotInstallState();
 }
 
+// The provider round trip comes back with a short code, never text, so a
+// crafted link cannot put its own words on the sign-in page.
+function showSsoError() {
+  const params=new URLSearchParams(location.search); const code=params.get('sso_error');
+  if (code === null) return;
+  history.replaceState(null,'',location.pathname);
+  $('auth-flash').className='error'; $('auth-flash').textContent=SSO_ERRORS[code] || SSO_ERRORS.failed;
+}
+
 async function boot() {
   try {
     const data=await api('api/bootstrap');
     showVersionProblem(data.versionProblem);
-    if (!data.claimed || !data.authenticated) { showAuth(data.claimed); return; }
+    if (!data.claimed || !data.authenticated) { showAuth(data.claimed, data.sso); showSsoError(); return; }
     $('auth-shell').hidden=true; $('app-shell').hidden=false; populateSetup(data);
     await loadDepotArchives();
     await poll();
@@ -695,7 +720,7 @@ $('auth-form').onsubmit=async event=>{
   finally { button.disabled=false; button.textContent=label; }
 };
 
-$('logout').onclick=async()=>{ await api('api/logout',{method:'POST'}); location.reload(); };
+$('logout').onclick=async()=>{ const result=await api('api/logout',{method:'POST'}); if (result.endSession) location.assign(result.endSession); else location.reload(); };
 
 $('vcfdt-upload').onclick=async()=>{
   const file=$('vcfdt-archive').files[0]; if(!file){$('vcfdt-flash').textContent='Choose an archive';return;}
