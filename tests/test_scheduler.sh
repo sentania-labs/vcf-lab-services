@@ -230,7 +230,7 @@ armed_state_inode="$(stat -c %i "$work_dir/state-armed/state.json")"
 [ "$(stat -c %i "$work_dir/state-armed/state.json")" = "$armed_state_inode" ]
 echo "armed-state skip-unchanged tests passed"
 
-printf '%s\n' '{"kind":"sync","targets":["patches","supervisor","vks","bogus"]}' > "$FAKE_QUEUE_FILE"
+printf '%s\n' '{"kind":"sync","targets":["patches","supervisor","vks","avi","bogus"]}' > "$FAKE_QUEUE_FILE"
 printf '%s\n' '{"kind":"unknown"}' >> "$FAKE_QUEUE_FILE"
 
 PATH="$stub_bin:$PATH" \
@@ -246,7 +246,7 @@ scheduler_pid=$!
 
 sleep 4
 grep -q 'vcf-services:sync:status' "$FAKE_SET_LOG"
-grep -q '^dispatch:patches supervisor vks$' "$dispatch_log"
+grep -q '^dispatch:patches supervisor vks avi$' "$dispatch_log"
 ! grep -q bogus "$dispatch_log"
 grep -q "ignored unknown request kind 'unknown'" "$work_dir/scheduler.log"
 ! grep -q '^dispatch:$' "$dispatch_log"

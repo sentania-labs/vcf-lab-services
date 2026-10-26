@@ -49,6 +49,7 @@ catalog_mode() {
 		*" --automated-install "*) echo install ;;
 		*" --patches-only "*) echo patch ;;
 		*" --type=UPGRADE "*) echo upgrade ;;
+		*" --type=INSTALL "*) echo install-all ;;
 		*) echo unknown ;;
 	esac
 }
@@ -101,6 +102,7 @@ components_for_filter() {
 		*" --automated-install "*) echo "SDDC_MANAGER_VCF VCENTER NSX_T_MANAGER" ;;
 		*" --patches-only "*) echo "ESX_HOST VCENTER NSX_T_MANAGER VCFDT" ;;
 		*" --type=UPGRADE "*) echo "SDDC_MANAGER_VCF VCENTER ESX_HOST VCFDT" ;;
+		*" --type=INSTALL "*) echo "SDDC_MANAGER_VCF VCENTER NSX_ALB" ;;
 		*) echo "SDDC_MANAGER_VCF" ;;
 	esac
 }
@@ -201,7 +203,7 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	# shellcheck disable=SC2086
 	set -- $staged_components
 	case "$query_mode" in
-		install) row_type=INSTALL ;;
+		install|install-all) row_type=INSTALL ;;
 		patch) row_type=PATCH ;;
 		*) row_type=UPGRADE ;;
 	esac
@@ -210,6 +212,12 @@ if [ "${1:-}" = binaries ] && [ "${2:-}" = list ]; then
 	index=0
 	for component in "$@"; do
 		index=$((index + 1))
+		if [ "$component" = NSX_ALB ]; then
+			# The Avi bundles the lab depot lists for 9.1 (issue #60).
+			printf 'f262ef73-23fb-5620-b0ff-f1195e081c40 | NSX_ALB | Avi Load Balancer | 32.1.1.25377988 | 2026-01-01 | 3.8 GiB | INSTALL\n'
+			printf 'b2e580e1-455b-57bb-b2b3-27e1fa512d6c | NSX_ALB | Avi | Load Balancer | 32.1.3.25665611 | 2026-01-01 | 3.9 GiB | INSTALL\n'
+			continue
+		fi
 		printf '%08x-0000-4000-8000-%012d | %s | Stub %s | 9.1.0.0.20000000 | 2026-01-01 | 1 KiB | %s\n' \
 			"$index" "$index" "$component" "$component" "$row_type"
 	done
@@ -233,6 +241,7 @@ case "${1:-} ${2:-}" in
 			*" --automated-install "*) target=install ;;
 			*" --type=UPGRADE "*) target=upgrade ;;
 			*" --patches-only "*) target=patches ;;
+			*" --id="*) target=avi ;;
 		esac
 		;;
 esac
@@ -258,6 +267,20 @@ if [ "${STUB_SLEEP:-0}" != 0 ]; then sleep "$STUB_SLEEP"; fi
 written=""
 if [ "$target" = esx ]; then
 	written=ESX_HOST
+elif [ "$target" = avi ]; then
+	# A download by ID writes one file per requested bundle under NSX_ALB.
+	[ -z "${STUB_CALL_LOG:-}" ] || printf '%s\n' "binaries download-by-id $*" >> "$STUB_CALL_LOG"
+	for argument in "$@"; do
+		case "$argument" in
+			--id=*)
+				mkdir -p "$depot/PROD/COMP/NSX_ALB"
+				IFS=, read -r -a bundle_ids <<< "${argument#*=}"
+				for bundle_id in "${bundle_ids[@]}"; do
+					printf 'stub NSX_ALB bundle %s\n' "$bundle_id" > "$depot/PROD/COMP/NSX_ALB/$bundle_id.bin"
+				done
+				;;
+		esac
+	done
 elif [ "${1:-}" = binaries ]; then
 	written="$(components_for_filter "$@")"
 fi

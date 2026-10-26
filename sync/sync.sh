@@ -40,6 +40,7 @@ apply_settings_defaults() {
 	: "${VKR_MATCH:=}"
 	: "${SUPERVISOR_MATCH:=}"
 	: "${VKS_MATCH:=}"
+	: "${AVI_MATCH:=}"
 	: "${VKR_OS:=}"
 	: "${SYNC_DIAGNOSTICS:=false}"
 }
@@ -138,6 +139,7 @@ trees_written_by() {
 		vkr-content-library) written_trees=VKR ;;
 		supervisor-content-library) written_trees=SUPERVISOR ;;
 		vks-service) written_trees=SUPERVISOR_SERVICE_VKS ;;
+		avi-bundles) written_trees=NSX_ALB ;;
 		*) components_for_download "$@" ;;
 	esac
 }
@@ -357,6 +359,34 @@ artifact_rows() {
 		END { if (!header || bad) exit 3 }'
 }
 
+# The binaries table has its own layout: ID | Component | Component Full Name |
+# Version | ..., so the version sits a header-determined number of columns from
+# the end, which also absorbs any ' | ' inside a Full Name. Prints "id version"
+# for each row of the selected component. A listing with no such header, or a
+# row that does not fit it, exits 3 rather than guessing.
+binary_rows() {
+	awk -F'|' -v component="$1" '
+		function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
+		!header {
+			if (trim($1) != "ID") next
+			for (i = 1; i <= NF; i++) {
+				if (trim($i) == "Component") comp = i
+				if (trim($i) == "Version") ver = i
+			}
+			if (comp == 2 && ver > comp) { header = 1; columns = NF; tail = NF - ver }
+			next
+		}
+		!index($0, "|") { next }
+		{
+			id = trim($1); value = trim($(NF - tail))
+			if (NF < columns || trim($comp) == "" || id !~ /^[a-fA-F0-9-]+$/ || length(id) != 36) { bad = 1; exit 3 }
+			if (trim($comp) != component) next
+			if (value == "") { bad = 1; exit 3 }
+			print id " " value
+		}
+		END { if (!header || bad) exit 3 }'
+}
+
 # A successful filtered vendor download may still advertise undownloaded
 # items. Refuse readiness or adoption until every local reference is present.
 validate_artifact_library() {
@@ -395,12 +425,10 @@ validate_artifact_library() {
 	artifact_status=""
 }
 
-# run_target provides the same ownership and after-failure protection checks
-# used for other downloads. No pins means discovery only, never promotion.
-download_artifacts() {
-	local component="$1" pins="$2" version major minor patch output rows ids="" pin selected rc=0
-	artifact_stage=metadata
-	artifact_downloaded=false
+# The artifacts command and the plain INSTALL listing the avi target relies on
+# both need VCF Download Tool 9.1.1 or later.
+require_artifacts_tool() {
+	local version major minor patch
 	version="$(cat "$TOOL_ROOT/conf/tool-version.txt" 2>/dev/null || true)"
 	if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.|$) ]]; then
 		artifact_status=FAILED:TOOL-TOO-OLD
@@ -413,6 +441,16 @@ download_artifacts() {
 		log "ERROR: artifacts need VCF Download Tool 9.1.1 or later (active: $version)"
 		return 2
 	fi
+	return 0
+}
+
+# run_target provides the same ownership and after-failure protection checks
+# used for other downloads. No pins means discovery only, never promotion.
+download_artifacts() {
+	local component="$1" pins="$2" output rows ids="" pin selected rc=0
+	artifact_stage=metadata
+	artifact_downloaded=false
+	require_artifacts_tool || return $?
 	if [ "$component" = VKR ] && [ -n "$VKR_OS" ]; then
 		log "WARNING: legacy VKR_OS is ignored; artifacts downloads all OS variants for each pinned release."
 	fi
@@ -469,6 +507,60 @@ download_artifacts() {
 		fi
 	fi
 	rm -f "$capture"
+	return "$rc"
+}
+
+# The install target runs with --automated-install, which trims the INSTALL
+# listing to the VCF Installer set and drops NSX_ALB. NSX_ALB is not in the
+# tool's component enum either, so this lists plain INSTALL binaries and picks
+# the NSX_ALB rows. Blank pins mean every listed release. Bundles download by ID.
+download_avi() {
+	local pins="$1" output rows ids="" pin selected rc=0
+	artifact_stage=metadata
+	artifact_downloaded=false
+	require_artifacts_tool || return $?
+	open_listing_scratch || return 1
+	output="$(run_tool_listing "$tool" binaries list "$ceip_opt" "$auth_opt" \
+		"--vcf-version=$VCF_VERSION" "--sku=$SKU" --latest=false --type=INSTALL 2>&1 | redact_tool_output)" || rc=$?
+	close_listing_scratch
+	printf '%s\n' "$output"
+	if [ "$rc" -ne 0 ]; then
+		log "ERROR: NSX_ALB metadata listing failed; no binaries were downloaded"
+		return "$rc"
+	fi
+	rows="$(printf '%s\n' "$output" | binary_rows NSX_ALB)" || {
+		log "ERROR: could not parse the NSX_ALB listing; no binaries were downloaded"
+		return 2
+	}
+	if [ -z "$rows" ]; then
+		artifact_status=FAILED:NO-BUNDLES
+		log "ERROR: the INSTALL listing for $VCF_VERSION has no NSX_ALB bundle; no binaries were downloaded"
+		return 2
+	fi
+	if [ -z "$pins" ]; then
+		ids="$(printf '%s\n' "$rows" | awk '{print $1}' | sort -u | paste -sd,)"
+	else
+		local -a versions
+		read -r -a versions <<< "$pins"
+		for pin in "${versions[@]}"; do
+			selected="$(printf '%s\n' "$rows" | awk -v pin="$pin" '$2 == pin || index($2, pin ".") == 1 {print $1}' | sort -u | paste -sd,)"
+			if [ -z "$selected" ]; then
+				artifact_status=FAILED:UNKNOWN-VERSION
+				log "ERROR: requested NSX_ALB release '$pin' is not in the listing; no binaries were downloaded"
+				return 2
+			fi
+			ids="${ids:+$ids,}$selected"
+		done
+	fi
+	artifact_stage=binaries
+	"$tool" binaries download "$ceip_opt" "$auth_opt" "--depot-store=$DEPOT_DIR" \
+		"--id=$ids" 2>&1 | redact_tool_output
+	rc=${PIPESTATUS[0]}
+	if [ "$rc" -ne 0 ]; then
+		log "ERROR: NSX_ALB download failed (exit $rc). Content is not ready; downloaded files are retained for retry. See tool diagnostics above."
+	else
+		artifact_stage=""
+	fi
 	return "$rc"
 }
 
@@ -1024,6 +1116,18 @@ for target in $SYNC_TARGETS; do
 			if [ "$last_status" = OK ]; then
 				if record_tree_if_absent "$component" product-managed false true; then
 					log "adopted PROD/COMP/$component as product-managed"
+				else
+					last_status=FAILED:OWNERSHIP
+					overall_rc=1
+				fi
+			fi
+			;;
+		avi)
+			tool_backed_target=true
+			run_target avi-bundles download_avi "$AVI_MATCH"
+			if [ "$last_status" = OK ]; then
+				if record_tree_if_absent NSX_ALB product-managed false true; then
+					log "adopted PROD/COMP/NSX_ALB as product-managed"
 				else
 					last_status=FAILED:OWNERSHIP
 					overall_rc=1
