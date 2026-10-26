@@ -209,7 +209,8 @@ VCF version, picks the `NSX_ALB` rows, and downloads them by ID. It needs
 VCFDT 9.1.1 or later and is not in the default targets; tick it in Settings
 to use it. Unlike the artifact targets, leaving **Avi releases** (`AVI_MATCH`)
 empty downloads every `NSX_ALB` release in the listing; enter exact versions
-separated by spaces (such as `32.1.3.25665611`) to narrow it. The target follows the same protected-tree and ownership rules.
+separated by spaces (such as `32.1.3.25665611`) to narrow it. The target
+follows the same protected-tree and ownership rules.
 
 The targets respect protected trees, including on failed downloads. To permit
 updates to an existing library, unprotect that tree in Depot. Discovery does
