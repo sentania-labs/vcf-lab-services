@@ -3532,6 +3532,8 @@ class MockIdp:
     redirect, getting a code for it here, and carrying the code back."""
 
     CLIENT_ID = "vcf-console"
+    # A claim set to this is sent as an explicit JSON null; None drops the claim.
+    NULL = object()
     CLIENT_SECRET = "idp-client-secret"
     REDIRECT_URI = "https://localhost/admin/api/oidc/callback"
 
@@ -3662,6 +3664,7 @@ class MockIdp:
         }
         claims.update(record["claims"])
         claims = {k: v for k, v in claims.items() if v is not None}
+        claims.update({k: None for k, v in record["claims"].items() if v is self.NULL})
         header = record["header"] or {"alg": "RS256", "kid": "test-key"}
         token = jwt.encode(header, claims, record["key"] or self.key)
         return 200, {
@@ -3810,6 +3813,18 @@ class OidcSignInTests(unittest.TestCase):
         self.post("/api/logout")
         self.idp.userinfo = {"sub": "user-1", "groups": ["ops-admins"]}
         self.assertSignedIn(self.sign_in(claims={"groups": None}))
+
+    def test_groups_come_from_userinfo_when_the_id_token_has_a_null_groups_claim(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.userinfo = {"sub": "user-1", "groups": ["ops-admins"]}
+        self.assertSignedIn(self.sign_in(claims={"groups": MockIdp.NULL}))
+
+    def test_a_non_null_id_token_groups_claim_wins_over_userinfo(self):
+        self.claim()
+        self.post("/api/logout")
+        self.idp.userinfo = {"sub": "user-1", "groups": ["ops-admins"]}
+        self.assertRefused(self.sign_in(claims={"groups": ["everyone"]}), "refused")
 
     def test_userinfo_for_a_different_subject_is_not_trusted(self):
         self.claim()

@@ -932,7 +932,12 @@ def _oidc_complete(config, transaction, code):
         client.close()
     claims = _oidc_id_token_claims(config, metadata, token, transaction["nonce"])
     if claims.get(config["groupsClaim"]) is None:
-        claims = {**_oidc_userinfo(metadata, token, claims["sub"]), **claims}
+        # A null claim in the ID token is as good as absent: it must not
+        # shadow the value the provider's userinfo supplies.
+        claims = {
+            **_oidc_userinfo(metadata, token, claims["sub"]),
+            **{key: value for key, value in claims.items() if value is not None},
+        }
     groups = _oidc_groups(claims, config["groupsClaim"])
     name = next(
         (
