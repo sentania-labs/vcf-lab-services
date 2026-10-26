@@ -102,7 +102,6 @@ async function ssoFlow() {
   await context.boot();
   const shown = {
     ssoHidden: getElementById('sso-wrap').hidden,
-    label: getElementById('sso-login').textContent,
     flash: getElementById('auth-flash').textContent,
     flashClass: getElementById('auth-flash').className,
     search: page.search,

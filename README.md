@@ -307,9 +307,8 @@ secret in a file in the secrets volume:
 | `OIDC_CLIENT_ID` | yes | Client ID of the provider application. |
 | `OIDC_REDIRECT_URI` | yes | `https://<host>/admin/api/oidc/callback`, registered exactly at the provider. |
 | `OIDC_OWNER_GROUPS` | yes | Comma-separated group names that get owner access. No group is built in, and with none listed the feature stays off. Names match exactly, including case. |
-| `OIDC_GROUPS_CLAIM` | no | Claim that lists a person's groups. Default `groups`. A dotted path such as `realm_access.roles` reaches a nested claim. When the ID token lacks the claim, the console asks the provider's userinfo endpoint. |
+| `OIDC_GROUPS_CLAIM` | no | Name of the claim that lists a person's groups. Default `groups`. When the ID token lacks the claim, the console asks the provider's userinfo endpoint. |
 | `OIDC_SCOPES` | no | Space-separated scopes. Default `profile email`; `openid` is always requested. Add a scope here if your provider releases groups only on request. |
-| `OIDC_PROVIDER_NAME` | no | Label for the button, for example `Authentik`. Default `SSO`. |
 
 `settings.env` is also sourced by the sync service as a shell file, so write each
 value in double quotes as above, with `$`, backticks and `"` escaped by a
@@ -318,8 +317,8 @@ backslash.
 The client secret is read from `oidc-client-secret` in the console's secrets
 directory (`ui/oidc-client-secret` in the secrets volume, or the path in the
 `OIDC_CLIENT_SECRET_FILE` environment variable), never from a setting or an
-environment value. Without that file the console acts as a public client and
-relies on PKCE alone.
+environment value. The file is required: while it is missing or empty the
+feature stays off and the console log says so.
 
 Example, for a Compose install with an Authentik application:
 
@@ -340,7 +339,6 @@ Example, for a Compose install with an Authentik application:
    OIDC_CLIENT_ID="THE-CLIENT-ID"
    OIDC_REDIRECT_URI="https://vcf.example.test/admin/api/oidc/callback"
    OIDC_OWNER_GROUPS="vcf-admins"
-   OIDC_PROVIDER_NAME="Authentik"
    EOF
    ```
 

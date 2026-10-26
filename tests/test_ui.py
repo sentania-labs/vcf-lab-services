@@ -3812,17 +3812,13 @@ class OidcSignInTests(unittest.TestCase):
         self.idp.userinfo = {"sub": "someone-else", "groups": ["ops-admins"]}
         self.assertRefused(self.sign_in(claims={"groups": None}), "failed")
 
-    def test_group_claim_name_and_nested_paths_are_configurable(self):
+    def test_the_group_claim_name_is_configurable(self):
         self.claim()
         self.post("/api/logout")
-        self.configure(OIDC_GROUPS_CLAIM="realm_access.roles", OIDC_OWNER_GROUPS="lab, ops-admins")
-        response = self.sign_in(
-            claims={"groups": ["everyone"], "realm_access": {"roles": ["ops-admins"]}}
-        )
-        self.assertSignedIn(response)
-        self.post("/api/logout")
         self.configure(OIDC_GROUPS_CLAIM="memberOf", OIDC_OWNER_GROUPS="lab")
-        self.assertSignedIn(self.sign_in(claims={"memberOf": ["lab"]}))
+        self.assertSignedIn(self.sign_in(claims={"memberOf": ["lab"], "groups": ["everyone"]}))
+        self.post("/api/logout")
+        self.assertRefused(self.sign_in(claims={"groups": ["lab"], "memberOf": ["everyone"]}), "refused")
 
     def test_group_names_must_match_exactly(self):
         self.claim()
@@ -4043,15 +4039,21 @@ class OidcSignInTests(unittest.TestCase):
         self.configure(OIDC_REDIRECT_URI="http://console.example.test/admin/api/oidc/callback")
         self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": False})
 
-    def test_without_a_client_secret_file_the_client_is_public_and_uses_pkce_alone(self):
+    def test_without_a_client_secret_file_sign_in_through_a_provider_is_off(self):
         self.claim()
         self.post("/api/logout")
-        self.secret_file.unlink()
-        self.assertSignedIn(self.sign_in())
-        exchange = self.idp.token_requests[0]
-        self.assertIsNone(exchange["authorization"])
-        self.assertEqual(exchange["form"]["client_id"], MockIdp.CLIENT_ID)
-        self.assertNotIn("client_secret", exchange["form"])
+        for make_missing in (self.secret_file.unlink, lambda: self.secret_file.write_text(" \n")):
+            make_missing()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": False})
+                self.assertRefused(self.get("/api/oidc/login"), "not_configured")
+                self.assertRefused(self.get("/api/oidc/callback?code=x&state=y"), "not_configured")
+            self.assertIn("client secret file", output.getvalue())
+            self.assertNotIn(MockIdp.CLIENT_SECRET, output.getvalue())
+            self.assertEqual(self.idp.token_requests, [])
+            self.secret_file.write_text(MockIdp.CLIENT_SECRET + "\n")
+            self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": True})
 
     def test_the_client_secret_goes_post_style_when_that_is_all_the_provider_takes(self):
         self.claim()
@@ -4276,16 +4278,11 @@ class OidcSignInTests(unittest.TestCase):
 
     def test_sign_in_is_offered_only_to_a_claimed_appliance_with_a_provider(self):
         unauthenticated = self.get("/api/bootstrap").get_json()
-        self.assertEqual(unauthenticated["sso"], {"enabled": True, "name": ""})
-        self.configure(OIDC_PROVIDER_NAME="Authentik")
-        self.assertEqual(
-            self.get("/api/session").get_json()["sso"], {"enabled": True, "name": "Authentik"}
-        )
+        self.assertEqual(unauthenticated["sso"], {"enabled": True})
+        self.assertEqual(self.get("/api/session").get_json()["sso"], {"enabled": True})
         self.claim()
         self.post("/api/logout")
-        self.assertEqual(
-            self.get("/api/bootstrap").get_json()["sso"], {"enabled": True, "name": "Authentik"}
-        )
+        self.assertEqual(self.get("/api/bootstrap").get_json()["sso"], {"enabled": True})
 
     def test_without_a_provider_the_console_is_what_it_was(self):
         self.configure(
@@ -4334,11 +4331,10 @@ class OidcSignInTests(unittest.TestCase):
         run_console = UiApiTests.run_console.__get__(self)
         unauthenticated = {
             "claimed": True, "authenticated": False, "setupComplete": False,
-            "sso": {"enabled": True, "name": "Authentik"}, "versionProblem": None,
+            "sso": {"enabled": True}, "versionProblem": None,
         }
         shown = run_console({"sso": {"bootstrap": unauthenticated, "search": "?sso_error=unavailable"}})
         self.assertFalse(shown["ssoHidden"])
-        self.assertEqual(shown["label"], "Sign in with Authentik")
         self.assertIn("could not be reached", shown["flash"])
         self.assertIn("owner password", shown["flash"])
         self.assertEqual(shown["flashClass"], "error")
@@ -4360,7 +4356,7 @@ class OidcSignInTests(unittest.TestCase):
         run_console = UiApiTests.run_console.__get__(self)
         unauthenticated = {
             "claimed": True, "authenticated": False, "setupComplete": False,
-            "sso": {"enabled": True, "name": ""}, "versionProblem": None,
+            "sso": {"enabled": True}, "versionProblem": None,
         }
         away = run_console({"sso": {
             "bootstrap": unauthenticated,

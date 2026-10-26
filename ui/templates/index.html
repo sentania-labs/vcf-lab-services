@@ -417,7 +417,6 @@ const SSO_ERRORS={
 function showAuth(claimed, sso) {
   $('auth-shell').hidden=false; $('app-shell').hidden=true;
   $('sso-wrap').hidden=!(claimed && sso?.enabled);
-  $('sso-login').textContent=`Sign in with ${sso?.name || 'SSO'}`;
   $('auth-eyebrow').textContent=claimed ? 'Owner access' : 'First run';
   $('auth-title').textContent=claimed ? 'Sign in' : 'Claim this appliance';
   $('auth-copy').textContent=claimed ? 'Use the shared VCF Services credential.' : 'The first person to set the owner password controls the console and depot credentials.';

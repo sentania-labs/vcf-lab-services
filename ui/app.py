@@ -712,6 +712,7 @@ def _oidc_config():
         for group in settings.get("OIDC_OWNER_GROUPS", "").split(",")
         if group.strip()
     ]
+    client_secret = _oidc_client_secret()
     problem = None
     if not _oidc_url_allowed(issuer):
         problem = "OIDC_ISSUER must be an https URL"
@@ -721,6 +722,8 @@ def _oidc_config():
         problem = "OIDC_REDIRECT_URI must be an https URL"
     elif not owner_groups:
         problem = "OIDC_OWNER_GROUPS names no group, so nobody could sign in"
+    elif not client_secret:
+        problem = f"the client secret file {str(OIDC_CLIENT_SECRET_FILE)!r} is missing or empty"
     if problem:
         if _oidc_reported["problem"] != problem:
             _oidc_reported["problem"] = problem
@@ -734,11 +737,11 @@ def _oidc_config():
     return {
         "issuer": issuer,
         "clientId": client_id,
+        "clientSecret": client_secret,
         "redirectUri": redirect_uri,
         "scopes": scopes,
         "groupsClaim": settings.get("OIDC_GROUPS_CLAIM", "").strip() or "groups",
         "ownerGroups": owner_groups,
-        "providerName": settings.get("OIDC_PROVIDER_NAME", "").strip()[:40],
     }
 
 
@@ -746,7 +749,7 @@ def _oidc_public():
     config = _oidc_config()
     if config is None:
         return {"enabled": False}
-    return {"enabled": True, "name": config["providerName"]}
+    return {"enabled": True}
 
 
 def _oidc_client_secret():
@@ -817,21 +820,18 @@ def _oidc_jwks(metadata, refresh=False):
 
 
 def _oidc_client(config, metadata):
-    secret = _oidc_client_secret()
-    method = "none"
-    if secret:
-        supported = metadata.get("token_endpoint_auth_methods_supported") or [
-            "client_secret_basic"
-        ]
-        if "client_secret_basic" in supported:
-            method = "client_secret_basic"
-        elif "client_secret_post" in supported:
-            method = "client_secret_post"
-        else:
-            raise OidcError("failed", "the provider accepts no client secret method")
+    supported = metadata.get("token_endpoint_auth_methods_supported") or [
+        "client_secret_basic"
+    ]
+    if "client_secret_basic" in supported:
+        method = "client_secret_basic"
+    elif "client_secret_post" in supported:
+        method = "client_secret_post"
+    else:
+        raise OidcError("failed", "the provider accepts no client secret method")
     return OAuth2Session(
         client_id=config["clientId"],
-        client_secret=secret or None,
+        client_secret=config["clientSecret"],
         token_endpoint_auth_method=method,
         scope=" ".join(config["scopes"]),
         redirect_uri=config["redirectUri"],
@@ -885,19 +885,8 @@ def _oidc_id_token_claims(config, metadata, token, nonce):
     return dict(claims)
 
 
-def _oidc_claim(claims, name):
-    if name in claims:
-        return claims[name]
-    value = claims
-    for part in name.split("."):
-        if not isinstance(value, dict) or part not in value:
-            return None
-        value = value[part]
-    return value
-
-
 def _oidc_groups(claims, name):
-    value = _oidc_claim(claims, name)
+    value = claims.get(name)
     if isinstance(value, str):
         return [value]
     if isinstance(value, list):
@@ -942,7 +931,7 @@ def _oidc_complete(config, transaction, code):
     finally:
         client.close()
     claims = _oidc_id_token_claims(config, metadata, token, transaction["nonce"])
-    if _oidc_claim(claims, config["groupsClaim"]) is None:
+    if claims.get(config["groupsClaim"]) is None:
         claims = {**_oidc_userinfo(metadata, token, claims["sub"]), **claims}
     groups = _oidc_groups(claims, config["groupsClaim"])
     name = next(
