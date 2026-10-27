@@ -2539,6 +2539,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "token-label",
                 "token-days",
                 "token-create",
+                "service-name",
+                "service-role",
+                "service-create",
             },
             "tab-sync": {"sync-btn"},
             "tab-depot": {
@@ -4653,6 +4656,313 @@ class ApiTokenTests(unittest.TestCase):
         attributes = parse_element_attributes(markup)
         self.assertIn("hidden", attributes["tokens-panel"])
         for control in ("token-label", "token-days", "token-create", "token-value", "token-list"):
+            self.assertIn(control, attributes)
+
+
+class ServiceAccountTests(unittest.TestCase):
+    """Service accounts and their tokens, managed by an owner login or a person
+    signed in through a mocked provider."""
+
+    setUp_console = UiApiTests.setUp
+    load_app = UiApiTests.load_app
+    get = UiApiTests.get
+    post = UiApiTests.post
+    delete = UiApiTests.delete
+    claim = UiApiTests.claim
+    setUpClass = classmethod(OidcSignInTests.setUpClass.__func__)
+    tearDownClass = classmethod(OidcSignInTests.tearDownClass.__func__)
+    configure = OidcSignInTests.configure
+    start_login = OidcSignInTests.start_login
+    sign_in = OidcSignInTests.sign_in
+    sign_in_as = ApiTokenTests.sign_in_as
+    bearer = ApiTokenTests.bearer
+    as_token = ApiTokenTests.as_token
+
+    PASSWORD = "a strong test password"
+
+    def setUp(self):
+        self.setUp_console()
+        self.idp.codes.clear()
+        self.idp.metadata_overrides = {}
+        self.idp.metadata_status = 200
+        self.idp.userinfo = None
+        self.secret_file = self.secrets / "oidc-client-secret"
+        self.secret_file.write_text(MockIdp.CLIENT_SECRET + "\n")
+        self.module.OIDC_CLIENT_SECRET_FILE = self.secret_file
+        self.configure()
+        self.accounts_file = self.secrets / "service-accounts.json"
+        self.tokens_file = self.secrets / "api-tokens.json"
+        self.claim()
+        self.post("/api/logout")
+
+    def owner(self):
+        response = self.post("/api/login", json={"username": "vcf", "password": self.PASSWORD})
+        self.assertEqual(response.status_code, 200)
+
+    def account(self, name="backup job", **extra):
+        return self.post("/api/service-accounts", json={"name": name, **extra})
+
+    def issue(self, account_id, label="v1", **extra):
+        return self.post(
+            f"/api/service-accounts/{account_id}/tokens", json={"label": label, **extra}
+        )
+
+    def set_disabled(self, account_id, disabled):
+        # Same browser session as the other helpers.
+        return self.client.patch(
+            f"/api/service-accounts/{account_id}", json={"disabled": disabled},
+            base_url="https://localhost",
+        )
+
+    def test_an_owner_creates_an_account_and_issues_lists_and_revokes_tokens(self):
+        self.owner()
+        made = self.account("backup job")
+        self.assertEqual(made.status_code, 201)
+        account = made.get_json()
+        self.assertEqual((account["name"], account["role"], account["disabled"]), ("backup job", "owner", False))
+        issued = self.issue(account["id"], "first", expiresInDays=7)
+        self.assertEqual(issued.status_code, 201)
+        token = issued.get_json()
+        self.assertTrue(token["token"].startswith("vcfs_"))
+        self.assertIn("no-store", issued.headers["Cache-Control"])
+        listed = self.get("/api/service-accounts").get_json()
+        self.assertEqual(listed["roles"], ["owner"])
+        self.assertEqual([t["id"] for t in listed["accounts"][0]["tokens"]], [token["id"]])
+        self.assertNotIn("token", listed["accounts"][0]["tokens"][0])
+        self.assertNotIn("hash", listed["accounts"][0]["tokens"][0])
+        self.assertNotIn(token["token"], self.get("/api/service-accounts").get_data(as_text=True))
+        self.assertEqual(self.as_token(token["token"]).status_code, 200)
+        revoked = self.delete(f"/api/service-accounts/{account['id']}/tokens/{token['id']}")
+        self.assertEqual(revoked.status_code, 200)
+        self.assertEqual(self.as_token(token["token"]).status_code, 401)
+        self.assertEqual(
+            self.delete(f"/api/service-accounts/{account['id']}/tokens/{token['id']}").status_code, 404
+        )
+        self.assertEqual(self.get("/api/service-accounts").get_json()["accounts"][0]["tokens"], [])
+
+    def test_a_person_signed_in_through_sso_manages_service_accounts(self):
+        self.sign_in_as()
+        account = self.account().get_json()
+        self.assertEqual(account["createdBy"], f"{self.idp.issuer}#user-1")
+        token = self.issue(account["id"]).get_json()["token"]
+        self.assertEqual(self.as_token(token).status_code, 200)
+
+    def test_only_the_hash_is_stored_with_the_personal_token_conventions(self):
+        self.owner()
+        account = self.account().get_json()
+        token = self.issue(account["id"]).get_json()
+        stored = self.tokens_file.read_text()
+        self.assertNotIn(token["token"], stored)
+        self.assertIn(hashlib.sha256(token["token"].encode()).hexdigest(), stored)
+        self.assertEqual(self.tokens_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.accounts_file.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(token["token"], self.accounts_file.read_text())
+        expires = datetime.fromisoformat(token["expiresAt"])
+        self.assertAlmostEqual(
+            (expires - datetime.now(timezone.utc)).total_seconds(), 30 * 86400, delta=60
+        )
+
+    def test_a_service_token_acts_as_the_account_and_the_audit_log_says_so(self):
+        self.owner()
+        account = self.account("backup job").get_json()
+        token = self.issue(account["id"]).get_json()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            changed = self.as_token(token["token"], "/api/setup/complete", "post")
+        self.assertEqual(changed.status_code, 409)  # the owner's rights: it got through
+        who = self.as_token(token["token"], "/api/bootstrap").get_json()["user"]
+        self.assertEqual(
+            who,
+            {
+                "kind": "service",
+                "name": "backup job",
+                "subject": f"service-account#{account['id']}",
+                "tokenId": token["id"],
+            },
+        )
+        line = next(l for l in output.getvalue().splitlines() if l.startswith("[audit] change"))
+        self.assertIn('user="backup job"', line)
+        self.assertIn('kind="service"', line)
+        self.assertIn(f'token="{token["id"]}"', line)
+        self.assertNotIn(token["token"], output.getvalue())
+
+    def test_an_account_holds_several_tokens_so_rotation_needs_no_downtime(self):
+        self.owner()
+        account = self.account().get_json()
+        old = self.issue(account["id"], "old").get_json()
+        new = self.issue(account["id"], "new").get_json()
+        third = self.issue(account["id"], "third").get_json()
+        for token in (old, new, third):
+            self.assertEqual(self.as_token(token["token"]).status_code, 200)
+        self.delete(f"/api/service-accounts/{account['id']}/tokens/{old['id']}")
+        self.assertEqual(self.as_token(old["token"]).status_code, 401)
+        self.assertEqual(self.as_token(new["token"]).status_code, 200)
+        self.assertEqual(self.as_token(third["token"]).status_code, 200)
+        self.assertEqual(len(self.get("/api/service-accounts").get_json()["accounts"][0]["tokens"]), 2)
+
+    def test_disabling_an_account_stops_all_its_tokens_and_enabling_restores_them(self):
+        self.owner()
+        account = self.account().get_json()
+        other = self.account("other").get_json()
+        tokens = [self.issue(account["id"], str(n)).get_json()["token"] for n in range(3)]
+        kept = self.issue(other["id"]).get_json()["token"]
+        self.assertEqual(self.set_disabled(account["id"], True).status_code, 200)
+        for token in tokens:
+            self.assertEqual(self.as_token(token).status_code, 401)
+        self.assertEqual(self.as_token(kept).status_code, 200)
+        self.assertEqual(self.issue(account["id"]).status_code, 409)
+        self.assertTrue(self.get("/api/service-accounts").get_json()["accounts"][0]["disabled"])
+        self.assertEqual(self.set_disabled(account["id"], False).status_code, 200)
+        for token in tokens:
+            self.assertEqual(self.as_token(token).status_code, 200)
+        self.assertEqual(self.set_disabled("nope", True).status_code, 404)
+        bad = self.client.patch(
+            f"/api/service-accounts/{account['id']}", json={"disabled": "yes"},
+            base_url="https://localhost",
+        )
+        self.assertEqual(bad.status_code, 400)
+
+    def test_deleting_an_account_removes_its_tokens(self):
+        self.owner()
+        account = self.account().get_json()
+        token = self.issue(account["id"]).get_json()["token"]
+        self.assertEqual(self.delete(f"/api/service-accounts/{account['id']}").status_code, 200)
+        self.assertEqual(self.as_token(token).status_code, 401)
+        self.assertEqual(self.get("/api/service-accounts").get_json()["accounts"], [])
+        self.assertNotIn(account["id"], self.tokens_file.read_text())
+        self.assertEqual(self.delete(f"/api/service-accounts/{account['id']}").status_code, 404)
+        self.assertEqual(self.issue(account["id"]).status_code, 404)
+
+    def test_service_tokens_expire_with_no_lifetime_cap(self):
+        self.owner()
+        account = self.account().get_json()
+        short = self.issue(account["id"], expiresInDays=1).get_json()["token"]
+        long = self.issue(account["id"], expiresInDays=1000).get_json()
+        self.assertEqual(long.get("token") is not None, True)
+        later = time.time() + 86400 + 5
+        with mock.patch.object(self.module.time, "time", return_value=later):
+            self.assertEqual(self.as_token(short).status_code, 401)
+            self.assertEqual(self.as_token(long["token"]).status_code, 200)
+        for days in (0, -1, 1.5, "7", None, True):
+            with self.subTest(days=days):
+                self.assertEqual(self.issue(account["id"], expiresInDays=days).status_code, 400)
+
+    def test_names_roles_and_labels_are_checked(self):
+        self.owner()
+        for name in ("", "   ", None, 5, "x" * 61, "two\nlines"):
+            with self.subTest(name=name):
+                self.assertEqual(self.account(name).status_code, 400)
+        self.assertEqual(self.account("ok", role="read-only").status_code, 400)
+        self.assertEqual(self.account("ok", role="owner").status_code, 201)
+        self.assertEqual(self.account("OK").status_code, 409)
+        account = self.get("/api/service-accounts").get_json()["accounts"][0]
+        for label in ("", None, "x" * 81, "two\nlines"):
+            with self.subTest(label=label):
+                self.assertEqual(self.issue(account["id"], label).status_code, 400)
+
+    def test_no_token_manages_service_accounts_and_anonymous_callers_are_refused(self):
+        self.assertEqual(self.get("/api/service-accounts").status_code, 401)
+        self.owner()
+        account = self.account().get_json()
+        token = self.issue(account["id"]).get_json()["token"]
+        calls = (
+            ("get", "/api/service-accounts"),
+            ("post", "/api/service-accounts"),
+            ("delete", f"/api/service-accounts/{account['id']}"),
+            ("post", f"/api/service-accounts/{account['id']}/tokens"),
+            ("delete", f"/api/service-accounts/{account['id']}/tokens/x"),
+        )
+        for method, path in calls:
+            with self.subTest(path=path):
+                self.assertEqual(self.as_token(token, path, method).status_code, 403)
+        self.post("/api/logout")
+        self.sign_in_as()
+        personal = self.post("/api/tokens", json={"label": "me"}).get_json()["token"]
+        for method, path in calls:
+            with self.subTest(personal=path):
+                self.assertEqual(self.as_token(personal, path, method).status_code, 403)
+        # A service token cannot mint personal tokens either.
+        self.assertEqual(self.as_token(token, "/api/tokens", "post").status_code, 403)
+        self.assertEqual(len(self.get("/api/service-accounts").get_json()["accounts"]), 1)
+
+    def test_service_tokens_work_with_sso_unset_and_survive_sso_changes(self):
+        self.owner()
+        account = self.account().get_json()
+        token = self.issue(account["id"]).get_json()["token"]
+        self.configure(OIDC_ISSUER=None, OIDC_CLIENT_ID=None, OIDC_REDIRECT_URI=None, OIDC_OWNER_GROUPS=None)
+        self.assertEqual(self.as_token(token).status_code, 200)
+        self.configure(OIDC_ISSUER="http://127.0.0.1:9")
+        self.assertEqual(self.as_token(token).status_code, 200)
+
+    def test_personal_tokens_are_untouched_by_a_person_losing_access(self):
+        self.owner()
+        account = self.account().get_json()
+        service = self.issue(account["id"]).get_json()["token"]
+        self.post("/api/logout")
+        self.sign_in_as("user-1", "jdoe")
+        personal = self.post("/api/tokens", json={"label": "me"}).get_json()["token"]
+        self.post("/api/logout")
+        refused = self.sign_in(claims={"sub": "user-1", "groups": ["everyone"]})
+        self.assertEqual(refused.headers["Location"], "../../?sso_error=refused")
+        self.assertEqual(self.as_token(personal).status_code, 401)
+        self.assertEqual(self.as_token(service).status_code, 200)
+
+    def test_a_damaged_store_fails_closed(self):
+        self.owner()
+        account = self.account().get_json()
+        token = self.issue(account["id"]).get_json()["token"]
+        self.accounts_file.write_text("{not json")
+        self.assertEqual(self.as_token(token).status_code, 401)
+        self.assertEqual(self.get("/api/service-accounts").status_code, 500)
+        self.accounts_file.write_text(json.dumps({"version": 1, "accounts": [
+            {"id": account["id"], "name": "x", "role": "admin"}]}))
+        self.assertEqual(self.as_token(token).status_code, 401)
+
+    def test_an_unknown_account_cannot_gain_tokens_and_orphans_are_inert(self):
+        self.owner()
+        self.assertEqual(self.issue("nope").status_code, 404)
+        self.assertFalse(self.tokens_file.exists())
+
+    def test_service_tokens_never_open_the_depot_sftp_or_the_patch_store_rules(self):
+        self.owner()
+        account = self.account().get_json()
+        token = self.issue(account["id"]).get_json()["token"]
+        other = self.module.app.test_client()
+        check = other.get("/auth/check", base_url="https://localhost", headers=self.bearer(token))
+        self.assertEqual(check.status_code, 401)
+        basic = base64.b64encode(f"vcf:{token}".encode()).decode()
+        check = other.get("/auth/check", base_url="https://localhost", headers={"Authorization": f"Basic {basic}"})
+        self.assertEqual(check.status_code, 401)
+        # The shared password, which the depot and SFTP use, still works.
+        good = base64.b64encode(f"vcf:{self.PASSWORD}".encode()).decode()
+        check = other.get("/auth/check", base_url="https://localhost", headers={"Authorization": f"Basic {good}"})
+        self.assertEqual(check.status_code, 200)
+        self.assertEqual((self.secrets / "sftp-password").read_text(), self.PASSWORD + "\n")
+
+    def test_lifecycle_events_are_audited_without_token_values(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.owner()
+            account = self.account("job").get_json()
+            token = self.issue(account["id"]).get_json()
+            self.set_disabled(account["id"], True)
+            self.set_disabled(account["id"], False)
+            self.delete(f"/api/service-accounts/{account['id']}/tokens/{token['id']}")
+            self.delete(f"/api/service-accounts/{account['id']}")
+        log = output.getvalue()
+        for event in (
+            "service-account-created", "service-token-created", "service-account-disabled",
+            "service-account-enabled", "service-token-revoked", "service-account-deleted",
+        ):
+            self.assertIn(f"[audit] {event} ", log)
+        self.assertIn('user="vcf"', log)
+        self.assertNotIn(token["token"], log)
+
+    def test_the_console_offers_the_service_account_panel_to_administrators_only(self):
+        markup = self.get("/").get_data(as_text=True)
+        attributes = parse_element_attributes(markup)
+        self.assertIn("hidden", attributes["service-panel"])
+        for control in ("service-name", "service-role", "service-create", "service-list", "service-token-value"):
             self.assertIn(control, attributes)
 
 

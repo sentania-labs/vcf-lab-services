@@ -235,6 +235,25 @@
         <tbody id="token-list"><tr><td colspan="4" class="muted">No tokens yet.</td></tr></tbody>
       </table></div>
     </section>
+
+    <section class="panel" id="service-panel" hidden>
+      <h2>Service accounts</h2>
+      <p class="muted">A service account is a machine identity for scripts, not tied to a person. Give it a role and issue it tokens; it can hold several at once, so a new token can replace an old one without downtime. Disabling the account stops all of its tokens at once. Tokens cannot open the depot or SFTP.</p>
+      <div class="formgrid">
+        <div class="field"><label for="service-name">Name</label><input id="service-name" maxlength="60" placeholder="what the account is for"></div>
+        <div class="field"><label for="service-role">Role</label><select id="service-role"><option value="owner">owner</option></select></div>
+      </div>
+      <div class="row" style="margin-top:12px"><button id="service-create">Create service account</button><span id="service-flash" class="muted" role="status" aria-live="polite"></span></div>
+      <div id="service-new" class="notice success" hidden style="margin-top:12px">
+        <p>Copy this token now. It is shown once and cannot be retrieved later.</p>
+        <p><code id="service-token-value" style="word-break:break-all"></code></p>
+        <p class="help">Send it as <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+      </div>
+      <div class="tablewrap" style="margin-top:12px"><table>
+        <thead><tr><th>Account</th><th>Role</th><th>Tokens</th><th></th></tr></thead>
+        <tbody id="service-list"><tr><td colspan="4" class="muted">No service accounts yet.</td></tr></tbody>
+      </table></div>
+    </section>
   </div>
 
   <div class="tabpanel" id="tab-sync" hidden>
@@ -664,6 +683,18 @@ async function loadTokens() {
   } catch(error) { $('token-flash').textContent=error.message; }
 }
 
+async function loadServiceAccounts() {
+  const panel=$('service-panel');
+  const admin=['owner','sso'].includes(bootstrap?.user?.kind);
+  panel.hidden=!admin;
+  if (!admin) return;
+  try {
+    const accounts=(await api('api/service-accounts')).accounts;
+    const tokenRows=account=>account.tokens.length ? account.tokens.map(token=>`<div>${esc(token.label)}, expires ${esc(fmt(token.expiresAt))} <button class="ghost" data-service-revoke="${esc(account.id)}" data-token="${esc(token.id)}">Revoke</button></div>`).join('') : '<span class="muted">none</span>';
+    $('service-list').innerHTML=accounts.length ? accounts.map(account=>`<tr><td>${esc(account.name)}${account.disabled ? ' <span class="muted">(disabled)</span>' : ''}</td><td>${esc(account.role)}</td><td>${tokenRows(account)}</td><td><button class="ghost" data-service-issue="${esc(account.id)}"${account.disabled ? ' disabled' : ''}>Issue token</button> <button class="ghost" data-service-toggle="${esc(account.id)}" data-disable="${account.disabled ? 'false' : 'true'}">${account.disabled ? 'Enable' : 'Disable'}</button> <button class="ghost" data-service-delete="${esc(account.id)}">Delete</button></td></tr>`).join('') : '<tr><td colspan="4" class="muted">No service accounts yet.</td></tr>';
+  } catch(error) { $('service-flash').textContent=error.message; }
+}
+
 function populateSetup(data) {
   bootstrap=data;
   showVersionProblem(data.versionProblem);
@@ -672,6 +703,7 @@ function populateSetup(data) {
   $('setup').hidden=false; $('ready').hidden=!data.setupComplete; $('finish-setup').hidden=data.setupComplete;
   populateIdentity(data);
   loadTokens();
+  loadServiceAccounts();
   $('adopt-machine-id').disabled=data.tool.installed;
   $('adopt-machine-id-button').disabled=data.tool.installed;
   $('vcfdt-flash').textContent=data.tool.installed ? (data.tool.versionVerified ? `${data.tool.version} is ready` : 'Installed; the reported version could not be verified') : 'Not installed';
@@ -995,6 +1027,44 @@ $('token-list').onclick=async event=>{
   try { await api(`api/tokens/${encodeURIComponent(id)}`,{method:'DELETE'}); $('token-new').hidden=true; $('token-value').textContent=''; $('token-flash').textContent='Token revoked'; }
   catch(error) { $('token-flash').textContent=error.message; }
   await loadTokens();
+};
+
+$('service-create').onclick=async()=>{
+  const button=$('service-create'); const flash=$('service-flash');
+  button.disabled=true; flash.textContent='Creating';
+  try {
+    await api('api/service-accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('service-name').value,role:$('service-role').value})});
+    $('service-name').value=''; flash.textContent='Service account created';
+    await loadServiceAccounts();
+  } catch(error) { flash.textContent=error.message; }
+  finally { button.disabled=false; }
+};
+
+$('service-list').onclick=async event=>{
+  const data=event.target.dataset||{}; const flash=$('service-flash');
+  const base=id=>`api/service-accounts/${encodeURIComponent(id)}`;
+  try {
+    if (data.serviceIssue) {
+      const label=prompt('Label for the new token'); if (label===null) return;
+      const days=prompt('Expires after how many days?','30'); if (days===null) return;
+      event.target.disabled=true; flash.textContent='Issuing';
+      const result=await api(`${base(data.serviceIssue)}/tokens`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label,expiresInDays:Number(days)})});
+      $('service-token-value').textContent=result.token; $('service-new').hidden=false;
+      flash.textContent=`Issued; expires ${fmt(result.expiresAt)}`;
+    } else if (data.serviceRevoke) {
+      event.target.disabled=true; flash.textContent='Revoking';
+      await api(`${base(data.serviceRevoke)}/tokens/${encodeURIComponent(data.token)}`,{method:'DELETE'}); flash.textContent='Token revoked';
+    } else if (data.serviceToggle) {
+      event.target.disabled=true;
+      await api(base(data.serviceToggle),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({disabled:data.disable==='true'})});
+      flash.textContent=data.disable==='true' ? 'Disabled; its tokens stopped' : 'Enabled';
+    } else if (data.serviceDelete) {
+      if (!confirm('Delete this service account and all its tokens?')) return;
+      event.target.disabled=true;
+      await api(base(data.serviceDelete),{method:'DELETE'}); flash.textContent='Service account deleted';
+    } else return;
+  } catch(error) { flash.textContent=error.message; }
+  await loadServiceAccounts();
 };
 
 $('save-password').onclick=async()=>{
