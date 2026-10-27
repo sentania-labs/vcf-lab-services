@@ -4529,14 +4529,12 @@ class ApiTokenTests(unittest.TestCase):
             (expires - datetime.now(timezone.utc)).total_seconds(), 30 * 86400, delta=60
         )
 
-    def test_a_token_needs_a_sane_label_and_the_count_is_capped(self):
+    def test_a_token_needs_a_sane_label(self):
         self.sign_in_as()
         for label in ("", "   ", None, 5, "x" * 81, "two\nlines"):
             with self.subTest(label=label):
                 self.assertEqual(self.create(label).status_code, 400)
-        for _ in range(self.module.API_TOKEN_MAX_PER_PERSON):
-            self.assertEqual(self.create().status_code, 201)
-        self.assertEqual(self.create().status_code, 409)
+        self.assertEqual(self.create().status_code, 201)
 
     def test_people_see_and_revoke_only_their_own_tokens(self):
         self.sign_in_as("user-1", "jdoe")

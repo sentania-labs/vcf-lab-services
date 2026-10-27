@@ -381,7 +381,7 @@ above are in place. The owner login is not a person and cannot hold tokens.
 - Use a token as `Authorization: Bearer vcfs_...` on console API calls, for
   example `curl -H "Authorization: Bearer $TOKEN" https://vcf.example.test/admin/api/status`.
   A token cannot create, list or revoke tokens; that takes a signed-in browser
-  session. A person holds at most 25 live tokens.
+  session.
 - Revoke a token from the same panel. A token also stops at its expiry, when
   SSO is turned off or pointed at another issuer, and when its holder is refused
   at a later sign-in because they are no longer in an owner group: that

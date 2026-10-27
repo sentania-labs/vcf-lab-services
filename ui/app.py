@@ -1002,7 +1002,6 @@ def _sso_session():
 API_TOKEN_PREFIX = "vcfs_"
 API_TOKEN_DEFAULT_DAYS = 30
 API_TOKEN_MAX_DAYS = 365
-API_TOKEN_MAX_PER_PERSON = 25
 API_TOKEN_LABEL_MAX = 80
 
 
@@ -2839,14 +2838,6 @@ def create_api_token():
     try:
         with _api_token_lock():
             tokens = _read_api_tokens()
-            held = [
-                e for e in tokens
-                if _same_person(e, person["iss"], person["sub"]) and _api_token_live(e, now)
-            ]
-            if len(held) >= API_TOKEN_MAX_PER_PERSON:
-                return jsonify(
-                    {"error": f"revoke a token first: the limit is {API_TOKEN_MAX_PER_PERSON}"}
-                ), 409
             _write_api_tokens([*tokens, entry])
     except OSError:
         return jsonify({"error": "the API token could not be saved"}), 500
