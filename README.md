@@ -362,8 +362,6 @@ How it behaves:
   the owner login as `user="vcf" kind="owner"`, a person as their provider name
   and `subject` (issuer and subject). Tokens and the client secret are never
   logged.
-- Service-account tokens for scripts are not built yet; they are tracked in the
-  follow-up work on issue #57.
 
 ### Personal API tokens
 
@@ -391,6 +389,45 @@ above are in place. The owner login is not a person and cannot hold tokens.
 - Tokens never open the depot, the SFTP account or the patch store, and the
   depot's basic-auth check ignores them. The audit log marks token requests
   with `kind="token"` and the token's id, never its value.
+
+### Service accounts
+
+For scripts that should not run as a person, create a service account under
+**Service accounts** on the Setup tab. It is a machine identity with a role and
+no link to anyone's sign-in, so it keeps working when people come and go. There
+are no settings to add, and it works whether or not SSO is configured. The
+owner login and anyone signed in through the provider can manage service
+accounts; no token can.
+
+- An account has a name and a role. `owner` is the only role the console has,
+  so every account gets full console access. Accounts live in
+  `service-accounts.json` next to `api-tokens.json` (or the path in the
+  `SERVICE_ACCOUNTS_FILE` environment variable); back both up with the other
+  secrets.
+- Issue tokens to an account with a label and a lifetime in days (30 by
+  default, no upper limit). Tokens follow the personal-token rules: the value
+  is shown once, only its SHA-256 hash is kept, and it is used as
+  `Authorization: Bearer vcfs_...`. An account can hold any number of active
+  tokens.
+- To rotate without downtime, issue a new token, switch the script over to it,
+  then revoke the old one.
+- Disabling an account stops every one of its tokens at once; enabling it
+  brings the unexpired ones back. Deleting an account removes it and its
+  tokens. Nothing issued to a person is touched.
+- A service token does not follow group membership. It lives until it expires,
+  is revoked, or its account is disabled or deleted, so revoke the tokens of an
+  account that should no longer have access.
+- Service tokens never open the depot, the SFTP account or the patch store, and
+  the depot's basic-auth check ignores them. The audit log marks their
+  requests with `kind="service"`, the account name and the token's id, never
+  its value. Account and token changes are logged as `service-account-*` and
+  `service-token-*` events.
+
+Example, from a script host:
+
+```bash
+curl -H "Authorization: Bearer $SERVICE_TOKEN" https://vcf.example.test/admin/api/status
+```
 
 ## Sync behavior
 

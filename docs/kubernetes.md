@@ -191,6 +191,11 @@ and is kept across upgrades. The ingress must pass the `Authorization` header
 to `/admin/api/` unchanged; see the
 [README](../README.md#personal-api-tokens) for how they work.
 
+Service accounts need nothing more either: `service-accounts.json` sits beside
+`api-tokens.json` in the same claim and is kept across upgrades. Their tokens
+use the same `Authorization` header, so the ingress rule above covers them; see
+the [README](../README.md#service-accounts).
+
 ## Reverse proxy upload limits
 
 The licensed VCF Download Tool upload is roughly 490 MB. Installing the tool

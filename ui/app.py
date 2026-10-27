@@ -122,6 +122,9 @@ OIDC_CLIENT_SECRET_FILE = Path(
 API_TOKENS_FILE = Path(
     os.environ.get("API_TOKENS_FILE", str(AUTH_FILE.parent / "api-tokens.json"))
 )
+SERVICE_ACCOUNTS_FILE = Path(
+    os.environ.get("SERVICE_ACCOUNTS_FILE", str(AUTH_FILE.parent / "service-accounts.json"))
+)
 CADDY_CA_FILE = Path(
     os.environ.get("CADDY_CA_FILE", "/caddy-data/caddy/pki/authorities/local/root.crt")
 )
@@ -1065,8 +1068,30 @@ def _bearer_token():
     return value
 
 
+def _read_service_accounts():
+    try:
+        document = json.loads(SERVICE_ACCOUNTS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (ValueError, UnicodeError) as exc:
+        raise OSError("the service account store is invalid") from exc
+    accounts = document.get("accounts") if isinstance(document, dict) else None
+    if not isinstance(accounts, list):
+        raise OSError("the service account store schema is invalid")
+    return [entry for entry in accounts if isinstance(entry, dict)]
+
+
+def _write_service_accounts(accounts):
+    _write_secret(
+        SERVICE_ACCOUNTS_FILE,
+        json.dumps({"version": 1, "accounts": accounts}, indent=2) + "\n",
+    )
+
+
 def _token_session():
-    """The token entry behind this request's bearer token, or None."""
+    """The token entry behind this request's bearer token, or None. A service
+    account token carries its account's name and works whether or not SSO is
+    configured; a personal token needs the provider it was issued under."""
     token = _bearer_token()
     if token is None or _auth_doc() is None:
         return None
@@ -1074,28 +1099,53 @@ def _token_session():
         return g.api_token[1]
     entry = None
     config = _oidc_config()
-    if config is not None:
-        digest = _api_token_digest(token)
-        try:
-            stored = _read_api_tokens()
-        except OSError:
-            stored = []
-        now = time.time()
-        for candidate in stored:
-            if (
-                isinstance(candidate.get("hash"), str)
-                and hmac.compare_digest(candidate["hash"].encode(), digest.encode())
-                and _api_token_live(candidate, now)
-                and candidate.get("role") == "owner"
-                and isinstance(candidate.get("sub"), str)
-                and candidate["sub"]
-                and isinstance(candidate.get("iss"), str)
-                and candidate["iss"].rstrip("/") == config["issuer"].rstrip("/")
-            ):
-                entry = candidate
-                break
+    digest = _api_token_digest(token)
+    try:
+        stored = _read_api_tokens()
+    except OSError:
+        stored = []
+    now = time.time()
+    for candidate in stored:
+        if not (
+            isinstance(candidate.get("hash"), str)
+            and hmac.compare_digest(candidate["hash"].encode(), digest.encode())
+            and _api_token_live(candidate, now)
+        ):
+            continue
+        if "account" in candidate:
+            account = _active_service_account(candidate["account"])
+            if account:
+                entry = {**candidate, "accountName": account["name"], "role": account["role"]}
+        elif (
+            config is not None
+            and candidate.get("role") == "owner"
+            and isinstance(candidate.get("sub"), str)
+            and candidate["sub"]
+            and isinstance(candidate.get("iss"), str)
+            and candidate["iss"].rstrip("/") == config["issuer"].rstrip("/")
+        ):
+            entry = candidate
+        break
     g.api_token = (token, entry)
     return entry
+
+
+def _active_service_account(account_id):
+    """A service account that exists, is enabled and holds a role this app
+    knows, or None. A damaged store fails closed."""
+    try:
+        accounts = _read_service_accounts()
+    except OSError:
+        return None
+    for account in accounts:
+        if (
+            account.get("id") == account_id
+            and account.get("disabled") is not True
+            and account.get("role") == "owner"
+            and isinstance(account.get("name"), str)
+        ):
+            return account
+    return None
 
 
 def _revoke_person_tokens(issuer, subject):
@@ -1134,6 +1184,13 @@ def _current_user():
             "subject": f"{identity['iss']}#{identity['sub']}",
         }
     entry = _token_session()
+    if entry and "account" in entry:
+        return {
+            "kind": "service",
+            "name": entry["accountName"],
+            "subject": f"service-account#{entry['account']}",
+            "tokenId": entry.get("id"),
+        }
     if entry:
         return {
             "kind": "token",
@@ -2765,7 +2822,7 @@ def _token_person():
     if user is None or user["kind"] == "owner":
         message = "personal API tokens belong to people who sign in through SSO"
         return None, (jsonify({"error": message}), 403)
-    if user["kind"] == "token":
+    if user["kind"] in {"token", "service"}:
         return None, (
             jsonify({"error": "sign in to the console to manage API tokens"}),
             403,
@@ -2877,6 +2934,229 @@ def revoke_api_token(token_id):
         subject=f"{person['iss']}#{person['sub']}",
         token=token_id,
     )
+    return jsonify({"revoked": token_id})
+
+
+# Service accounts: machine identities for scripts, not tied to a person. Each
+# has a role and any number of tokens, so a new token can go live before the
+# old one is revoked. Disabling the account stops every token at once because
+# each request checks the account, not only the token. Only an owner login or
+# a person signed in through SSO manages them; no token can.
+SERVICE_ACCOUNT_ROLES = ("owner",)
+SERVICE_TOKEN_MAX_DAYS = 36500  # representable dates only; not a policy cap
+SERVICE_ACCOUNT_NAME_MAX = 60
+
+
+def _service_admin():
+    user = _current_user()
+    if user is None or user["kind"] in {"token", "service"}:
+        message = "sign in to the console to manage service accounts"
+        return None, (jsonify({"error": message}), 403)
+    return user, None
+
+
+def _service_account_view(account, tokens, now):
+    return {
+        "id": account["id"],
+        "name": account["name"],
+        "role": account.get("role"),
+        "disabled": account.get("disabled") is True,
+        "createdAt": account.get("createdAt"),
+        "createdBy": account.get("createdBy"),
+        "tokens": [
+            _token_view(entry)
+            for entry in tokens
+            if entry.get("account") == account["id"] and _api_token_live(entry, now)
+        ],
+    }
+
+
+def _service_failure(message, status=500):
+    response = jsonify({"error": message})
+    response.status_code = status
+    return response
+
+
+def _service_audit(event, user, **fields):
+    subject = user["subject"] or user["name"]
+    _audit(event, user=user["name"], subject=subject, **fields)
+
+
+@app.get("/api/service-accounts")
+def list_service_accounts():
+    _, error = _service_admin()
+    if error:
+        return error
+    try:
+        accounts = _read_service_accounts()
+        tokens = _read_api_tokens()
+    except OSError:
+        return _service_failure("the service account store could not be read")
+    now = time.time()
+    response = jsonify(
+        {
+            "accounts": [_service_account_view(a, tokens, now) for a in accounts if "id" in a],
+            "roles": list(SERVICE_ACCOUNT_ROLES),
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/service-accounts")
+def create_service_account():
+    user, error = _service_admin()
+    if error:
+        return error
+    body = request.get_json(silent=True) or {}
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return _service_failure("give the service account a name", 400)
+    name = name.strip()
+    if len(name) > SERVICE_ACCOUNT_NAME_MAX or any(ord(c) < 32 for c in name):
+        return _service_failure(
+            f"the name must be one line of at most {SERVICE_ACCOUNT_NAME_MAX} characters", 400
+        )
+    role = body.get("role", "owner")
+    if role not in SERVICE_ACCOUNT_ROLES:
+        return _service_failure(f"the role must be one of: {', '.join(SERVICE_ACCOUNT_ROLES)}", 400)
+    account = {
+        "id": secrets.token_hex(8),
+        "name": name,
+        "role": role,
+        "disabled": False,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "createdBy": user["subject"] or user["name"],
+    }
+    try:
+        with _api_token_lock():
+            accounts = _read_service_accounts()
+            if any(str(a.get("name", "")).casefold() == name.casefold() for a in accounts):
+                return _service_failure("a service account with that name already exists", 409)
+            _write_service_accounts([*accounts, account])
+    except OSError:
+        return _service_failure("the service account could not be saved")
+    _service_audit("service-account-created", user, account=account["id"], name=name, role=role)
+    response = jsonify(_service_account_view(account, [], time.time()))
+    response.status_code = 201
+    return response
+
+
+def _service_account_update(account_id, change, audit_event, user):
+    """Apply `change` to one account under the lock; None when it is gone."""
+    try:
+        with _api_token_lock():
+            accounts = _read_service_accounts()
+            account = next((a for a in accounts if a.get("id") == account_id), None)
+            if account is None:
+                return _service_failure("no such service account", 404)
+            result = change(account, accounts)
+            if isinstance(result, tuple):
+                return result
+    except OSError:
+        return _service_failure("the service account could not be saved")
+    _service_audit(audit_event, user, account=account_id)
+    return jsonify({"account": account_id})
+
+
+@app.patch("/api/service-accounts/<account_id>")
+def set_service_account_state(account_id):
+    user, error = _service_admin()
+    if error:
+        return error
+    disabled = (request.get_json(silent=True) or {}).get("disabled")
+    if type(disabled) is not bool:
+        return _service_failure("send disabled as true or false", 400)
+
+    def change(account, accounts):
+        account["disabled"] = disabled
+        _write_service_accounts(accounts)
+
+    return _service_account_update(
+        account_id, change, "service-account-disabled" if disabled else "service-account-enabled", user
+    )
+
+
+@app.delete("/api/service-accounts/<account_id>")
+def delete_service_account(account_id):
+    user, error = _service_admin()
+    if error:
+        return error
+
+    def change(account, accounts):
+        _write_service_accounts([a for a in accounts if a is not account])
+        tokens = _read_api_tokens()
+        kept = [t for t in tokens if t.get("account") != account_id]
+        if len(kept) != len(tokens):
+            _write_api_tokens(kept)
+
+    return _service_account_update(account_id, change, "service-account-deleted", user)
+
+
+@app.post("/api/service-accounts/<account_id>/tokens")
+def create_service_token(account_id):
+    user, error = _service_admin()
+    if error:
+        return error
+    body = request.get_json(silent=True) or {}
+    label = body.get("label")
+    if not isinstance(label, str) or not label.strip():
+        return _service_failure("give the token a label", 400)
+    label = label.strip()
+    if len(label) > API_TOKEN_LABEL_MAX or any(ord(c) < 32 for c in label):
+        return _service_failure(
+            f"the label must be one line of at most {API_TOKEN_LABEL_MAX} characters", 400
+        )
+    days = body.get("expiresInDays", API_TOKEN_DEFAULT_DAYS)
+    if type(days) is not int or not 1 <= days <= SERVICE_TOKEN_MAX_DAYS:
+        return _service_failure("expiry must be a whole number of days, at least 1", 400)
+    token = API_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    now = time.time()
+    entry = {
+        "id": secrets.token_hex(8),
+        "hash": _api_token_digest(token),
+        "account": account_id,
+        "label": label,
+        "createdAt": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        "expiresAt": now + days * 86400,
+    }
+    try:
+        with _api_token_lock():
+            account = next(
+                (a for a in _read_service_accounts() if a.get("id") == account_id), None
+            )
+            if account is None:
+                return _service_failure("no such service account", 404)
+            if account.get("disabled") is True:
+                return _service_failure("enable the service account before issuing tokens", 409)
+            _write_api_tokens([*_read_api_tokens(), entry])
+    except OSError:
+        return _service_failure("the API token could not be saved")
+    _service_audit("service-token-created", user, account=account_id, token=entry["id"], label=label)
+    response = jsonify({**_token_view(entry), "token": token})
+    response.status_code = 201
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.delete("/api/service-accounts/<account_id>/tokens/<token_id>")
+def revoke_service_token(account_id, token_id):
+    user, error = _service_admin()
+    if error:
+        return error
+    try:
+        with _api_token_lock():
+            tokens = _read_api_tokens()
+            kept = [
+                t for t in tokens
+                if not (t.get("id") == token_id and t.get("account") == account_id)
+            ]
+            if len(kept) == len(tokens):
+                return _service_failure("no such token", 404)
+            _write_api_tokens(kept)
+    except OSError:
+        return _service_failure("the API token could not be revoked")
+    _service_audit("service-token-revoked", user, account=account_id, token=token_id)
     return jsonify({"revoked": token_id})
 
 
