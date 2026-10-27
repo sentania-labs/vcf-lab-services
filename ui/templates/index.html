@@ -216,6 +216,25 @@
       </div>
       <div class="row" style="margin-top:12px"><button id="save-password">Change shared password</button><span id="password-flash" class="muted"></span></div>
     </section>
+
+    <section class="panel" id="tokens-panel" hidden>
+      <h2>API tokens</h2>
+      <p class="muted">A token lets a script call this console's API as you, with your access. It cannot open the depot or SFTP. A token stops working when it expires, when you revoke it, or when you are refused at a later SSO sign-in.</p>
+      <div class="formgrid">
+        <div class="field"><label for="token-label">Label</label><input id="token-label" maxlength="80" placeholder="what the token is for"></div>
+        <div class="field"><label for="token-days">Expires after (days)</label><input id="token-days" type="number" min="1" max="365" value="30"></div>
+      </div>
+      <div class="row" style="margin-top:12px"><button id="token-create">Create token</button><span id="token-flash" class="muted" role="status" aria-live="polite"></span></div>
+      <div id="token-new" class="notice success" hidden style="margin-top:12px">
+        <p>Copy this token now. It is shown once and cannot be retrieved later.</p>
+        <p><code id="token-value" style="word-break:break-all"></code></p>
+        <p class="help">Send it as <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+      </div>
+      <div class="tablewrap" style="margin-top:12px"><table>
+        <thead><tr><th>Label</th><th>Created</th><th>Expires</th><th></th></tr></thead>
+        <tbody id="token-list"><tr><td colspan="4" class="muted">No tokens yet.</td></tr></tbody>
+      </table></div>
+    </section>
   </div>
 
   <div class="tabpanel" id="tab-sync" hidden>
@@ -634,6 +653,17 @@ async function refreshIdentity() {
   populateIdentity(data);
 }
 
+async function loadTokens() {
+  const panel=$('tokens-panel');
+  const personal=bootstrap?.user?.kind === 'sso';
+  panel.hidden=!personal;
+  if (!personal) return;
+  try {
+    const rows=(await api('api/tokens')).tokens;
+    $('token-list').innerHTML=rows.length ? rows.map(token=>`<tr><td>${esc(token.label)}</td><td>${esc(fmt(token.createdAt))}</td><td>${esc(fmt(token.expiresAt))}</td><td><button class="ghost" data-revoke="${esc(token.id)}">Revoke</button></td></tr>`).join('') : '<tr><td colspan="4" class="muted">No tokens yet.</td></tr>';
+  } catch(error) { $('token-flash').textContent=error.message; }
+}
+
 function populateSetup(data) {
   bootstrap=data;
   showVersionProblem(data.versionProblem);
@@ -641,6 +671,7 @@ function populateSetup(data) {
   $('signed-in').textContent=`Signed in as ${data.user?.name || settings.username}`; $('logout').hidden=false;
   $('setup').hidden=false; $('ready').hidden=!data.setupComplete; $('finish-setup').hidden=data.setupComplete;
   populateIdentity(data);
+  loadTokens();
   $('adopt-machine-id').disabled=data.tool.installed;
   $('adopt-machine-id-button').disabled=data.tool.installed;
   $('vcfdt-flash').textContent=data.tool.installed ? (data.tool.versionVerified ? `${data.tool.version} is ready` : 'Installed; the reported version could not be verified') : 'Not installed';
@@ -945,6 +976,26 @@ function renderCatalog(catalog){
   $('version-meta').textContent=messages.join('; ');
   $('version-meta').className=attempt.status==='failed'||attempt.status==='interrupted'?'help error':'muted';
 }
+
+$('token-create').onclick=async()=>{
+  const button=$('token-create'); const flash=$('token-flash');
+  button.disabled=true; flash.textContent='Creating';
+  try {
+    const result=await api('api/tokens',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:$('token-label').value,expiresInDays:Number($('token-days').value)})});
+    $('token-value').textContent=result.token; $('token-new').hidden=false; $('token-label').value='';
+    flash.textContent=`Created; expires ${fmt(result.expiresAt)}`;
+    await loadTokens();
+  } catch(error) { flash.textContent=error.message; }
+  finally { button.disabled=false; }
+};
+
+$('token-list').onclick=async event=>{
+  const id=event.target.dataset?.revoke; if (!id) return;
+  event.target.disabled=true; $('token-flash').textContent='Revoking';
+  try { await api(`api/tokens/${encodeURIComponent(id)}`,{method:'DELETE'}); $('token-new').hidden=true; $('token-value').textContent=''; $('token-flash').textContent='Token revoked'; }
+  catch(error) { $('token-flash').textContent=error.message; }
+  await loadTokens();
+};
 
 $('save-password').onclick=async()=>{
   $('password-flash').textContent='Saving';

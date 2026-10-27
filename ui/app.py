@@ -39,6 +39,7 @@ from authlib.oidc.core import CodeIDToken
 from croniter import croniter
 from flask import (
     Flask,
+    g,
     jsonify,
     redirect,
     render_template,
@@ -117,6 +118,9 @@ FLASK_SECRET_FILE = Path(
 )
 OIDC_CLIENT_SECRET_FILE = Path(
     os.environ.get("OIDC_CLIENT_SECRET_FILE", f"{SECRETS_ROOT}/oidc-client-secret")
+)
+API_TOKENS_FILE = Path(
+    os.environ.get("API_TOKENS_FILE", str(AUTH_FILE.parent / "api-tokens.json"))
 )
 CADDY_CA_FILE = Path(
     os.environ.get("CADDY_CA_FILE", "/caddy-data/caddy/pki/authorities/local/root.crt")
@@ -990,6 +994,134 @@ def _sso_session():
     return identity
 
 
+# Personal API tokens. A token is a bearer credential for the console's own
+# API, issued to a person who signed in through the provider, and it acts as
+# that person. Only the SHA-256 of a token is stored: tokens are random, so a
+# fast hash is enough, and the plain value is shown once at creation. Tokens
+# never open the depot, SFTP or the patch store.
+API_TOKEN_PREFIX = "vcfs_"
+API_TOKEN_DEFAULT_DAYS = 30
+API_TOKEN_MAX_DAYS = 365
+API_TOKEN_MAX_PER_PERSON = 25
+API_TOKEN_LABEL_MAX = 80
+
+
+@contextmanager
+def _api_token_lock():
+    API_TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = API_TOKENS_FILE.parent / ".api-tokens.lock"
+    lock_handle = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(lock_handle, 0o600)
+    lock_file = os.fdopen(lock_handle, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+    finally:
+        lock_file.close()
+
+
+def _read_api_tokens():
+    try:
+        document = json.loads(API_TOKENS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (ValueError, UnicodeError) as exc:
+        raise OSError("the API token store is invalid") from exc
+    tokens = document.get("tokens") if isinstance(document, dict) else None
+    if not isinstance(tokens, list):
+        raise OSError("the API token store schema is invalid")
+    return [entry for entry in tokens if isinstance(entry, dict)]
+
+
+def _write_api_tokens(tokens):
+    now = time.time()
+    live = [entry for entry in tokens if _api_token_live(entry, now)]
+    _write_secret(
+        API_TOKENS_FILE, json.dumps({"version": 1, "tokens": live}, indent=2) + "\n"
+    )
+
+
+def _api_token_live(entry, now):
+    expires = entry.get("expiresAt")
+    return isinstance(expires, (int, float)) and expires > now
+
+
+def _api_token_digest(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _same_person(entry, issuer, subject):
+    return (
+        isinstance(entry.get("iss"), str)
+        and entry["iss"].rstrip("/") == issuer.rstrip("/")
+        and entry.get("sub") == subject
+    )
+
+
+def _bearer_token():
+    scheme, _, value = request.headers.get("Authorization", "").partition(" ")
+    value = value.strip()
+    if scheme.lower() != "bearer" or not value.startswith(API_TOKEN_PREFIX):
+        return None
+    return value
+
+
+def _token_session():
+    """The token entry behind this request's bearer token, or None."""
+    token = _bearer_token()
+    if token is None or _auth_doc() is None:
+        return None
+    if "api_token" in g and g.api_token[0] == token:
+        return g.api_token[1]
+    entry = None
+    config = _oidc_config()
+    if config is not None:
+        digest = _api_token_digest(token)
+        try:
+            stored = _read_api_tokens()
+        except OSError:
+            stored = []
+        now = time.time()
+        for candidate in stored:
+            if (
+                isinstance(candidate.get("hash"), str)
+                and hmac.compare_digest(candidate["hash"].encode(), digest.encode())
+                and _api_token_live(candidate, now)
+                and candidate.get("role") == "owner"
+                and isinstance(candidate.get("sub"), str)
+                and candidate["sub"]
+                and isinstance(candidate.get("iss"), str)
+                and candidate["iss"].rstrip("/") == config["issuer"].rstrip("/")
+            ):
+                entry = candidate
+                break
+    g.api_token = (token, entry)
+    return entry
+
+
+def _revoke_person_tokens(issuer, subject):
+    """Drop every token a person holds; returns how many went."""
+    with _api_token_lock():
+        tokens = _read_api_tokens()
+        kept = [entry for entry in tokens if not _same_person(entry, issuer, subject)]
+        if len(kept) != len(tokens):
+            _write_api_tokens(kept)
+        return len(tokens) - len(kept)
+
+
+def _refresh_person_tokens(issuer, subject, name, role):
+    """A sign-in re-checked the person: keep their tokens at the role and name
+    they have now."""
+    with _api_token_lock():
+        tokens = _read_api_tokens()
+        mine = [entry for entry in tokens if _same_person(entry, issuer, subject)]
+        for entry in mine:
+            entry["name"] = name
+            entry["role"] = role
+        if mine:
+            _write_api_tokens(tokens)
+
+
 def _current_user():
     """Who the signed-in session belongs to, for display and the audit log."""
     auth = _auth_doc()
@@ -1001,6 +1133,14 @@ def _current_user():
             "kind": "sso",
             "name": identity.get("name") or identity["sub"],
             "subject": f"{identity['iss']}#{identity['sub']}",
+        }
+    entry = _token_session()
+    if entry:
+        return {
+            "kind": "token",
+            "name": entry.get("name") or entry["sub"],
+            "subject": f"{entry['iss']}#{entry['sub']}",
+            "tokenId": entry.get("id"),
         }
     return None
 
@@ -2402,11 +2542,13 @@ def audit_console_changes(response):
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         user = _current_user()
         if user:
+            extra = {"token": user["tokenId"]} if user.get("tokenId") else {}
             _audit(
                 "change",
                 user=user["name"],
                 kind=user["kind"],
                 subject=user["subject"],
+                **extra,
                 request=f"{request.method} {request.path}",
                 status=response.status_code,
             )
@@ -2582,14 +2724,24 @@ def oidc_callback():
     roles = _oidc_roles(config, person["groups"])
     session.clear()
     if not roles:
+        revoked = 0
+        try:
+            revoked = _revoke_person_tokens(person["iss"], person["sub"])
+        except OSError as exc:
+            print(f"[oidc] the person's API tokens could not be revoked: {exc}", flush=True)
         _audit(
             "sign-in refused",
             user=person["name"],
             subject=f"{person['iss']}#{person['sub']}",
+            tokensRevoked=revoked,
         )
         return _oidc_return("refused")
     if _auth_doc() is None:
         return _oidc_return("unclaimed")
+    try:
+        _refresh_person_tokens(person["iss"], person["sub"], person["name"], roles[0])
+    except OSError as exc:
+        print(f"[oidc] the person's API tokens could not be refreshed: {exc}", flush=True)
     session["sso"] = {
         "iss": person["iss"],
         "sub": person["sub"],
@@ -2604,6 +2756,137 @@ def oidc_callback():
         role=roles[0],
     )
     return _oidc_return()
+
+
+def _token_person():
+    """The signed-in person whose tokens a request may manage, or an error
+    response. Only a browser session signed in through the provider qualifies:
+    the owner login is not a person, and a token cannot mint more tokens."""
+    user = _current_user()
+    if user is None or user["kind"] == "owner":
+        message = "personal API tokens belong to people who sign in through SSO"
+        return None, (jsonify({"error": message}), 403)
+    if user["kind"] == "token":
+        return None, (
+            jsonify({"error": "sign in to the console to manage API tokens"}),
+            403,
+        )
+    identity = _sso_session()
+    return {"iss": identity["iss"], "sub": identity["sub"], "name": user["name"]}, None
+
+
+def _token_view(entry):
+    return {
+        "id": entry["id"],
+        "label": entry.get("label", ""),
+        "createdAt": entry.get("createdAt"),
+        "expiresAt": datetime.fromtimestamp(entry["expiresAt"], timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/tokens")
+def list_api_tokens():
+    person, error = _token_person()
+    if error:
+        return error
+    try:
+        tokens = _read_api_tokens()
+    except OSError:
+        return jsonify({"error": "the API token store could not be read"}), 500
+    now = time.time()
+    mine = [
+        _token_view(entry)
+        for entry in tokens
+        if _same_person(entry, person["iss"], person["sub"]) and _api_token_live(entry, now)
+    ]
+    response = jsonify({"tokens": mine})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/tokens")
+def create_api_token():
+    person, error = _token_person()
+    if error:
+        return error
+    body = request.get_json(silent=True) or {}
+    label = body.get("label")
+    if not isinstance(label, str) or not label.strip():
+        return jsonify({"error": "give the token a label"}), 400
+    label = label.strip()
+    if len(label) > API_TOKEN_LABEL_MAX or any(ord(c) < 32 for c in label):
+        return jsonify(
+            {"error": f"the label must be one line of at most {API_TOKEN_LABEL_MAX} characters"}
+        ), 400
+    days = body.get("expiresInDays", API_TOKEN_DEFAULT_DAYS)
+    if type(days) is not int or not 1 <= days <= API_TOKEN_MAX_DAYS:
+        return jsonify(
+            {"error": f"expiry must be a whole number of days from 1 to {API_TOKEN_MAX_DAYS}"}
+        ), 400
+    token = API_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    now = time.time()
+    entry = {
+        "id": secrets.token_hex(8),
+        "hash": _api_token_digest(token),
+        "iss": person["iss"],
+        "sub": person["sub"],
+        "name": person["name"],
+        "role": "owner",
+        "label": label,
+        "createdAt": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        "expiresAt": now + days * 86400,
+    }
+    try:
+        with _api_token_lock():
+            tokens = _read_api_tokens()
+            held = [
+                e for e in tokens
+                if _same_person(e, person["iss"], person["sub"]) and _api_token_live(e, now)
+            ]
+            if len(held) >= API_TOKEN_MAX_PER_PERSON:
+                return jsonify(
+                    {"error": f"revoke a token first: the limit is {API_TOKEN_MAX_PER_PERSON}"}
+                ), 409
+            _write_api_tokens([*tokens, entry])
+    except OSError:
+        return jsonify({"error": "the API token could not be saved"}), 500
+    _audit(
+        "token-created",
+        user=person["name"],
+        subject=f"{person['iss']}#{person['sub']}",
+        token=entry["id"],
+        label=label,
+    )
+    response = jsonify({**_token_view(entry), "token": token})
+    response.status_code = 201
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.delete("/api/tokens/<token_id>")
+def revoke_api_token(token_id):
+    person, error = _token_person()
+    if error:
+        return error
+    try:
+        with _api_token_lock():
+            tokens = _read_api_tokens()
+            kept = [
+                e for e in tokens
+                if not (e.get("id") == token_id and _same_person(e, person["iss"], person["sub"]))
+            ]
+            if len(kept) == len(tokens):
+                return jsonify({"error": "no such token"}), 404
+            _write_api_tokens(kept)
+    except OSError:
+        return jsonify({"error": "the API token could not be revoked"}), 500
+    _audit(
+        "token-revoked",
+        user=person["name"],
+        subject=f"{person['iss']}#{person['sub']}",
+        token=token_id,
+    )
+    return jsonify({"revoked": token_id})
 
 
 @app.get("/api/bootstrap")

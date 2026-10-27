@@ -2536,6 +2536,9 @@ Log file: /opt/vmware/vcfdt/log/vdt.log
                 "current-password",
                 "new-password",
                 "save-password",
+                "token-label",
+                "token-days",
+                "token-create",
             },
             "tab-sync": {"sync-btn"},
             "tab-depot": {
@@ -4403,6 +4406,256 @@ class OidcSignInTests(unittest.TestCase):
         }})
         self.assertIsNone(local["assigned"])
         self.assertTrue(local["reloaded"])
+
+
+class ApiTokenTests(unittest.TestCase):
+    """Personal API tokens, issued to people who signed in through a mocked
+    provider."""
+
+    setUp_console = UiApiTests.setUp
+    load_app = UiApiTests.load_app
+    get = UiApiTests.get
+    post = UiApiTests.post
+    delete = UiApiTests.delete
+    claim = UiApiTests.claim
+    setUpClass = classmethod(OidcSignInTests.setUpClass.__func__)
+    tearDownClass = classmethod(OidcSignInTests.tearDownClass.__func__)
+    configure = OidcSignInTests.configure
+    start_login = OidcSignInTests.start_login
+    sign_in = OidcSignInTests.sign_in
+
+    PASSWORD = "a strong test password"
+
+    def setUp(self):
+        self.setUp_console()
+        self.idp.codes.clear()
+        self.idp.metadata_overrides = {}
+        self.idp.metadata_status = 200
+        self.idp.userinfo = None
+        self.secret_file = self.secrets / "oidc-client-secret"
+        self.secret_file.write_text(MockIdp.CLIENT_SECRET + "\n")
+        self.module.OIDC_CLIENT_SECRET_FILE = self.secret_file
+        self.configure()
+        self.tokens_file = self.secrets / "api-tokens.json"
+        self.claim()
+        self.post("/api/logout")
+
+    def sign_in_as(self, subject="user-1", name="jdoe", groups=("ops-admins",)):
+        response = self.sign_in(
+            claims={"sub": subject, "preferred_username": name, "groups": list(groups)}
+        )
+        self.assertEqual(response.headers["Location"], "../../")
+        return response
+
+    def create(self, label="ci", **extra):
+        return self.post("/api/tokens", json={"label": label, **extra})
+
+    def bearer(self, token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def as_token(self, token, path="/api/status", method="get"):
+        """Call the console with only the bearer token, no browser session."""
+        other = self.module.app.test_client()
+        return getattr(other, method)(
+            path, base_url="https://localhost", headers=self.bearer(token)
+        )
+
+    def test_a_signed_in_person_creates_lists_and_revokes_their_own_tokens(self):
+        self.sign_in_as()
+        made = self.create("deploy script", expiresInDays=7)
+        self.assertEqual(made.status_code, 201)
+        body = made.get_json()
+        self.assertTrue(body["token"].startswith("vcfs_"))
+        self.assertIn("no-store", made.headers["Cache-Control"])
+        listed = self.get("/api/tokens").get_json()["tokens"]
+        self.assertEqual([t["id"] for t in listed], [body["id"]])
+        self.assertEqual(listed[0]["label"], "deploy script")
+        self.assertNotIn("token", listed[0])
+        self.assertNotIn("hash", listed[0])
+        expires = datetime.fromisoformat(listed[0]["expiresAt"])
+        self.assertAlmostEqual(
+            (expires - datetime.now(timezone.utc)).total_seconds(), 7 * 86400, delta=60
+        )
+        self.assertEqual(self.as_token(body["token"]).status_code, 200)
+        self.assertEqual(self.delete(f"/api/tokens/{body['id']}").status_code, 200)
+        self.assertEqual(self.get("/api/tokens").get_json()["tokens"], [])
+        self.assertEqual(self.as_token(body["token"]).status_code, 401)
+        self.assertEqual(self.delete(f"/api/tokens/{body['id']}").status_code, 404)
+
+    def test_a_token_acts_as_the_person_with_their_role_and_the_audit_log_says_so(self):
+        self.sign_in_as()
+        token = self.create().get_json()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            changed = self.as_token(token["token"], "/api/setup/complete", "post")
+        self.assertEqual(changed.status_code, 409)  # the owner's rights: it got through
+        who = self.as_token(token["token"], "/api/bootstrap").get_json()["user"]
+        self.assertEqual(
+            who,
+            {
+                "kind": "token",
+                "name": "jdoe",
+                "subject": f"{self.idp.issuer}#user-1",
+                "tokenId": token["id"],
+            },
+        )
+        line = next(l for l in output.getvalue().splitlines() if l.startswith("[audit] change"))
+        self.assertIn('user="jdoe"', line)
+        self.assertIn('kind="token"', line)
+        self.assertIn(f'token="{token["id"]}"', line)
+        self.assertNotIn(token["token"], output.getvalue())
+
+    def test_only_the_hash_is_stored_and_the_value_is_shown_once(self):
+        self.sign_in_as()
+        token = self.create().get_json()
+        stored = self.tokens_file.read_text()
+        self.assertNotIn(token["token"], stored)
+        self.assertIn(hashlib.sha256(token["token"].encode()).hexdigest(), stored)
+        self.assertEqual(self.tokens_file.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(token["token"], self.get("/api/tokens").get_data(as_text=True))
+
+    def test_tokens_expire(self):
+        self.sign_in_as()
+        token = self.create(expiresInDays=1).get_json()["token"]
+        self.assertEqual(self.as_token(token).status_code, 200)
+        with mock.patch.object(self.module.time, "time", return_value=time.time() + 86400 + 5):
+            self.assertEqual(self.as_token(token).status_code, 401)
+        for days in (0, -1, 366, 1.5, "7", None, True):
+            with self.subTest(days=days):
+                self.assertEqual(self.create(expiresInDays=days).status_code, 400)
+        default = self.create().get_json()
+        expires = datetime.fromisoformat(default["expiresAt"])
+        self.assertAlmostEqual(
+            (expires - datetime.now(timezone.utc)).total_seconds(), 30 * 86400, delta=60
+        )
+
+    def test_a_token_needs_a_sane_label_and_the_count_is_capped(self):
+        self.sign_in_as()
+        for label in ("", "   ", None, 5, "x" * 81, "two\nlines"):
+            with self.subTest(label=label):
+                self.assertEqual(self.create(label).status_code, 400)
+        for _ in range(self.module.API_TOKEN_MAX_PER_PERSON):
+            self.assertEqual(self.create().status_code, 201)
+        self.assertEqual(self.create().status_code, 409)
+
+    def test_people_see_and_revoke_only_their_own_tokens(self):
+        self.sign_in_as("user-1", "jdoe")
+        mine = self.create("mine").get_json()
+        self.post("/api/logout")
+        self.sign_in_as("user-2", "asmith")
+        theirs = self.create("theirs").get_json()
+        self.assertEqual([t["label"] for t in self.get("/api/tokens").get_json()["tokens"]], ["theirs"])
+        self.assertEqual(self.delete(f"/api/tokens/{mine['id']}").status_code, 404)
+        self.assertEqual(self.as_token(mine["token"]).status_code, 200)
+        self.assertEqual(self.delete(f"/api/tokens/{theirs['id']}").status_code, 200)
+
+    def test_the_owner_login_and_tokens_cannot_manage_tokens(self):
+        owner = self.post("/api/login", json={"username": "vcf", "password": self.PASSWORD})
+        self.assertEqual(owner.status_code, 200)
+        for call in (self.get("/api/tokens"), self.create(), self.delete("/api/tokens/x")):
+            self.assertEqual(call.status_code, 403)
+        self.post("/api/logout")
+        self.assertEqual(self.get("/api/tokens").status_code, 401)
+        self.sign_in_as()
+        token = self.create().get_json()["token"]
+        for method, path in (("get", "/api/tokens"), ("post", "/api/tokens"), ("delete", "/api/tokens/x")):
+            self.assertEqual(self.as_token(token, path, method).status_code, 403)
+
+    def test_a_person_refused_at_a_later_sign_in_loses_their_tokens(self):
+        self.sign_in_as("user-1", "jdoe")
+        gone = [self.create("a").get_json()["token"], self.create("b").get_json()["token"]]
+        self.post("/api/logout")
+        self.sign_in_as("user-2", "asmith")
+        kept = self.create("other").get_json()["token"]
+        self.post("/api/logout")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            refused = self.sign_in(claims={"sub": "user-1", "groups": ["everyone"]})
+        self.assertEqual(refused.headers["Location"], "../../?sso_error=refused")
+        self.assertIn("tokensRevoked=2", output.getvalue())
+        for token in gone:
+            self.assertEqual(self.as_token(token).status_code, 401)
+        self.assertEqual(self.as_token(kept).status_code, 200)
+        self.sign_in_as("user-1", "jdoe")
+        self.assertEqual(self.get("/api/tokens").get_json()["tokens"], [])
+
+    def test_tokens_stop_when_sso_is_turned_off_or_pointed_elsewhere(self):
+        self.sign_in_as()
+        token = self.create().get_json()["token"]
+        self.configure(OIDC_OWNER_GROUPS=None)
+        self.assertEqual(self.as_token(token).status_code, 401)
+        self.configure()
+        self.assertEqual(self.as_token(token).status_code, 200)
+        self.configure(OIDC_ISSUER="http://127.0.0.1:9")
+        self.assertEqual(self.as_token(token).status_code, 401)
+
+    def test_a_sign_in_keeps_the_name_on_the_tokens_current(self):
+        self.sign_in_as("user-1", "jdoe")
+        token = self.create().get_json()["token"]
+        self.post("/api/logout")
+        self.sign_in_as("user-1", "jane")
+        self.assertEqual(self.as_token(token, "/api/bootstrap").get_json()["user"]["name"], "jane")
+
+    def test_malformed_unknown_and_wrong_scheme_tokens_are_refused(self):
+        self.sign_in_as()
+        token = self.create().get_json()["token"]
+        other = self.module.app.test_client()
+        for header in (
+            "Bearer vcfs_nope", f"Bearer {token[:-1]}", f"Basic {token}", token,
+            "Bearer ", f"Bearer {token[len('vcfs_'):]}", "Bearer",
+        ):
+            with self.subTest(header=header):
+                response = other.get(
+                    "/api/status", base_url="https://localhost",
+                    headers={"Authorization": header},
+                )
+                self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            self.as_token(token.replace("vcfs_", "VCFS_", 1)).status_code, 401
+        )
+        self.assertEqual(
+            other.get(
+                "/api/status", base_url="https://localhost",
+                headers={"Authorization": f"bearer {token}"},
+            ).status_code,
+            200,
+        )
+
+    def test_a_damaged_token_store_fails_closed(self):
+        self.sign_in_as()
+        token = self.create().get_json()["token"]
+        self.tokens_file.write_text("{not json")
+        self.assertEqual(self.as_token(token).status_code, 401)
+        self.assertEqual(self.get("/api/tokens").status_code, 500)
+
+    def test_tokens_never_open_the_depot_sftp_or_the_unclaimed_console(self):
+        self.sign_in_as()
+        token = self.create().get_json()["token"]
+        other = self.module.app.test_client()
+        check = other.get("/auth/check", base_url="https://localhost", headers=self.bearer(token))
+        self.assertEqual(check.status_code, 401)
+        basic = base64.b64encode(f"vcf:{token}".encode()).decode()
+        check = other.get("/auth/check", base_url="https://localhost", headers={"Authorization": f"Basic {basic}"})
+        self.assertEqual(check.status_code, 401)
+        # The shared password, and so the SFTP account, are untouched by tokens.
+        self.assertEqual((self.secrets / "sftp-password").read_text(), self.PASSWORD + "\n")
+
+    def test_with_sso_unset_the_token_routes_are_closed_and_the_console_is_unchanged(self):
+        self.sign_in_as()
+        token = self.create().get_json()["token"]
+        self.configure(OIDC_ISSUER=None, OIDC_CLIENT_ID=None, OIDC_REDIRECT_URI=None, OIDC_OWNER_GROUPS=None)
+        self.assertEqual(self.as_token(token).status_code, 401)
+        self.assertEqual(self.get("/api/tokens").status_code, 401)
+        owner = self.post("/api/login", json={"username": "vcf", "password": self.PASSWORD})
+        self.assertEqual(owner.status_code, 200)
+        self.assertEqual(self.get("/api/tokens").status_code, 403)
+
+    def test_the_console_offers_the_token_panel_only_in_a_sso_session(self):
+        markup = self.get("/").get_data(as_text=True)
+        attributes = parse_element_attributes(markup)
+        self.assertIn("hidden", attributes["tokens-panel"])
+        for control in ("token-label", "token-days", "token-create", "token-value", "token-list"):
+            self.assertIn(control, attributes)
 
 
 class BootstrapVersionTests(unittest.TestCase):

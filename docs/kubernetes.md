@@ -185,6 +185,12 @@ like the other private files. Both claims are preserved across upgrades, so the
 settings and the secret survive them. The ingress must keep passing the
 `/admin/api/oidc/callback` query string and `Set-Cookie` headers unchanged.
 
+Personal API tokens need nothing more: the hashed token store,
+`api-tokens.json`, lives beside `auth.json` in the same `secrets-state` claim
+and is kept across upgrades. The ingress must pass the `Authorization` header
+to `/admin/api/` unchanged; see the
+[README](../README.md#personal-api-tokens) for how they work.
+
 ## Reverse proxy upload limits
 
 The licensed VCF Download Tool upload is roughly 490 MB. Installing the tool
