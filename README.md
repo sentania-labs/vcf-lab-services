@@ -362,8 +362,35 @@ How it behaves:
   the owner login as `user="vcf" kind="owner"`, a person as their provider name
   and `subject` (issuer and subject). Tokens and the client secret are never
   logged.
-- Not yet built: personal API tokens and service-account tokens for scripts,
-  tracked in the follow-up work on issue #57.
+- Service-account tokens for scripts are not built yet; they are tracked in the
+  follow-up work on issue #57.
+
+### Personal API tokens
+
+A person who signed in through the provider can create tokens for the console's
+own API (the `/admin/api/...` routes) from **API tokens** on the Setup tab. A
+token acts as that person with the access their groups gave them at their last
+sign-in. There are no settings to add: the panel appears once the settings
+above are in place. The owner login is not a person and cannot hold tokens.
+
+- Create a token with a label and a lifetime of 1 to 365 days (30 by default).
+  The value is shown once; the console keeps only its SHA-256 hash, in
+  `api-tokens.json` next to `auth.json` in the secrets volume (or the path in
+  the `API_TOKENS_FILE` environment variable). Back that file up with the other
+  secrets if you want tokens to survive a restore.
+- Use a token as `Authorization: Bearer vcfs_...` on console API calls, for
+  example `curl -H "Authorization: Bearer $TOKEN" https://vcf.example.test/admin/api/status`.
+  A token cannot create, list or revoke tokens; that takes a signed-in browser
+  session.
+- Revoke a token from the same panel. A token also stops at its expiry, when
+  SSO is turned off or pointed at another issuer, and when its holder is refused
+  at a later sign-in because they are no longer in an owner group: that
+  sign-in deletes all their tokens. Until they try to sign in again, removing
+  someone from the group does not stop their existing tokens, so revoke the
+  tokens or switch SSO off if you need an immediate stop.
+- Tokens never open the depot, the SFTP account or the patch store, and the
+  depot's basic-auth check ignores them. The audit log marks token requests
+  with `kind="token"` and the token's id, never its value.
 
 ## Sync behavior
 
