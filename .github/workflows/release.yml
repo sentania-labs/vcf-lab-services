@@ -158,16 +158,18 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Validate release tag
-        run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - name: Create GitHub release
+        uses: sentania-labs/.github/.github/actions/tag-to-release@v1
+        with:
+          tag: ${{ github.ref_name }}
+          github-token: ${{ github.token }}
 
       - name: Package installer entry point
         run: |
           image_root="ghcr.io/${GITHUB_REPOSITORY,,}"
           ./scripts/package-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/release" "$image_root"
 
-      - name: Create or update GitHub release
+      - name: Attach release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/publish-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/release"
